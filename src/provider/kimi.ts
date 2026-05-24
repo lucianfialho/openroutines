@@ -109,7 +109,7 @@ export const makeKimiProvider = (config: KimiConfig) => {
 
       const choice = response.choices[0];
       if (!choice) {
-        return yield* Effect.fail(new KimiError("No completion choice returned"));
+        return yield* Effect.fail(new KimiError({ message: "No completion choice returned" }));
       }
 
       const usage: TokenUsage = {
