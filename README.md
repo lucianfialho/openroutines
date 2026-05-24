@@ -23,7 +23,11 @@ cd openroutines
 cp .env.example .env
 # Edit .env with your KIMI_API_KEY and GITHUB_TOKEN
 
-# 3. Run
+# 3. Run tests
+npm install
+npm test
+
+# 4. Run with Docker Compose
 docker-compose up
 ```
 
@@ -32,20 +36,36 @@ docker-compose up
 ```
 Trigger Layer (cron / GitHub webhook / API)
        ↓
-Scheduler / Queue (BullMQ + Redis)
+Scheduler / Queue (BullMQ + Redis — issue #8)
        ↓
-Execution Engine (Effect v4 runtime)
+Execution Engine (Effect v3 runtime)
        ↓
 Provider (Kimi K2.6) + Connectors (CLI) + Gates (human QA)
        ↓
-Persistence (PostgreSQL)
+Persistence (PostgreSQL — issue #7)
 ```
 
-## Project Status
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
 
-🚧 **Early development** — bootstrapping the core engine.
+## What's Working
 
-See [open issues](https://github.com/lucianfialho/openroutines/issues) for what's being built.
+| Feature | Status |
+|---------|--------|
+| Kimi K2.6 Provider | ✅ Streaming, retry, token tracking |
+| Execution Engine | ✅ Routine resolution, skill loading, prompt building |
+| Cron Scheduler | ✅ `node-cron` with timezone support |
+| GitHub Webhook | ✅ HMAC-SHA256 verification |
+| GitHub Connector | ✅ `gh issue/pr` commands |
+| Zod Schema Validation | ✅ Strict YAML validation |
+| Quality Gates | ✅ Manual approval, security review |
+| CI/CD | ✅ GitHub Actions (test + type-check + Docker) |
+| PostgreSQL Persistence | ✅ Migrations + upsert |
+
+See [open issues](https://github.com/lucianfialho/openroutines/issues) for what's next.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
