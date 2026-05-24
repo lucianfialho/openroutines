@@ -1,15 +1,11 @@
-import { Schema } from "@effect/schema";
+export interface CronTrigger {
+  type: "schedule";
+  cron: string;
+}
 
-export const CronTrigger = Schema.Struct({
-  type: Schema.Literal("schedule"),
-  cron: Schema.String,
-});
+export interface GitHubTrigger {
+  type: "github";
+  events: string[];
+}
 
-export const GitHubTrigger = Schema.Struct({
-  type: Schema.Literal("github"),
-  events: Schema.Array(Schema.String),
-});
-
-export const Trigger = Schema.Union(CronTrigger, GitHubTrigger);
-
-export type Trigger = typeof Trigger.Type;
+export type Trigger = CronTrigger | GitHubTrigger;

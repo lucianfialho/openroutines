@@ -17,11 +17,12 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
     fetchIssue: (number: number) =>
       Effect.gen(function* () {
         yield* Effect.log(`[GitHub] Fetching issue #${number}`);
+        void config;
         // TODO: exec gh issue view ${number} --json ...
         return { number, title: "TODO", body: "TODO" };
       }),
 
-    createPullRequest: (branch: string, title: string, body: string) =>
+    createPullRequest: (_branch: string, title: string, _body: string) =>
       Effect.gen(function* () {
         yield* Effect.log(`[GitHub] Creating PR: ${title}`);
         // TODO: exec gh pr create ...
