@@ -1,0 +1,13 @@
+id: daily-pr-review
+triggers:
+  - type: schedule
+    cron: "0 9 * * 1-5"
+  - type: github
+    events: [pull_request.opened]
+pipeline:
+  skill: solve-issue
+environment:
+  network: { mode: trusted }
+connectors:
+  - name: github
+    source: .gates/connectors/github/connector.yaml

@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://openroutines:openroutines@postgres:5432/openroutines
+      - REDIS_URL=redis://redis:6379
+      - KIMI_API_KEY=${KIMI_API_KEY}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./routines:/app/routines:ro
+      - ./.gates:/app/.gates:ro
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: openroutines
+      POSTGRES_PASSWORD: openroutines
+      POSTGRES_DB: openroutines
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres_data:
+  redis_data:
