@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/**/*.ts",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/webhooks/github",
+      "dest": "/api/webhooks/github.ts"
+    },
+    {
+      "src": "/cron/(?<routineId>[^/]+)",
+      "dest": "/api/cron/[routineId].ts?routineId=$routineId"
+    },
+    {
+      "src": "/health",
+      "dest": "/api/health.ts"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/daily-pr-review",
+      "schedule": "0 9 * * 1-5"
+    }
+  ]
+}
