@@ -1,0 +1,11 @@
+id: issue-to-pr
+triggers:
+  - type: github
+    events: [issues.opened]
+pipeline:
+  skill: solve-issue
+environment:
+  network: { mode: trusted }
+connectors:
+  - name: github
+    source: .gates/connectors/github/connector.yaml
