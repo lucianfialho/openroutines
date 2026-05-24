@@ -8,15 +8,10 @@ import { Effect } from "effect";
 import { randomUUID } from "crypto";
 import type { Routine } from "../routine/types.js";
 import type { Skill } from "../skill/types.js";
-import {
-  EngineError,
-  type ExecutionResult,
-  type TriggerEvent,
-} from "./types.js";
-import type {
-  CompletionRequest,
-  CompletionResponse,
-} from "../provider/types.js";
+import { resolveRoutine, type TriggerEvent } from "../routine/matcher.js";
+import { loadSkill } from "../skill/loader.js";
+import { EngineError, type ExecutionResult } from "./types.js";
+import type { CompletionRequest, CompletionResponse } from "../provider/types.js";
 import type { ExecutionRecord, ExecutionRepository } from "../persistence/types.js";
 
 export interface ProviderAdapter {
@@ -30,58 +25,13 @@ export interface EngineConfig {
   skillsDir: string;
   provider: ProviderAdapter;
   repository: ExecutionRepository;
+  /** Injected for testability. Defaults to crypto.randomUUID. */
+  generateId?: () => string;
 }
 
 export const makeEngine = (config: EngineConfig) => {
-  const { routines, provider, repository } = config;
-
-  const resolveRoutine = (
-    event: TriggerEvent
-  ): Effect.Effect<Routine, EngineError> =>
-    Effect.gen(function* () {
-      const matches = routines.filter((r) =>
-        r.triggers.some((t) => {
-          if (t.type !== event.type) return false;
-          if (t.type === "github" && t.events && Array.isArray(t.events)) {
-            const payload = event.payload as { event?: string } | undefined;
-            const eventName = payload?.event;
-            if (!eventName) return true;
-            return t.events.includes(eventName);
-          }
-          return true;
-        })
-      );
-
-      if (matches.length === 0) {
-        return yield* Effect.fail(
-          new EngineError(`No routine matches trigger type: ${event.type}`)
-        );
-      }
-      if (matches.length > 1) {
-        return yield* Effect.fail(
-          new EngineError(
-            `Ambiguous trigger: ${matches.length} routines match type ${event.type}`
-          )
-        );
-      }
-      return matches[0];
-    });
-
-  const loadSkill = (
-    skillName: string
-  ): Effect.Effect<Skill, EngineError> =>
-    Effect.gen(function* () {
-      const { loadSkill: loadSkillFile } = yield* Effect.tryPromise({
-        try: () => import("../skill/loader.js"),
-        catch: (err) => new EngineError("Failed to import skill loader", err),
-      });
-
-      return yield* Effect.try({
-        try: () => loadSkillFile(config.skillsDir, skillName),
-        catch: (err) =>
-          new EngineError(`Failed to load skill '${skillName}'`, err),
-      });
-    });
+  const { routines, skillsDir, provider, repository } = config;
+  const generateId = config.generateId ?? randomUUID;
 
   const persistState = (
     record: ExecutionRecord
@@ -96,22 +46,40 @@ export const makeEngine = (config: EngineConfig) => {
 
   const execute = (
     event: TriggerEvent
-  ): Effect.Effect<ExecutionResult, EngineError> =>
-    Effect.gen(function* () {
-      const executionId = randomUUID();
-      const startedAt = new Date();
+  ): Effect.Effect<ExecutionResult, never> => {
+    const startedAt = new Date();
+    const executionId = generateId();
 
+    const run = Effect.gen(function* () {
       yield* Effect.log(`[Engine] Execution ${executionId} started`);
 
       // 1. Resolve routine
-      const routine = yield* resolveRoutine(event);
+      const resolution = resolveRoutine(routines, event);
+      if ("error" in resolution) {
+        const message =
+          resolution.error === "none"
+            ? `No routine matches trigger type: ${event.type}`
+            : `Ambiguous trigger: ${resolution.count} routines match type ${event.type}`;
+        yield* Effect.log(`[Engine] ${message}`);
+        return yield* Effect.fail(new EngineError(message));
+      }
+
+      const routine = resolution.matched;
       yield* Effect.log(`[Engine] Matched routine: ${routine.id}`);
 
       // 2. Load skill
-      const skill = yield* loadSkill(routine.pipeline.skill);
-      yield* Effect.log(`[Engine] Loaded skill: ${skill.name}`);
+      const skill = yield* Effect.try({
+        try: () => loadSkill(skillsDir, routine.pipeline.skill),
+        catch: (err) =>
+          new EngineError(
+            `Failed to load skill '${routine.pipeline.skill}'`,
+            err
+          ),
+      }).pipe(
+        Effect.tap((s) => Effect.log(`[Engine] Loaded skill: ${s.name}`))
+      );
 
-      // 3. Persist initial state
+      // 3. Persist running state
       yield* persistState({
         id: executionId,
         routineId: routine.id,
@@ -121,22 +89,20 @@ export const makeEngine = (config: EngineConfig) => {
         startedAt,
       });
 
-      // 4. Build prompt from skill + trigger context
-      const prompt = buildPrompt(skill, event);
+      // 4. Build prompt from skill + trigger context + connectors
+      const prompt = buildPrompt(skill, routine, event);
 
       // 5. Run provider
-      const response = yield* provider
-        .complete({
-          prompt,
-          system: `You are an autonomous agent executing the '${skill.name}' skill. Follow the steps carefully.`,
-          temperature: 0.2,
-          maxTokens: 4096,
-        })
-        .pipe(
-          Effect.mapError(
-            (err) => new EngineError("Provider completion failed", err)
-          )
-        );
+      const response = yield* provider.complete({
+        prompt,
+        system: `You are an autonomous agent executing the '${skill.name}' skill. Follow the steps carefully.`,
+        temperature: 0.2,
+        maxTokens: 4096,
+      }).pipe(
+        Effect.mapError(
+          (err) => new EngineError("Provider completion failed", err)
+        )
+      );
 
       yield* Effect.log(
         `[Engine] Provider responded. Tokens: ${response.usage.totalTokens}`
@@ -161,6 +127,7 @@ export const makeEngine = (config: EngineConfig) => {
       yield* Effect.log(`[Engine] Execution ${executionId} completed`);
 
       return {
+        executionId,
         success: true,
         output: response.content,
         usage: response.usage,
@@ -168,28 +135,69 @@ export const makeEngine = (config: EngineConfig) => {
         startedAt,
         finishedAt,
       };
-    }).pipe(
+    });
+
+    return run.pipe(
       Effect.catchAll((error) =>
         Effect.gen(function* () {
           yield* Effect.log(`[Engine] Execution failed: ${error.message}`);
           const finishedAt = new Date();
+
+          // Persist failure if we have a routine context; otherwise skip
+          // to avoid cascading errors from missing routineId/skillName.
+          if (error instanceof EngineError && executionId) {
+            yield* Effect.ignore(
+              persistState({
+                id: executionId,
+                routineId: "unknown",
+                triggerType: event.type,
+                skillName: "unknown",
+                status: "failed",
+                error: error.message,
+                startedAt,
+                finishedAt,
+              })
+            );
+          }
+
           return {
+            executionId,
             success: false,
             output: error.message,
             logs: [error.message],
-            startedAt: new Date(),
+            startedAt,
             finishedAt,
           };
         })
       )
     );
+  };
 
-  return { execute, resolveRoutine, loadSkill };
+  return { execute };
+};
+
+/** Escape user-controlled content to prevent prompt injection. */
+const escapePromptContent = (content: string): string => {
+  // Escape triple backticks that could break markdown fences
+  return content.replace(/```/g, "\\`\\`\\`");
 };
 
 /** Build the execution prompt from skill content + trigger context. */
-const buildPrompt = (skill: Skill, event: TriggerEvent): string => {
-  const context = JSON.stringify(event.payload, null, 2);
+const buildPrompt = (skill: Skill, routine: Routine, event: TriggerEvent): string => {
+  const safePayload = escapePromptContent(
+    JSON.stringify(event.payload, null, 2)
+  );
+
+  const connectorsSection = routine.connectors?.length
+    ? `## Connectors
+
+${routine.connectors
+  .map((c) => `- ${c.name}: ${c.source}`)
+  .join("\n")}
+
+`
+    : "";
+
   return `## Skill: ${skill.name}
 
 ${skill.content}
@@ -199,8 +207,8 @@ ${skill.content}
 Type: ${event.type}
 Payload:
 \`\`\`json
-${context}
+${safePayload}
 \`\`\`
 
-Execute the skill using the provided context.`;
+${connectorsSection}Execute the skill using the provided context.`;
 };

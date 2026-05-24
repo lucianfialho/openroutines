@@ -35,3 +35,18 @@ export const findMatchingRoutines = (
     routine.triggers.some((trigger) => matchesTrigger(trigger, event))
   );
 };
+
+/** Resolve a single routine from a trigger event, or fail if ambiguous/missing. */
+export const resolveRoutine = (
+  routines: Routine[],
+  event: TriggerEvent
+): { matched: Routine } | { error: "none" | "ambiguous"; count: number } => {
+  const matches = findMatchingRoutines(routines, event);
+  if (matches.length === 0) {
+    return { error: "none", count: 0 };
+  }
+  if (matches.length > 1) {
+    return { error: "ambiguous", count: matches.length };
+  }
+  return { matched: matches[0] };
+};

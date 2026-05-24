@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { matchesTrigger, findMatchingRoutines } from "./matcher.js";
+import { matchesTrigger, findMatchingRoutines, resolveRoutine } from "./matcher.js";
 import type { Routine, TriggerEvent } from "./types.js";
 
 const makeRoutine = (id: string, triggers: Routine["triggers"]): Routine => ({
@@ -70,5 +70,40 @@ describe("findMatchingRoutines", () => {
     const event: TriggerEvent = { type: "webhook", payload: {} };
     const matches = findMatchingRoutines(routines, event);
     expect(matches).toHaveLength(0);
+  });
+});
+
+describe("resolveRoutine", () => {
+  const routines: Routine[] = [
+    makeRoutine("r1", [{ type: "api" }]),
+    makeRoutine("r2", [{ type: "github", events: ["pull_request.opened"] }]),
+  ];
+
+  it("should return matched routine when single match", () => {
+    const event: TriggerEvent = { type: "api", payload: {} };
+    const result = resolveRoutine(routines, event);
+    expect("matched" in result).toBe(true);
+    if ("matched" in result) {
+      expect(result.matched.id).toBe("r1");
+    }
+  });
+
+  it("should return error none when no match", () => {
+    const event: TriggerEvent = { type: "webhook", payload: {} };
+    const result = resolveRoutine(routines, event);
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toBe("none");
+    }
+  });
+
+  it("should return error ambiguous when multiple match", () => {
+    const event: TriggerEvent = { type: "api", payload: {} };
+    const result = resolveRoutine([...routines, makeRoutine("r3", [{ type: "api" }])], event);
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toBe("ambiguous");
+      expect(result.count).toBe(2);
+    }
   });
 });
