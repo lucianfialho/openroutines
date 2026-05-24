@@ -10,7 +10,7 @@
  * - Track token usage per execution
  */
 
-import { Effect, Schedule, pipe } from "effect";
+import { Data, Effect, Schedule } from "effect";
 import OpenAI from "openai";
 import type {
   CompletionRequest,
@@ -23,16 +23,15 @@ export interface KimiConfig {
   apiKey: string;
   baseURL?: string;
   model?: string;
+  timeoutMs?: number;
+  retries?: number;
 }
 
-export class KimiError {
-  readonly _tag = "KimiError";
-  constructor(
-    readonly message: string,
-    readonly status?: number,
-    readonly cause?: unknown
-  ) {}
-}
+export class KimiError extends Data.TaggedError("KimiError")<{
+  message: string;
+  status?: number;
+  cause?: unknown;
+}> {}
 
 const DEFAULT_MODEL = "kimi-k2-6";
 const DEFAULT_BASE_URL = "https://api.moonshot.cn/v1";
@@ -52,31 +51,38 @@ const mapError = (err: unknown): KimiError => {
     "status" in err &&
     typeof (err as { status?: number }).status === "number"
   ) {
-    return new KimiError(
-      err instanceof Error ? err.message : String(err),
-      (err as { status: number }).status,
-      err
-    );
+    return new KimiError({
+      message: err instanceof Error ? err.message : String(err),
+      status: (err as { status: number }).status,
+      cause: err,
+    });
   }
   if (err instanceof Error) {
-    return new KimiError(err.message, undefined, err);
+    return new KimiError({ message: err.message, cause: err });
   }
-  return new KimiError(String(err), undefined, err);
+  return new KimiError({ message: String(err) });
 };
 
 /** Check if the error is a rate-limit (429). */
 const isRateLimit = (err: KimiError): boolean => err.status === 429;
 
-/** Retry policy: exponential backoff, max 3 attempts, starting at 1s. */
-const retryPolicy = pipe(
-  Schedule.exponential("1 second"),
-  Schedule.compose(Schedule.recurs(3)),
-  Schedule.whileInput<KimiError>((err) => isRateLimit(err))
-);
+/** Build retry policy from config. */
+const makeRetryPolicy = (retries: number) =>
+  Schedule.compose(
+    Schedule.exponential("1 second"),
+    Schedule.recurs(retries)
+  ).pipe(Schedule.whileInput<KimiError>((err) => isRateLimit(err)));
 
 export const makeKimiProvider = (config: KimiConfig) => {
+  if (!config.apiKey || config.apiKey.trim().length === 0) {
+    throw new Error("KimiConfig.apiKey is required");
+  }
+
   const client = makeClient(config);
   const model = config.model ?? DEFAULT_MODEL;
+  const timeoutMs = config.timeoutMs ?? 30_000;
+  const retries = config.retries ?? 3;
+  const retryPolicy = makeRetryPolicy(retries);
 
   const complete = (request: CompletionRequest): Effect.Effect<CompletionResponse, KimiError> =>
     Effect.gen(function* () {
@@ -84,15 +90,20 @@ export const makeKimiProvider = (config: KimiConfig) => {
 
       const response = yield* Effect.tryPromise({
         try: () =>
-          client.chat.completions.create({
-            model,
-            messages: [
-              ...(request.system ? [{ role: "system" as const, content: request.system }] : []),
-              { role: "user" as const, content: request.prompt },
-            ],
-            temperature: request.temperature ?? 0.2,
-            max_tokens: request.maxTokens ?? 4096,
-          }),
+          Promise.race([
+            client.chat.completions.create({
+              model,
+              messages: [
+                ...(request.system ? [{ role: "system" as const, content: request.system }] : []),
+                { role: "user" as const, content: request.prompt },
+              ],
+              temperature: request.temperature ?? 0.2,
+              max_tokens: request.maxTokens ?? 4096,
+            }),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("Request timeout")), timeoutMs)
+            ),
+          ]),
         catch: mapError,
       }).pipe(Effect.retry(retryPolicy));
 
@@ -127,16 +138,21 @@ export const makeKimiProvider = (config: KimiConfig) => {
 
       const stream = yield* Effect.tryPromise({
         try: () =>
-          client.chat.completions.create({
-            model,
-            messages: [
-              ...(request.system ? [{ role: "system" as const, content: request.system }] : []),
-              { role: "user" as const, content: request.prompt },
-            ],
-            temperature: request.temperature ?? 0.2,
-            max_tokens: request.maxTokens ?? 4096,
-            stream: true,
-          }),
+          Promise.race([
+            client.chat.completions.create({
+              model,
+              messages: [
+                ...(request.system ? [{ role: "system" as const, content: request.system }] : []),
+                { role: "user" as const, content: request.prompt },
+              ],
+              temperature: request.temperature ?? 0.2,
+              max_tokens: request.maxTokens ?? 4096,
+              stream: true,
+            }),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("Request timeout")), timeoutMs)
+            ),
+          ]),
         catch: mapError,
       }).pipe(Effect.retry(retryPolicy));
 
@@ -153,6 +169,9 @@ export const makeKimiProvider = (config: KimiConfig) => {
             if (chunk.usage) {
               totalPromptTokens = chunk.usage.prompt_tokens;
               totalCompletionTokens = chunk.usage.completion_tokens;
+            } else if (delta.length > 0) {
+              // Fallback: estimate completion tokens from content length
+              totalCompletionTokens += Math.ceil(delta.length / 4);
             }
 
             yield {
