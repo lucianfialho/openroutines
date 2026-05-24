@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { CronScheduler } from "./cron.js";
+import { CronScheduler, InvalidCronError } from "./cron.js";
 import type { Routine } from "../routine/types.js";
 import type { Job, JobQueue } from "../queue/types.js";
 
 let mockTasks: Array<{ cron: string; fn: () => void; options: unknown }> = [];
+let mockValidate = vi.fn(() => true);
 
 vi.mock("node-cron", () => ({
   schedule: vi.fn((cron: string, fn: () => void, options: unknown) => {
@@ -14,6 +15,7 @@ vi.mock("node-cron", () => ({
       destroy: vi.fn(),
     };
   }),
+  validate: vi.fn((cron: string) => mockValidate(cron)),
 }));
 
 const makeQueue = (): JobQueue & { jobs: Job[] } => {
@@ -26,6 +28,10 @@ const makeQueue = (): JobQueue & { jobs: Job[] } => {
   };
 };
 
+const makeFailingQueue = (error: Error): JobQueue => ({
+  enqueue: vi.fn(() => Promise.reject(error)),
+});
+
 const makeRoutine = (id: string, cron: string): Routine => ({
   id,
   triggers: [{ type: "schedule", cron }],
@@ -35,6 +41,7 @@ const makeRoutine = (id: string, cron: string): Routine => ({
 describe("CronScheduler", () => {
   beforeEach(() => {
     mockTasks = [];
+    mockValidate = vi.fn(() => true);
     vi.clearAllMocks();
   });
 
@@ -155,5 +162,55 @@ describe("CronScheduler", () => {
     expect(scheduler.runningTasks).toBe(2);
     expect(mockTasks[0].cron).toBe("0 9 * * *");
     expect(mockTasks[1].cron).toBe("0 18 * * *");
+  });
+
+  it("should reject invalid cron expressions", () => {
+    mockValidate = vi.fn(() => false);
+    const queue = makeQueue();
+    const scheduler = new CronScheduler({
+      routines: [makeRoutine("bad", "not-a-cron")],
+      queue,
+    });
+
+    expect(() => scheduler.start()).toThrow(InvalidCronError);
+  });
+
+  it("should reject double start", () => {
+    const queue = makeQueue();
+    const scheduler = new CronScheduler({
+      routines: [makeRoutine("daily", "0 9 * * *")],
+      queue,
+    });
+
+    scheduler.start();
+    expect(() => scheduler.start()).toThrow("already started");
+  });
+
+  it("should survive enqueue errors without crashing", async () => {
+    const queue = makeFailingQueue(new Error("Queue full"));
+    const scheduler = new CronScheduler({
+      routines: [makeRoutine("daily", "0 9 * * *")],
+      queue,
+    });
+
+    scheduler.start();
+    expect(mockTasks).toHaveLength(1);
+
+    // Should not throw
+    await expect(mockTasks[0].fn()).resolves.not.toThrow();
+  });
+
+  it("should use injected generateId", async () => {
+    const queue = makeQueue();
+    const scheduler = new CronScheduler({
+      routines: [makeRoutine("daily", "0 9 * * *")],
+      queue,
+      generateId: () => "fixed-id-123",
+    });
+
+    scheduler.start();
+    await mockTasks[0].fn();
+
+    expect(queue.jobs[0].id).toBe("fixed-id-123");
   });
 });
