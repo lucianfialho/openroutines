@@ -47,6 +47,11 @@ pipeline:
 
   it("should reject missing id", () => {
     expect(() => parseRoutine("triggers:\n  - type: api\npipeline:\n  skill: echo")).toThrow(RoutineParseError);
+    expect(() => parseRoutine("triggers:\n  - type: api\npipeline:\n  skill: echo")).toThrow(/id/);
+  });
+
+  it("should reject empty id", () => {
+    expect(() => parseRoutine("id: ''\ntriggers:\n  - type: api\npipeline:\n  skill: echo")).toThrow(RoutineParseError);
   });
 
   it("should reject missing triggers", () => {
@@ -69,8 +74,20 @@ pipeline:
     expect(() => parseRoutine("id: test\ntriggers:\n  - type: schedule\npipeline:\n  skill: echo")).toThrow(RoutineParseError);
   });
 
+  it("should reject invalid cron expression", () => {
+    expect(() =>
+      parseRoutine("id: test\ntriggers:\n  - type: schedule\n    cron: not-a-cron\npipeline:\n  skill: echo")
+    ).toThrow(/cron/);
+  });
+
   it("should reject github trigger without events", () => {
     expect(() => parseRoutine("id: test\ntriggers:\n  - type: github\npipeline:\n  skill: echo")).toThrow(RoutineParseError);
+  });
+
+  it("should reject github trigger with empty events", () => {
+    expect(() =>
+      parseRoutine("id: test\ntriggers:\n  - type: github\n    events: []\npipeline:\n  skill: echo")
+    ).toThrow(/events/);
   });
 
   it("should reject unknown trigger type", () => {
@@ -88,5 +105,45 @@ connectors:
   - source: foo.yaml
 `;
     expect(() => parseRoutine(yaml)).toThrow(RoutineParseError);
+  });
+
+  it("should reject connector without source", () => {
+    const yaml = `
+id: test
+triggers:
+  - type: api
+pipeline:
+  skill: echo
+connectors:
+  - name: foo
+`;
+    expect(() => parseRoutine(yaml)).toThrow(RoutineParseError);
+  });
+
+  it("should reject invalid environment network mode", () => {
+    const yaml = `
+id: test
+triggers:
+  - type: api
+pipeline:
+  skill: echo
+environment:
+  network: { mode: invalid }
+`;
+    expect(() => parseRoutine(yaml)).toThrow(/network/);
+  });
+
+  it("should accept isolated network mode", () => {
+    const yaml = `
+id: test
+triggers:
+  - type: api
+pipeline:
+  skill: echo
+environment:
+  network: { mode: isolated }
+`;
+    const routine = parseRoutine(yaml);
+    expect(routine.environment?.network?.mode).toBe("isolated");
   });
 });
