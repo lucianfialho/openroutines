@@ -38,10 +38,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const { engine } = await getVercelApp();
 
+    // Compose full event name: e.g. "issues.opened", "pull_request.opened"
+    const action = req.body?.action ?? "";
+    const fullEvent = action ? `${eventType}.${action}` : eventType;
+
     const result = await Effect.runPromise(
       engine.execute({
         type: "github",
-        payload: { event: eventType, body: req.body },
+        payload: { event: fullEvent, body: req.body },
       })
     );
 
