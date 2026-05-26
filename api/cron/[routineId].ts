@@ -1,25 +1,22 @@
 /**
  * Cron Job Trigger — Vercel Serverless Function
- *
- * Called by Vercel Cron Jobs for each scheduled routine.
- * Executes the engine directly for the specified routine.
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { Effect } from "effect";
-import { getVercelApp } from "../../../src/vercel-bootstrap.js";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "GET") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
-  const { routineId } = req.query;
-  if (!routineId || typeof routineId !== "string") {
-    return res.status(400).json({ error: "Missing routineId" });
-  }
-
   try {
+    if (req.method !== "GET") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    const { routineId } = req.query;
+    if (!routineId || typeof routineId !== "string") {
+      return res.status(400).json({ error: "Missing routineId" });
+    }
+
+    const { getVercelApp } = await import("../../../src/vercel-bootstrap.js");
     const { routines, engine } = await getVercelApp();
 
     const routine = routines.find((r) => r.id === routineId);
@@ -47,8 +44,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       executionId: result.executionId,
       output: result.output,
     });
-  } catch (err) {
-    console.error("[Cron] Execution failed:", err);
-    return res.status(500).json({ error: "Execution failed" });
+  } catch (err: any) {
+    console.error("[Cron] Error:", err);
+    return res.status(500).json({
+      error: "Execution failed",
+      message: err?.message ?? String(err),
+      stack: err?.stack ?? undefined,
+    });
   }
 }
