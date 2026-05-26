@@ -14,6 +14,7 @@ export default async function handler(_req: VercelRequest, res: VercelResponse) 
       routines: routines.length,
       provider: process.env.KIMI_API_KEY ? "kimi" : "stub",
       persistence: process.env.DATABASE_URL ? "neon" : "in-memory",
+      version: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ?? "dev",
     });
   } catch (err: any) {
     console.error("[Health] Bootstrap failed:", err);
