@@ -31,8 +31,14 @@ export const makeNeonRepository = (
       join(__dirname, "migrations", "001_executions.sql"),
       "utf-8"
     );
-    // Execute migration SQL directly (Neon serverless supports multi-statement)
-    await sql.query(migrationSql);
+    // Neon serverless does not support multi-statement queries
+    const statements = migrationSql
+      .split(";")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    for (const stmt of statements) {
+      await sql.query(stmt);
+    }
   };
 
   const save = async (record: ExecutionRecord): Promise<void> => {
