@@ -45,12 +45,36 @@ export const makeGitWorktreeTools = (): Tool[] => [
       },
     },
     handler: async (args) => {
-      const branch = String(args.branch);
+      let branch = String(args.branch);
       // Use a persistent directory for worktrees so they survive container restarts
       const worktreeBase = process.env.WORKTREE_BASE || tmpdir();
       const worktreePath = mkdtempSync(resolve(worktreeBase, "or-worktree-"));
 
       try {
+        // Clean up existing branch/worktree with same name to avoid conflicts
+        try {
+          // Check if branch exists and delete it
+          await execAsync(`git branch -D ${branch}`, { cwd: PROJECT_ROOT });
+        } catch {
+          // Branch didn't exist, ignore
+        }
+        // Also check for any existing worktree with this branch and remove it
+        try {
+          const { stdout: worktreeList } = await execAsync("git worktree list --porcelain", { cwd: PROJECT_ROOT });
+          const lines = worktreeList.split("\n");
+          for (let i = 0; i < lines.length; i++) {
+            if (lines[i].startsWith("worktree ")) {
+              const wtPath = lines[i].replace("worktree ", "");
+              const branchLine = lines[i + 2]; // branch <name> or detached
+              if (branchLine && branchLine.includes(branch)) {
+                await execAsync(`git worktree remove ${wtPath} --force`, { cwd: PROJECT_ROOT });
+              }
+            }
+          }
+        } catch {
+          // Ignore worktree cleanup errors
+        }
+
         // Create worktree from current HEAD (has latest local code)
         await execAsync(
           `git worktree add -b ${branch} ${worktreePath} HEAD`,
