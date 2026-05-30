@@ -1,6 +1,6 @@
 id: solve-issue
 name: Solve GitHub Issue
-description: Takes a GitHub issue, implements the fix/feature, verifies, and opens a PR.
+description: Takes a GitHub issue, implements the fix/feature in an isolated git worktree, verifies, and opens a PR.
 
 inputs:
   required:
@@ -20,7 +20,7 @@ states:
       Fetch issue #{{inputs.issue_number}} from {{inputs.repo}}.
       Use the github_fetch_issue tool to get title, body, and labels.
 
-      Emit YAML at {{output_path}}:
+      Use emit_output with content containing the YAML:
         issue:
           number: integer
           title: string
@@ -28,77 +28,107 @@ states:
           labels: [string]
     tools:
       - github_fetch_issue
+      - emit_output
     transitions:
       - to: analyze
 
   analyze:
     description: Analyze issue and plan implementation
     agent_prompt: |
-      You have this issue to solve:
+      Issue title: {{outputs.fetch_issue.issue.title}}
+      Issue body: {{outputs.fetch_issue.issue.body}}
 
-      Title: {{outputs.fetch_issue.issue.title}}
-      Body: {{outputs.fetch_issue.issue.body}}
-      Labels: {{outputs.fetch_issue.issue.labels}}
+      Read src/app.ts to understand the current code.
+      Create a plan to implement EXACTLY what the issue body describes above.
+      Pay special attention to the exact endpoint path, response format, and any specific fields mentioned.
 
-      Analyze the codebase to understand what needs to change.
-      Read relevant files using read_file. List files using run_shell with `ls` or `find`.
-
-      Create a detailed implementation plan.
-
-      Emit YAML at {{output_path}}:
-        plan:
-          summary: string
-          files_to_read: [string]
-          files_to_modify: [string]
-          files_to_create: [string]
-          test_strategy: string
+      Use emit_output:
+        content: |
+          plan:
+            summary: "{{outputs.fetch_issue.issue.title}}"
+            files_to_modify:
+              - src/app.ts
+            files_to_create: []
+            test_strategy: "curl http://localhost:3003<endpoint-path-from-issue>"
     tools:
       - read_file
+      - write_file
+      - emit_output
       - run_shell
+    transitions:
+      - to: create_worktree
+
+  create_worktree:
+    description: Create isolated git worktree for development
+    agent_prompt: |
+      Create a git worktree for isolated development.
+      Use git_create_worktree with branch: feat/issue-{{inputs.issue_number}}-<short-slug>
+      Store the returned path and branch for all subsequent file operations.
+
+      Use emit_output with content containing the YAML:
+        worktree:
+          path: string
+          branch: string
+    tools:
+      - git_create_worktree
+      - write_file
+      - emit_output
     transitions:
       - to: implement
 
   implement:
-    description: Write code changes
+    description: Write code changes in the worktree
     agent_prompt: |
-      Implement the changes according to the plan:
+      Issue title: {{outputs.fetch_issue.issue.title}}
+      Issue body: {{outputs.fetch_issue.issue.body}}
 
-      {{outputs.analyze.plan.summary}}
+      Read src/app.ts from worktree {{outputs.create_worktree.worktree.path}}.
+      Implement EXACTLY what the issue body describes above.
+      Do NOT add any endpoint that is not explicitly requested.
+      Do NOT change any existing functionality.
 
-      Files to modify: {{outputs.analyze.plan.files_to_modify}}
-      Files to create: {{outputs.analyze.plan.files_to_create}}
+      CRITICAL: Use edit_file (NOT write_file) to make changes.
+      Use edit_file with operation type "insert_after" to add the new endpoint after an existing endpoint.
+      For example, insert after:
+        search: "  // Health check"
+        content: |
+          \n  app.get(\"/new-endpoint\", (_req, res) => { ... });\n
 
-      Use write_file to create new files and modify existing ones.
-      Use read_file to check current content before modifying.
-
-      Emit YAML at {{output_path}}:
-        changes:
-          - file: string
-            action: "created" | "modified"
-            description: string
+      Use emit_output:
+        content: |
+          changes:
+            - file: src/app.ts
+              action: modified
+              description: "{{outputs.fetch_issue.issue.title}}"
     tools:
       - read_file
-      - write_file
+      - edit_file
+      - emit_output
       - run_shell
     transitions:
       - to: verify
 
   verify:
-    description: Run tests and lint
+    description: Run tests and lint in the worktree
     agent_prompt: |
-      Verify the changes are correct.
-      Run: `npm test` and `npx tsc --noEmit` using run_shell.
-      If tests fail or there are type errors, fix them using write_file.
+      CRITICAL: Run tests FIRST, then emit output.
 
-      Emit YAML at {{output_path}}:
-        verification:
-          tests_passed: boolean
-          typecheck_passed: boolean
-          lint_passed: boolean
-          notes: string
+      Step 1: Use run_shell with cwd {{outputs.create_worktree.worktree.path}} to run:
+        - npm test -- --run
+        - npx tsc --noEmit
+
+      Step 2: Only AFTER tests run, call emit_output with:
+        content: |
+          verification:
+            tests_passed: true | false
+            typecheck_passed: true | false
+            lint_passed: true | false
+            notes: <any notes>
     tools:
       - run_shell
       - write_file
+      - emit_output
+      - read_file
     transitions:
       - to: pr_gate
 
@@ -106,28 +136,53 @@ states:
     description: Human approval before creating PR
     gate: manual_approval
     transitions:
+      - to: commit_and_push
+
+  commit_and_push:
+    description: Commit changes and push branch from worktree
+    agent_prompt: |
+      CRITICAL: You MUST call git_commit_and_push BEFORE calling emit_output.
+
+      Step 1: Call git_commit_and_push with:
+        - cwd: {{outputs.create_worktree.worktree.path}}
+        - message: "feat: {{outputs.fetch_issue.issue.title}} (closes #{{inputs.issue_number}})"
+
+      Step 2: Only AFTER git_commit_and_push succeeds, call emit_output with:
+        content: |
+          commit:
+            committed: true
+            pushed: true
+            branch: <branch from git_commit_and_push result>
+    tools:
+      - git_commit_and_push
+      - emit_output
+    transitions:
       - to: create_pr
 
   create_pr:
     description: Create pull request on GitHub
     agent_prompt: |
-      Create a pull request for the changes.
-      Use git commands via run_shell to:
-      1. Create branch: feat/issue-{{inputs.issue_number}}-<slug>
-      2. Stage and commit changes
-      3. Push branch
+      CRITICAL: Create the PR FIRST, then remove worktree, then emit output.
 
-      Then use github_create_pull_request to open the PR.
-      Reference issue #{{inputs.issue_number}} in the PR body.
+      Step 1: Call github_create_pull_request with:
+        - branch: {{outputs.commit_and_push.commit.branch}}
+        - title: "feat: {{outputs.fetch_issue.issue.title}}"
+        - body: "Closes #{{inputs.issue_number}}"
 
-      Emit YAML at {{output_path}}:
-        pr:
-          url: string
-          number: integer
-          branch: string
+      Step 2: Call git_remove_worktree with:
+        - cwd: {{outputs.create_worktree.worktree.path}}
+        - branch: {{outputs.create_worktree.worktree.branch}}
+
+      Step 3: Only AFTER both succeed, call emit_output with:
+        content: |
+          pr:
+            url: <url from github_create_pull_request>
+            number: <number from github_create_pull_request>
+            branch: {{outputs.commit_and_push.commit.branch}}
     tools:
-      - run_shell
       - github_create_pull_request
+      - git_remove_worktree
+      - emit_output
     transitions:
       - to: done
 

@@ -26,6 +26,7 @@ import { setupGitHubWebhook } from "./trigger/webhook.js";
 import { ToolRegistry } from "./tool/registry.js";
 import { makeGitHubTools } from "./tool/github-tools.js";
 import { makeFilesystemTools } from "./tool/filesystem-tools.js";
+import { makeGitWorktreeTools } from "./tool/git-worktree-tools.js";
 import { makeGateEngine } from "./gate/gate.js";
 import { makeInMemoryGateRepository } from "./gate/in-memory.js";
 import { makePostgresGateRepository } from "./gate/postgres.js";
@@ -141,6 +142,11 @@ export const createApp = async (config: AppConfig) => {
   toolRegistry.registerMany(fsTools);
   console.log(`[App] Registered ${fsTools.length} filesystem tools`);
 
+  // Git worktree tools (always available for isolated development)
+  const gitWorktreeTools = makeGitWorktreeTools();
+  toolRegistry.registerMany(gitWorktreeTools);
+  console.log(`[App] Registered ${gitWorktreeTools.length} git worktree tools`);
+
   // 5. Setup engine
   const engine = makeEngine({
     routines,
@@ -155,13 +161,24 @@ export const createApp = async (config: AppConfig) => {
 
   // 6. Setup queue (connects to engine)
   const queueHandler = async (job: { id?: string; routineId?: string; trigger: { type: string; payload: unknown; executionId?: string } }) => {
+    // Load state machine context for resumed executions
+    let stateMachineContext: import("./engine/state-machine.js").StateMachineContext | undefined;
+    if (job.trigger.executionId) {
+      const existing = await persistence.findById(job.trigger.executionId);
+      const ctx = existing?.metadata?.stateMachineContext as import("./engine/state-machine.js").StateMachineContext | undefined;
+      if (ctx) {
+        stateMachineContext = ctx;
+        console.log(`[Queue] Resuming execution ${job.trigger.executionId} at state ${ctx.currentState}`);
+      }
+    }
+
     const result = await Effect.runPromise(
       engine.execute({
         type: job.trigger.type,
         payload: job.trigger.payload,
         routineId: job.routineId,
         executionId: job.trigger.executionId,
-      })
+      }, stateMachineContext)
     );
     console.log(`[Queue] Job completed: success=${result.success}`);
 

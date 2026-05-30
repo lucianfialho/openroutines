@@ -84,7 +84,8 @@ export const makeEngine = (config: EngineConfig) => {
   };
 
   const execute = (
-    event: TriggerEvent
+    event: TriggerEvent,
+    stateMachineContext?: import("./state-machine.js").StateMachineContext
   ): Effect.Effect<ExecutionResult, never> => {
     const startedAt = new Date();
     const executionId = event.executionId ?? generateId();
@@ -127,7 +128,7 @@ export const makeEngine = (config: EngineConfig) => {
       );
 
       // Check if this is a resume from a paused state machine before persisting
-      let smContext: import("./state-machine.js").StateMachineContext | undefined;
+      let smContext = stateMachineContext;
       const isResume = event.executionId
         ? (yield* Effect.promise(() => repository.findById(event.executionId!)))?.status === "paused"
         : false;
@@ -149,7 +150,7 @@ export const makeEngine = (config: EngineConfig) => {
       if (skill.format === "state-machine") {
         yield* Effect.log(`[Engine] Running state-machine skill: ${skill.name}`);
 
-        if (event.executionId && isResume) {
+        if (!smContext && event.executionId && isResume) {
           const existing = yield* Effect.promise(() => repository.findById(event.executionId!));
           if (existing?.metadata?.stateMachineContext) {
             smContext = existing.metadata.stateMachineContext as import("./state-machine.js").StateMachineContext;

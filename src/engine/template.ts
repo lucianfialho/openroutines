@@ -12,14 +12,14 @@ export interface TemplateContext {
 }
 
 export const renderTemplate = (template: string, context: TemplateContext): string => {
-  return template.replace(/\{\{(\w+)(?:\.(\w+))?\}\}/g, (_match, key, subKey) => {
+  return template.replace(/\{\{(\w+)(?:\.([\w.]+))?\}\}/g, (_match, key, subKey) => {
     if (key === "inputs" && subKey) {
       const value = context.inputs[subKey];
       return value !== undefined ? String(value) : `{{inputs.${subKey}}}`;
     }
-    if (key === "output" && subKey) {
+    if ((key === "output" || key === "outputs") && subKey) {
       const value = getNestedValue(context.outputs, subKey);
-      return value !== undefined ? String(value) : `{{output.${subKey}}}`;
+      return value !== undefined ? String(value) : `{{${key}.${subKey}}}`;
     }
     if (key === "output_path") {
       return context.output_path ?? ".gates/outputs/output.yaml";

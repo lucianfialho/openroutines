@@ -36,6 +36,7 @@ export interface StateMachineConfig {
 export interface StateMachineContext {
   currentState: string;
   outputs: Record<string, unknown>;
+  inputs?: Record<string, unknown>;
 }
 
 export const runStateMachine = (
@@ -52,8 +53,8 @@ export const runStateMachine = (
     const startedAt = new Date();
     const outputs: Record<string, unknown> = {};
 
-    // Build inputs from event payload
-    const inputs = (event.payload as Record<string, unknown>) ?? {};
+    // Build inputs from event payload, or restore from resumed context
+    const inputs = (context?.inputs as Record<string, unknown>) ?? (event.payload as Record<string, unknown>) ?? {};
 
     yield* Effect.log(`[StateMachine] Starting execution ${executionId} for skill ${skill.id}`);
 
@@ -144,7 +145,16 @@ export const runStateMachine = (
         };
       }
 
-      const outputPath = state.output_path ?? `.gates/outputs/${executionId}/${stateId}.output.yaml`;
+      // Use worktree path as base for output if available
+      const worktreePath = (outputs.create_worktree as { worktree?: { path?: string } } | undefined)?.worktree?.path;
+      const outputPath = state.output_path ?? (worktreePath
+        ? `${worktreePath}/.gates/outputs/${executionId}/${stateId}.output.yaml`
+        : `.gates/outputs/${executionId}/${stateId}.output.yaml`);
+
+      // For template context, use relative path when in worktree so write_file can use cwd
+      const templateOutputPath = worktreePath && outputPath.startsWith(worktreePath)
+        ? outputPath.slice(worktreePath.length + 1) // relative to worktree
+        : outputPath;
 
       // Gate-only state (no agent_prompt, just gate check + transition)
       if (!state.agent_prompt && state.gate) {
@@ -172,8 +182,80 @@ export const runStateMachine = (
         };
       } else {
         // Normal state with agent_prompt — run LLM
-        const context: TemplateContext = { inputs, outputs, output_path: outputPath };
+        // Ensure output directory exists in worktree
+        if (worktreePath && !state.output_path) {
+          const outputDir = `${worktreePath}/.gates/outputs/${executionId}`;
+          try {
+            require("fs").mkdirSync(outputDir, { recursive: true });
+          } catch {
+            // ignore
+          }
+        }
+
+        // Auto-actions for specific states
+        let autoActionSucceeded = false;
+        if (stateId === "commit_and_push" && worktreePath) {
+          const commitHandler = toolRegistry?.getHandler("git_commit_and_push");
+          if (commitHandler) {
+            yield* Effect.log(`[StateMachine] Auto-running git_commit_and_push for state ${stateId}`);
+            try {
+              const commitResult = yield* Effect.promise(() =>
+                commitHandler({ cwd: worktreePath, message: `feat: implement changes (closes #${inputs.issue_number})` })
+              );
+              const parsed = JSON.parse(String(commitResult));
+              if (parsed && !parsed.error) {
+                outputs[stateId] = parsed;
+                autoActionSucceeded = true;
+                yield* Effect.log(`[StateMachine] Auto-commit succeeded: ${JSON.stringify(parsed).slice(0, 100)}`);
+              }
+            } catch (autoErr) {
+              yield* Effect.log(`[StateMachine] Auto-commit failed: ${autoErr}`);
+            }
+          }
+        }
+
+        if (stateId === "create_pr") {
+          const branch = (outputs.commit_and_push as { commit?: { branch?: string } } | undefined)?.commit?.branch;
+          if (branch) {
+            const prHandler = toolRegistry?.getHandler("github_create_pull_request");
+            if (prHandler) {
+              yield* Effect.log(`[StateMachine] Auto-running github_create_pull_request for state ${stateId}`);
+              try {
+                const prResult = yield* Effect.promise(() =>
+                  prHandler({ branch, title: `feat: implement changes`, body: `Closes #${inputs.issue_number}` })
+                );
+                const parsed = JSON.parse(String(prResult));
+                if (parsed && !parsed.error) {
+                  outputs[stateId] = parsed;
+                  autoActionSucceeded = true;
+                  yield* Effect.log(`[StateMachine] Auto-PR succeeded: ${JSON.stringify(parsed).slice(0, 100)}`);
+                }
+              } catch (autoErr) {
+                yield* Effect.log(`[StateMachine] Auto-PR failed: ${autoErr}`);
+              }
+            }
+            if (worktreePath) {
+              const removeHandler = toolRegistry?.getHandler("git_remove_worktree");
+              if (removeHandler) {
+                yield* Effect.log(`[StateMachine] Auto-running git_remove_worktree for state ${stateId}`);
+                try {
+                  yield* Effect.promise(() => removeHandler({ cwd: worktreePath, branch }));
+                  yield* Effect.log(`[StateMachine] Auto-remove worktree succeeded`);
+                } catch (autoErr) {
+                  yield* Effect.log(`[StateMachine] Auto-remove worktree failed: ${autoErr}`);
+                }
+              }
+            }
+          }
+        }
+
+        // Skip LLM loop if auto-actions already succeeded
+        if (autoActionSucceeded) {
+          yield* Effect.log(`[StateMachine] Auto-action succeeded for ${stateId}, skipping LLM loop`);
+        } else {
+        const context: TemplateContext = { inputs, outputs, output_path: templateOutputPath };
         const prompt = renderTemplate(state.agent_prompt, context);
+        yield* Effect.log(`[StateMachine] Rendered prompt for ${stateId}: ${prompt.slice(0, 300)}`);
 
         // Persist state start
         if (runStateRepository) {
@@ -187,12 +269,19 @@ export const runStateMachine = (
           })).pipe(Effect.ignore);
         }
 
+        let stateOutput: unknown;
+
+        if (!autoActionSucceeded) {
         const hasTools = state.tools && state.tools.length > 0 && toolRegistry;
         const maxToolIterations = 10;
+        let lastStructuredToolResult: unknown = undefined;
+        let emittedOutput: string | undefined = undefined;
+        let emitOutputCalled = false;
+        const toolCallCounts = new Map<string, number>();
 
         // Build message history for ReAct loop
         const messages: import("../provider/types.js").Message[] = [
-          { role: "system", content: `You are executing the '${skill.id}' skill. Current state: ${stateId}. Produce structured YAML output.` },
+          { role: "system", content: `You are executing the '${skill.id}' skill. Current state: ${stateId}. Use the provided tools to complete the task. After completing all necessary work, you MUST call emit_output with the final YAML result. Do not call any other tool after emit_output.` },
           { role: "user", content: prompt },
         ];
 
@@ -202,6 +291,14 @@ export const runStateMachine = (
         while (toolIteration < maxToolIterations) {
           toolIteration++;
           yield* Effect.log(`[StateMachine] LLM call ${toolIteration} for state ${stateId}`);
+
+          // Remind agent to return final answer on last iteration
+          if (toolIteration === maxToolIterations) {
+            messages.push({
+              role: "user",
+              content: "You have reached the maximum number of tool calls. Please return your final answer now as YAML. Do not make any more tool calls.",
+            });
+          }
 
           const response = yield* provider
             .complete({
@@ -275,10 +372,54 @@ export const runStateMachine = (
           for (const toolCall of llmResponse.toolCalls) {
             const handler = toolRegistry?.getHandler(toolCall.name);
             if (handler) {
+              // Limit repeated tool calls
+              const currentCount = toolCallCounts.get(toolCall.name) || 0;
+              toolCallCounts.set(toolCall.name, currentCount + 1);
+              yield* Effect.log(`[StateMachine] Tool '${toolCall.name}' call count: ${currentCount + 1}`);
+              if (currentCount >= 2 && toolCall.name !== "emit_output") {
+                const limitMsg = `Tool '${toolCall.name}' has already been used ${currentCount} times. Please call emit_output with your final YAML result or return your final answer.`;
+                yield* Effect.log(`[StateMachine] ${limitMsg}`);
+                messages.push({
+                  role: "tool",
+                  content: JSON.stringify({ error: limitMsg }),
+                  toolCallId: toolCall.id,
+                });
+                continue;
+              }
+
               yield* Effect.log(`[StateMachine] Tool '${toolCall.name}' executing`);
               try {
-                const toolResult = yield* Effect.promise(() => handler(toolCall.arguments));
+                // Auto-inject cwd for filesystem tools when worktree is active
+                const toolArgs: Record<string, unknown> = { ...toolCall.arguments, _executionId: executionId };
+                const filesystemTools = ["read_file", "write_file", "edit_file", "run_shell"];
+                if (worktreePath && filesystemTools.includes(toolCall.name) && !toolArgs.cwd) {
+                  toolArgs.cwd = worktreePath;
+                  yield* Effect.log(`[StateMachine] Auto-injected cwd: ${worktreePath} for ${toolCall.name}`);
+                }
+                const toolResult = yield* Effect.promise(() =>
+                  handler(toolArgs)
+                );
                 yield* Effect.log(`[StateMachine] Tool '${toolCall.name}' completed`);
+                // Capture emitted output from emit_output tool
+                if (toolCall.name === "emit_output" && toolArgs.content) {
+                  emittedOutput = String(toolArgs.content);
+                  emitOutputCalled = true;
+                  yield* Effect.log(`[StateMachine] Captured emitted output for state ${stateId}`);
+                }
+                // Try to capture structured result for auto-output fallback
+                try {
+                  const resultStr = String(toolResult);
+                  yield* Effect.log(`[StateMachine] Tool result from ${toolCall.name}: ${resultStr.slice(0, 100)}`);
+                  const parsed = JSON.parse(resultStr);
+                  if (parsed && typeof parsed === "object" && !parsed.error) {
+                    lastStructuredToolResult = parsed;
+                    yield* Effect.log(`[StateMachine] Captured structured result from ${toolCall.name}`);
+                  } else {
+                    yield* Effect.log(`[StateMachine] Skipped structured result from ${toolCall.name}: has error or not object`);
+                  }
+                } catch (parseErr) {
+                  yield* Effect.log(`[StateMachine] Failed to parse tool result from ${toolCall.name}: ${parseErr}`);
+                }
                 messages.push({
                   role: "tool",
                   content: String(toolResult),
@@ -302,6 +443,12 @@ export const runStateMachine = (
               });
             }
           }
+
+          // If emit_output was called, stop the tool loop and use the emitted output
+          if (emitOutputCalled) {
+            yield* Effect.log(`[StateMachine] emit_output was called, breaking tool loop for state ${stateId}`);
+            break;
+          }
         }
 
         if (!llmResponse) {
@@ -316,31 +463,57 @@ export const runStateMachine = (
         }
 
         // Extract output from final response
-        let stateOutput: unknown;
-        try {
-          stateOutput = extractOutput(llmResponse.content, outputPath);
-        } catch (err) {
-          const errMsg = err instanceof Error ? err.message : String(err);
-          yield* Effect.log(`[StateMachine] Output extraction failed for state ${stateId}: ${errMsg}`);
-          const finishedAt = new Date();
-          yield* persistExecution(repository, {
-            id: executionId,
-            routineId: routine.id,
-            triggerType: event.type,
-            skillName: skill.id,
-            status: "failed",
-            error: `Output extraction failed in state ${stateId}: ${errMsg}`,
-            startedAt,
-            finishedAt,
-          });
-          return {
-            executionId,
-            success: false,
-            output: `Output extraction failed in state ${stateId}: ${errMsg}`,
-            logs: [`Output extraction failed in state ${stateId}: ${errMsg}`],
-            startedAt,
-            finishedAt,
-          };
+        // Priority 1: emitted output from emit_output tool
+        if (emittedOutput !== undefined) {
+          try {
+            stateOutput = extractOutput(emittedOutput);
+            yield* Effect.log(`[StateMachine] Using emitted output for state ${stateId}`);
+          } catch {
+            stateOutput = emittedOutput;
+          }
+        } else {
+          try {
+            stateOutput = extractOutput(llmResponse.content, outputPath);
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            yield* Effect.log(`[StateMachine] Output extraction failed for state ${stateId}: ${errMsg}`);
+            const finishedAt = new Date();
+            yield* persistExecution(repository, {
+              id: executionId,
+              routineId: routine.id,
+              triggerType: event.type,
+              skillName: skill.id,
+              status: "failed",
+              error: `Output extraction failed in state ${stateId}: ${errMsg}`,
+              startedAt,
+              finishedAt,
+            });
+            return {
+              executionId,
+              success: false,
+              output: `Output extraction failed in state ${stateId}: ${errMsg}`,
+              logs: [`Output extraction failed in state ${stateId}: ${errMsg}`],
+              startedAt,
+              finishedAt,
+            };
+          }
+        }
+
+        // Fallback: use structured tool result if no useful output was extracted
+        const isStructured = stateOutput !== null && stateOutput !== undefined && typeof stateOutput === "object";
+        if (!isStructured) {
+          yield* Effect.log(`[StateMachine] Output for state ${stateId} is not structured: ${typeof stateOutput}. Content: ${String(llmResponse.content).slice(0, 200)}`);
+          if (lastStructuredToolResult !== undefined) {
+            yield* Effect.log(`[StateMachine] Using tool result as fallback output for state ${stateId}`);
+            stateOutput = lastStructuredToolResult;
+          }
+        }
+        }
+
+        // If auto-action succeeded, use its output directly
+        if (autoActionSucceeded) {
+          stateOutput = outputs[stateId];
+          yield* Effect.log(`[StateMachine] Using auto-action output for state ${stateId}`);
         }
 
       // Validate against schema
@@ -390,7 +563,9 @@ export const runStateMachine = (
       }
       yield* Effect.log(`[StateMachine] State ${stateId} completed`);
       // Persist state machine context for resume
-      yield* persistStateMachineContext(repository, executionId, stateId, outputs);
+      yield* persistStateMachineContext(repository, executionId, stateId, outputs, inputs);
+      }
+
       }
 
       // Check gate on transition
@@ -411,7 +586,7 @@ export const runStateMachine = (
             output: `Waiting for gate approval: ${state.gate} at state ${stateId}`,
             startedAt,
             metadata: {
-              stateMachineContext: { currentState: stateId, outputs },
+              stateMachineContext: { currentState: stateId, outputs, inputs },
               gateId: gateResult.gateId,
               gateType: state.gate,
               gateStatus: "pending",
@@ -503,7 +678,8 @@ const persistStateMachineContext = (
   repository: ExecutionRepository,
   executionId: string,
   stateId: string,
-  outputs: Record<string, unknown>
+  outputs: Record<string, unknown>,
+  inputs: Record<string, unknown>
 ): Effect.Effect<void, never> =>
   Effect.gen(function* () {
     yield* Effect.tryPromise({
@@ -514,7 +690,7 @@ const persistStateMachineContext = (
             ...existing,
             metadata: {
               ...(existing.metadata || {}),
-              stateMachineContext: { currentState: stateId, outputs },
+              stateMachineContext: { currentState: stateId, outputs, inputs },
             },
           });
         }

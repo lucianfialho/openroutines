@@ -44,11 +44,20 @@ export const createGitHubWebhookHandler = (config: WebhookConfig) => {
     const action = req.body?.action;
     const fullEvent = action ? `${eventType}.${action}` : eventType;
 
+    // Extract skill inputs from webhook payload
+    const issueNumber = req.body?.issue?.number;
+    const repo = req.body?.repository?.full_name;
+
     const job = {
       id: randomUUID(),
       trigger: {
         type: "github" as const,
-        payload: { event: fullEvent, body: req.body },
+        payload: {
+          event: fullEvent,
+          body: req.body,
+          ...(issueNumber !== undefined ? { issue_number: issueNumber } : {}),
+          ...(repo ? { repo } : {}),
+        },
       },
     };
 

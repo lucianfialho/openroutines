@@ -68,14 +68,14 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
       },
     });
 
-  const fetchIssue = (number: number): Effect.Effect<Issue, GitHubCliError> =>
+  const fetchIssue = (number: number): Effect.Effect<{ issue: Issue }, GitHubCliError> =>
     Effect.gen(function* () {
       yield* Effect.log(`[GitHub] Fetching issue #${number}`);
       const output = yield* execGh(
         `issue view ${number} --json number,title,body,state,labels`
       );
       const parsed = JSON.parse(output) as Issue;
-      return parsed;
+      return { issue: parsed };
     });
 
   const listPullRequests = (): Effect.Effect<PullRequest[], GitHubCliError> =>
@@ -109,7 +109,7 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
     branch: string,
     title: string,
     body: string
-  ): Effect.Effect<{ url: string; number: number }, GitHubCliError> =>
+  ): Effect.Effect<{ pr: { url: string; number: number; branch: string } }, GitHubCliError> =>
     Effect.gen(function* () {
       yield* Effect.log(`[GitHub] Creating PR: ${title}`);
       // gh pr create does not support --json; create then list to get details
@@ -123,7 +123,13 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
       if (parsed.length === 0) {
         return yield* Effect.fail(new GitHubCliError("PR created but not found in list"));
       }
-      return parsed[0];
+      return {
+        pr: {
+          url: parsed[0].url,
+          number: parsed[0].number,
+          branch,
+        }
+      };
     });
 
   const addComment = (
