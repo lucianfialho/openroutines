@@ -661,6 +661,11 @@ export const createApp = async (config: AppConfig) => {
 
   // Health check
   app.get("/health", (_req, res) => {
+  // Uptime endpoint
+  app.get("/uptime", (_req, res) => {
+    res.json({ uptime: process.uptime(), startTime: new Date().toISOString() });
+  });
+
     res.json({
       status: "ok",
       routines: routines.length,
