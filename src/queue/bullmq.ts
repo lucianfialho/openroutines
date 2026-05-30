@@ -37,6 +37,7 @@ export const makeBullMqQueue = (config: BullMqConfig): JobQueue & { close: () =>
     },
     {
       connection: { url: config.redisUrl },
+      concurrency: 5,
     }
   );
 
@@ -45,6 +46,16 @@ export const makeBullMqQueue = (config: BullMqConfig): JobQueue & { close: () =>
   });
 
   const enqueue = async (job: Job): Promise<void> => {
+    // Remove existing job with same ID to allow re-enqueue (resumed executions)
+    try {
+      const existing = await queue.getJob(job.id);
+      if (existing) {
+        await existing.remove();
+        console.log(`[BullMQ] Removed existing job ${job.id} before re-enqueue`);
+      }
+    } catch {
+      // Ignore removal errors
+    }
     await queue.add(job.trigger.type, job, {
       jobId: job.id,
     });

@@ -645,9 +645,11 @@ export const runStateMachine = (
 
       // Check gate on transition
       if (gateEngine && state.gate) {
+        yield* Effect.log(`[StateMachine] Checking gate '${state.gate}' for execution ${executionId}`);
         const gateResult = yield* Effect.promise(() =>
           gateEngine.checkGate(executionId, state.gate!)
         );
+        yield* Effect.log(`[StateMachine] Gate check result: approved=${gateResult.approved}, gateId=${(gateResult as any).gateId ?? 'n/a'}`);
         if (!gateResult.approved) {
           yield* Effect.log(
             `[StateMachine] Gate '${state.gate}' blocked at state ${stateId}`
