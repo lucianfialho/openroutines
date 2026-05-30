@@ -38,6 +38,10 @@ states:
       Issue title: {{outputs.fetch_issue.issue.title}}
       Issue body: {{outputs.fetch_issue.issue.body}}
 
+      CRITICAL: You are editing the OpenRoutines source code itself (the repository at {{inputs.repo}}).
+      The files to modify are in the src/ directory (TypeScript source files).
+      Do NOT look for .gates/skills/solve-issue/ files — those are skill definitions, NOT the code to change.
+
       EXPLORE the codebase dynamically. Do NOT assume which files need to change.
       Use run_shell to find relevant files (e.g., find . -name "*.ts" | grep -v node_modules | grep -v dist).
       Read the files that seem most relevant to the issue.
@@ -92,13 +96,15 @@ states:
       Files to create: {{outputs.analyze.plan.files_to_create}}
       Worktree: {{outputs.create_worktree.worktree.path}}
 
+      CRITICAL: You are editing the OpenRoutines SOURCE CODE in the worktree.
+      Use edit_file to make TARGETED changes to existing source files.
+      Do NOT rewrite entire files — only change the specific lines needed.
+      Use write_file ONLY for brand new files.
+
       Read EACH file from the plan (use the worktree path).
       Implement EXACTLY what the issue body describes.
       Do NOT add functionality that is not explicitly requested.
       Do NOT change any existing functionality unless required.
-
-      CRITICAL: Use edit_file (NOT write_file) to make changes to existing files.
-      Use write_file for new files.
 
       Use emit_output:
         content: |
@@ -121,7 +127,10 @@ states:
       Issue title: {{outputs.fetch_issue.issue.title}}
       Issue body: {{outputs.fetch_issue.issue.body}}
 
-      Read EACH file that was modified or created according to the changes output.
+      CRITICAL: Review the SOURCE CODE changes in the worktree.
+      Read EACH file that was modified or created according to the implement changes output.
+      Do NOT look for .gates/skills/ files — those are irrelevant.
+
       Review the changes carefully. Check for:
 
       1. Does the change match EXACTLY what the issue asked for?
@@ -129,6 +138,7 @@ states:
       3. Is there any syntax error or broken logic?
       4. Was any existing functionality accidentally modified?
       5. Are there any duplicate declarations or redundant code?
+      6. If changes is empty but the issue requires changes, REJECT.
 
       If everything looks correct, emit_output:
         content: |
@@ -136,7 +146,7 @@ states:
             verdict: approved
             notes: "Code looks correct"
 
-      If you find problems, emit_output:
+      If you find problems (including no changes when changes are required), emit_output:
         content: |
           review:
             verdict: rejected
