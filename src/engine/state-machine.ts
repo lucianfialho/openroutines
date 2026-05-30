@@ -442,18 +442,21 @@ export const runStateMachine = (
                   yield* Effect.log(`[StateMachine] Captured emitted output for state ${stateId}`);
                 }
                 // Try to capture structured result for auto-output fallback
-                try {
-                  const resultStr = String(toolResult);
-                  yield* Effect.log(`[StateMachine] Tool result from ${toolCall.name}: ${resultStr.slice(0, 100)}`);
-                  const parsed = JSON.parse(resultStr);
-                  if (parsed && typeof parsed === "object" && !parsed.error) {
-                    lastStructuredToolResult = parsed;
-                    yield* Effect.log(`[StateMachine] Captured structured result from ${toolCall.name}`);
-                  } else {
-                    yield* Effect.log(`[StateMachine] Skipped structured result from ${toolCall.name}: has error or not object`);
+                // Skip emit_output — its result {emitted:true, content:"..."} is not useful as fallback
+                if (toolCall.name !== "emit_output") {
+                  try {
+                    const resultStr = String(toolResult);
+                    yield* Effect.log(`[StateMachine] Tool result from ${toolCall.name}: ${resultStr.slice(0, 100)}`);
+                    const parsed = JSON.parse(resultStr);
+                    if (parsed && typeof parsed === "object" && !parsed.error) {
+                      lastStructuredToolResult = parsed;
+                      yield* Effect.log(`[StateMachine] Captured structured result from ${toolCall.name}`);
+                    } else {
+                      yield* Effect.log(`[StateMachine] Skipped structured result from ${toolCall.name}: has error or not object`);
+                    }
+                  } catch (parseErr) {
+                    yield* Effect.log(`[StateMachine] Failed to parse tool result from ${toolCall.name}: ${parseErr}`);
                   }
-                } catch (parseErr) {
-                  yield* Effect.log(`[StateMachine] Failed to parse tool result from ${toolCall.name}: ${parseErr}`);
                 }
                 messages.push({
                   role: "tool",
@@ -580,6 +583,23 @@ export const runStateMachine = (
             startedAt,
             finishedAt,
           };
+        }
+      }
+
+      // Review state: reject if implement produced no changes and issue is not a no-op
+      if (stateId === "review") {
+        const reviewOutput = stateOutput as { verdict?: string; changes?: unknown[] } | undefined;
+        const implementOutput = outputs.implement as { changes?: unknown[] } | undefined;
+        const implementChanges = implementOutput?.changes ?? [];
+        const issueTitle = String(inputs.issue_title ?? "").toLowerCase();
+        const isNoOp = issueTitle.includes("no-op") || issueTitle.includes("noop") || issueTitle.includes("no op");
+        if (Array.isArray(implementChanges) && implementChanges.length === 0 && !isNoOp) {
+          stateOutput = {
+            ...(typeof reviewOutput === "object" && reviewOutput !== null ? reviewOutput : {}),
+            verdict: "rejected",
+            note: "No files were modified by implement. The issue requires changes but none were produced. Please implement the requested changes.",
+          };
+          yield* Effect.log(`[StateMachine] Review rejected: implement produced no changes for a non-no-op issue`);
         }
       }
 

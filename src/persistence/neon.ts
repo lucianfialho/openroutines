@@ -76,7 +76,13 @@ export const makeNeonRepository = (
     return rows.map(rowToRecord);
   };
 
-  return { save, findById, findByRoutine, migrate };
+  const findAll = async (opts?: { limit?: number; offset?: number }): Promise<ExecutionRecord[]> => {
+    const rows =
+      await sql`SELECT * FROM executions ORDER BY started_at DESC LIMIT ${opts?.limit ?? 100} OFFSET ${opts?.offset ?? 0}`;
+    return rows.map(rowToRecord);
+  };
+
+  return { save, findById, findByRoutine, findAll, migrate };
 };
 
 const rowToRecord = (row: Record<string, unknown>): ExecutionRecord => ({

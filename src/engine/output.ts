@@ -1,8 +1,9 @@
 /**
  * Output Extractor
  *
- * Extract structured YAML output from LLM responses.
- * The agent either writes to a file path or returns inline.
+ * Extract structured output from LLM responses.
+ * Supports JSON (preferred) and YAML. The agent either writes to a file
+ * path or returns inline.
  */
 
 import { readFileSync } from "fs";
@@ -20,28 +21,51 @@ export const extractOutput = (content: string, outputPath?: string): unknown => 
   if (outputPath) {
     try {
       const fileContent = readFileSync(outputPath, "utf-8");
-      return parse(fileContent);
+      return parseJsonOrYaml(fileContent);
     } catch {
-      // File doesn't exist or isn't valid YAML, fall through to inline extraction
+      // File doesn't exist or isn't valid, fall through to inline extraction
     }
   }
 
-  // Try extracting inline YAML from markdown code blocks
+  // Try extracting inline from markdown code blocks
+  const jsonBlockMatch = content.match(/```(?:json)?\n([\s\S]*?)```/);
+  if (jsonBlockMatch) {
+    try {
+      return JSON.parse(jsonBlockMatch[1]);
+    } catch {
+      // Fall through
+    }
+  }
+
   const yamlBlockMatch = content.match(/```(?:yaml|yml)?\n([\s\S]*?)```/);
   if (yamlBlockMatch) {
-    try {
-      return parse(yamlBlockMatch[1]);
-    } catch {
-      // Fall through to return raw text
-      return yamlBlockMatch[1];
-    }
+    const parsed = parseJsonOrYaml(yamlBlockMatch[1]);
+    if (parsed !== undefined) return parsed;
   }
 
-  // Try parsing the entire content as YAML
+  // Try parsing the entire content as JSON first, then YAML
+  const parsed = parseJsonOrYaml(content);
+  if (parsed !== undefined) return parsed;
+
+  // Return raw content as string fallback
+  return content;
+};
+
+const parseJsonOrYaml = (text: string): unknown | undefined => {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+
+  // Try JSON first (more robust for agent output)
   try {
-    return parse(content);
+    return JSON.parse(trimmed);
   } catch {
-    // Return raw content as string fallback
-    return content;
+    // Fall through to YAML
+  }
+
+  // Try YAML
+  try {
+    return parse(trimmed);
+  } catch {
+    return undefined;
   }
 };
