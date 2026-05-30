@@ -1,6 +1,6 @@
 id: solve-issue
 name: Solve GitHub Issue
-description: Takes a GitHub issue, implements the fix/feature in an isolated git worktree, verifies, and opens a PR.
+description: Takes a GitHub issue, explores the codebase dynamically, implements the fix/feature in an isolated git worktree, verifies, and opens a PR.
 
 inputs:
   required:
@@ -33,23 +33,28 @@ states:
       - to: analyze
 
   analyze:
-    description: Analyze issue and plan implementation
+    description: Dynamically analyze codebase and discover which files to touch
     agent_prompt: |
       Issue title: {{outputs.fetch_issue.issue.title}}
       Issue body: {{outputs.fetch_issue.issue.body}}
 
-      Read src/app.ts to understand the current code.
-      Create a plan to implement EXACTLY what the issue body describes above.
-      Pay special attention to the exact endpoint path, response format, and any specific fields mentioned.
+      EXPLORE the codebase dynamically. Do NOT assume which files need to change.
+      Use run_shell to find relevant files (e.g., find . -name "*.ts" | grep -v node_modules | grep -v dist).
+      Read the files that seem most relevant to the issue.
+      
+      Create a plan that lists ONLY the files that actually need to be modified or created.
+      Pay special attention to the exact requirements from the issue body.
 
       Use emit_output:
         content: |
           plan:
-            summary: "{{outputs.fetch_issue.issue.title}}"
+            summary: "<brief summary of what needs to be done>"
             files_to_modify:
-              - src/app.ts
-            files_to_create: []
-            test_strategy: "curl http://localhost:3003<endpoint-path-from-issue>"
+              - "<relative path to file 1>"
+              - "<relative path to file 2>"
+            files_to_create:
+              - "<relative path to new file 1>"
+            test_strategy: "<how to verify the change>"
     tools:
       - read_file
       - write_file
@@ -77,36 +82,73 @@ states:
       - to: implement
 
   implement:
-    description: Write code changes in the worktree
+    description: Write code changes in the worktree based on the dynamic plan
     agent_prompt: |
       Issue title: {{outputs.fetch_issue.issue.title}}
       Issue body: {{outputs.fetch_issue.issue.body}}
 
-      Read src/app.ts from worktree {{outputs.create_worktree.worktree.path}}.
-      Implement EXACTLY what the issue body describes above.
-      Do NOT add any endpoint that is not explicitly requested.
-      Do NOT change any existing functionality.
+      Plan summary: {{outputs.analyze.plan.summary}}
+      Files to modify: {{outputs.analyze.plan.files_to_modify}}
+      Files to create: {{outputs.analyze.plan.files_to_create}}
+      Worktree: {{outputs.create_worktree.worktree.path}}
 
-      CRITICAL: Use edit_file (NOT write_file) to make changes.
-      Use edit_file with operation type "insert_after" to add the new endpoint after an existing endpoint.
-      For example, insert after:
-        search: "  // Health check"
-        content: |
-          \n  app.get(\"/new-endpoint\", (_req, res) => { ... });\n
+      Read EACH file from the plan (use the worktree path).
+      Implement EXACTLY what the issue body describes.
+      Do NOT add functionality that is not explicitly requested.
+      Do NOT change any existing functionality unless required.
+
+      CRITICAL: Use edit_file (NOT write_file) to make changes to existing files.
+      Use write_file for new files.
 
       Use emit_output:
         content: |
           changes:
-            - file: src/app.ts
-              action: modified
-              description: "{{outputs.fetch_issue.issue.title}}"
+            - file: "<relative path>"
+              action: modified | created
+              description: "<what changed>"
     tools:
       - read_file
       - edit_file
+      - write_file
       - emit_output
       - run_shell
     transitions:
+      - to: review
+
+  review:
+    description: Review the diff before running tests
+    agent_prompt: |
+      Issue title: {{outputs.fetch_issue.issue.title}}
+      Issue body: {{outputs.fetch_issue.issue.body}}
+
+      Read EACH file that was modified or created according to the changes output.
+      Review the changes carefully. Check for:
+
+      1. Does the change match EXACTLY what the issue asked for?
+      2. Were changes made ONLY to the files listed in the plan?
+      3. Is there any syntax error or broken logic?
+      4. Was any existing functionality accidentally modified?
+      5. Are there any duplicate declarations or redundant code?
+
+      If everything looks correct, emit_output:
+        content: |
+          review:
+            verdict: approved
+            notes: "Code looks correct"
+
+      If you find problems, emit_output:
+        content: |
+          review:
+            verdict: rejected
+            notes: "<describe the problem clearly so the implement agent can fix it>"
+    tools:
+      - read_file
+      - emit_output
+    transitions:
       - to: verify
+        when: output.review.review.verdict == "approved"
+      - to: implement
+        when: output.review.review.verdict == "rejected"
 
   verify:
     description: Run tests and lint in the worktree
