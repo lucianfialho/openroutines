@@ -51,10 +51,10 @@ const makeTestRoutine = (
 });
 
 describe("makeEngine", () => {
-  const skillsDir = ".gates/skills";
+  const skillsDir = "src/engine/test-skills";
 
   it("should execute a routine end-to-end", async () => {
-    const routine = makeTestRoutine("test-routine", "solve-issue", "api");
+    const routine = makeTestRoutine("test-routine", "test-skill", "api");
     const repo = makeMockRepository();
     const provider = mockProvider({
       content: "Implementation complete",
@@ -172,7 +172,7 @@ describe("makeEngine", () => {
   });
 
   it("should fail when provider errors", async () => {
-    const routine = makeTestRoutine("test-routine", "solve-issue", "api");
+    const routine = makeTestRoutine("test-routine", "test-skill", "api");
     const repo = makeMockRepository();
     const provider = mockFailingProvider(new Error("API down"));
 
@@ -222,7 +222,7 @@ describe("makeEngine", () => {
   it("should inject connectors into prompt", async () => {
     const routine = makeTestRoutine(
       "test-routine",
-      "solve-issue",
+      "test-skill",
       "api",
       [{ name: "github", source: ".gates/connectors/github/connector.yaml" }]
     );
@@ -251,7 +251,7 @@ describe("makeEngine", () => {
   });
 
   it("should escape backticks in payload to prevent prompt injection", async () => {
-    const routine = makeTestRoutine("test-routine", "solve-issue", "api");
+    const routine = makeTestRoutine("test-routine", "test-skill", "api");
     const repo = makeMockRepository();
     const provider = mockProvider({
       content: "Safe",
@@ -280,7 +280,7 @@ describe("makeEngine", () => {
   });
 
   it("should pass tools to provider when toolRegistry is configured", async () => {
-    const routine = makeTestRoutine("test-routine", "solve-issue", "api");
+    const routine = makeTestRoutine("test-routine", "test-skill", "api");
     const repo = makeMockRepository();
     const provider = mockProvider({
       content: "Done",
@@ -317,7 +317,7 @@ describe("makeEngine", () => {
   });
 
   it("should execute tool calls and send results back to provider", async () => {
-    const routine = makeTestRoutine("test-routine", "solve-issue", "api");
+    const routine = makeTestRoutine("test-routine", "test-skill", "api");
     const repo = makeMockRepository();
 
     const handler = vi.fn().mockResolvedValue(JSON.stringify({ issue: 42 }));
@@ -380,7 +380,7 @@ describe("makeEngine", () => {
   });
 
   it("should handle unknown tool calls gracefully", async () => {
-    const routine = makeTestRoutine("test-routine", "solve-issue", "api");
+    const routine = makeTestRoutine("test-routine", "test-skill", "api");
     const repo = makeMockRepository();
 
     const provider = vi.fn();
