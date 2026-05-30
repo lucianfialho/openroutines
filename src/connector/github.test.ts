@@ -41,9 +41,9 @@ describe("makeGitHubConnector", () => {
     const connector = makeGitHubConnector(config);
     const result = await Effect.runPromise(connector.fetchIssue(42));
 
-    expect(result.number).toBe(42);
-    expect(result.title).toBe("Bug fix");
-    expect(result.labels).toContain("bug");
+    expect(result.issue.number).toBe(42);
+    expect(result.issue.title).toBe("Bug fix");
+    expect(result.issue.labels).toContain("bug");
   });
 
   it("should list pull requests", async () => {
@@ -66,22 +66,22 @@ describe("makeGitHubConnector", () => {
   });
 
   it("should create a pull request", async () => {
-    mockStdout = JSON.stringify({
+    mockStdout = JSON.stringify([{
       url: "https://github.com/owner/repo/pull/2",
       number: 2,
-    });
+    }]);
 
     const connector = makeGitHubConnector(config);
     const result = await Effect.runPromise(
       connector.createPullRequest("feat/b", "Add feature B", "Description here")
     );
 
-    expect(result.url).toBe("https://github.com/owner/repo/pull/2");
-    expect(result.number).toBe(2);
+    expect(result.pr.url).toBe("https://github.com/owner/repo/pull/2");
+    expect(result.pr.number).toBe(2);
   });
 
   it("should escape quotes in PR body", async () => {
-    mockStdout = JSON.stringify({ url: "https://github.com/owner/repo/pull/3", number: 3 });
+    mockStdout = JSON.stringify([{ url: "https://github.com/owner/repo/pull/3", number: 3 }]);
 
     const connector = makeGitHubConnector(config);
     await Effect.runPromise(
