@@ -377,6 +377,9 @@
           <span class="header__title" id="header-title">Dashboard</span>
         </div>
         <div class="header__right">
+          <button class="header__btn header__btn--secondary" id="autoRefreshBtn" onclick="toggleAutoRefresh()">
+            Auto-refresh: OFF
+          </button>
           <button class="header__btn header__btn--secondary" onclick="refreshCurrent()">
             <i data-lucide="refresh-cw" class="icon icon--sm"></i>
             Refresh
@@ -1295,15 +1298,29 @@
       }
     }
 
+    /* ---------- Auto-refresh (optional, default OFF) ---------- */
+    let autoRefreshInterval = null;
+    function toggleAutoRefresh() {
+      if (autoRefreshInterval) {
+        clearInterval(autoRefreshInterval);
+        autoRefreshInterval = null;
+        document.getElementById('autoRefreshBtn').textContent = 'Auto-refresh: OFF';
+        document.getElementById('autoRefreshBtn').style.color = 'var(--ink-tertiary)';
+      } else {
+        autoRefreshInterval = setInterval(() => {
+          if (currentTab === 'dashboard') loadDashboard();
+          if (currentTab === 'executions') loadExecutions();
+          if (currentTab === 'improvements') loadImprovements();
+          if (currentTab === 'routines') loadRoutines();
+          if (currentTab === 'skills') loadSkills();
+        }, 30000);
+        document.getElementById('autoRefreshBtn').textContent = 'Auto-refresh: ON';
+        document.getElementById('autoRefreshBtn').style.color = 'var(--semantic-success)';
+      }
+    }
+
     /* ---------- Init ---------- */
     showTab('dashboard');
-    setInterval(() => {
-      if (currentTab === 'dashboard') loadDashboard();
-      if (currentTab === 'executions') loadExecutions();
-      if (currentTab === 'improvements') loadImprovements();
-      if (currentTab === 'routines') loadRoutines();
-      if (currentTab === 'skills') loadSkills();
-    }, 5000);
   </script>
 </body>
 </html>

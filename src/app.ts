@@ -35,6 +35,8 @@ import { makePostgresSpanRepository } from "./persistence/span-repo.js";
 import { makeInMemoryFeedbackRepository } from "./persistence/feedback-in-memory.js";
 import { makePostgresFeedbackRepository } from "./persistence/feedback-repo.js";
 import { makePostgresRunRepository } from "./persistence/run-repository.js";
+import { makeInMemoryFileMetadataRepository } from "./persistence/file-metadata-in-memory.js";
+import { makePostgresFileMetadataRepository } from "./persistence/file-metadata-postgres.js";
 import type { SpanRepository, FeedbackRepository } from "./persistence/types.js";
 import { analyzeExecution, aggregateMetrics } from "./observability/analyzer.js";
 import {
@@ -112,6 +114,10 @@ export const createApp = async (config: AppConfig) => {
     ? makePostgresRunRepository(pgPool)
     : undefined;
 
+  const fileMetadataRepository = pgPool
+    ? makePostgresFileMetadataRepository(pgPool)
+    : makeInMemoryFileMetadataRepository();
+
   // 3. Setup provider
   let provider: Parameters<typeof makeEngine>[0]["provider"];
   if (config.kimiApiKey) {
@@ -157,6 +163,7 @@ export const createApp = async (config: AppConfig) => {
     gateEngine,
     spanRepository,
     runStateRepository,
+    fileMetadataRepository,
   });
 
   // 6. Setup queue (connects to engine)
