@@ -127,8 +127,11 @@ states:
       Issue title: {{outputs.fetch_issue.issue.title}}
       Issue body: {{outputs.fetch_issue.issue.body}}
 
-      CRITICAL: Review the SOURCE CODE changes in the worktree.
-      Read EACH file that was modified or created according to the implement changes output.
+      Files modified: {{outputs.implement.changes}}
+      Worktree: {{outputs.create_worktree.worktree.path}}
+
+      CRITICAL: Review the SOURCE CODE changes in the worktree listed above.
+      Read EACH modified file from the worktree to verify the changes.
       Do NOT look for .gates/skills/ files — those are irrelevant.
 
       Review the changes carefully. Check for:
