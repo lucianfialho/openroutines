@@ -108,3 +108,26 @@ export interface SubRunRepository {
   findByParent: (parentExecutionId: string) => Promise<SubRun[]>;
   findByChild: (childExecutionId: string) => Promise<SubRun | undefined>;
 }
+
+export interface FileMetadata {
+  id?: string;
+  path: string;
+  executionId?: string;
+  issueNumber?: number;
+  status: "stub" | "complete";
+  summary?: string;
+  changes?: Array<{ file: string; description: string }>;
+  specialist?: string;
+  decisions?: string[];
+  alternativesRejected?: string[];
+  verifiedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface FileMetadataRepository {
+  save: (meta: FileMetadata) => Promise<void>;
+  findByPath: (path: string) => Promise<FileMetadata | undefined>;
+  findByExecution: (executionId: string) => Promise<FileMetadata[]>;
+  findByIssue: (issueNumber: number) => Promise<FileMetadata[]>;
+}

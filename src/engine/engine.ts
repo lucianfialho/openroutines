@@ -36,6 +36,7 @@ export interface EngineConfig {
   gateEngine?: GateEngine;
   spanRepository?: SpanRepository;
   runStateRepository?: import("../persistence/types.js").RunStateRepository;
+  fileMetadataRepository?: import("../persistence/types.js").FileMetadataRepository;
   /** Injected for testability. Defaults to crypto.randomUUID. */
   generateId?: () => string;
   /** Max tool-use iterations to prevent infinite loops. */
@@ -43,7 +44,7 @@ export interface EngineConfig {
 }
 
 export const makeEngine = (config: EngineConfig) => {
-  const { routines, skillsDir, provider, repository, toolRegistry, gateEngine, spanRepository } = config;
+  const { routines, skillsDir, provider, repository, toolRegistry, gateEngine, spanRepository, fileMetadataRepository } = config;
   const generateId = config.generateId ?? randomUUID;
   const maxToolIterations = config.maxToolIterations ?? 10;
 
@@ -162,6 +163,7 @@ export const makeEngine = (config: EngineConfig) => {
           provider,
           repository,
           runStateRepository: config.runStateRepository,
+          fileMetadataRepository,
           gateEngine,
           toolRegistry,
         })(skill.stateMachine, routine, event, executionId, smContext);

@@ -29,6 +29,7 @@ export interface StateMachineConfig {
   };
   repository: ExecutionRepository;
   runStateRepository?: RunStateRepository;
+  fileMetadataRepository?: import("../persistence/types.js").FileMetadataRepository;
   gateEngine?: GateEngine;
   toolRegistry?: ToolRegistry;
 }
@@ -37,6 +38,7 @@ export interface StateMachineContext {
   currentState: string;
   outputs: Record<string, unknown>;
   inputs?: Record<string, unknown>;
+  implementReviewIterations?: number;
 }
 
 export const runStateMachine = (
@@ -49,7 +51,7 @@ export const runStateMachine = (
   context?: StateMachineContext
 ): Effect.Effect<ExecutionResult, never> =>
   Effect.gen(function* () {
-    const { provider, repository, runStateRepository, gateEngine, toolRegistry } = config;
+    const { provider, repository, runStateRepository, fileMetadataRepository, gateEngine, toolRegistry } = config;
     const startedAt = new Date();
     const outputs: Record<string, unknown> = {};
 
@@ -63,6 +65,8 @@ export const runStateMachine = (
       Object.assign(outputs, context.outputs);
       yield* Effect.log(`[StateMachine] Resuming execution ${executionId} at state ${stateId}`);
     }
+    let implementReviewIterations = context?.implementReviewIterations ?? 0;
+    const maxImplementReviewIterations = 3;
     let iterations = 0;
     const maxIterations = 50;
     let promptTokens = 0;
@@ -195,6 +199,37 @@ export const runStateMachine = (
         // Auto-actions for specific states
         let autoActionSucceeded = false;
         if (stateId === "commit_and_push" && worktreePath) {
+          // Atomic-gates style: verify file metadata exists before committing
+          if (fileMetadataRepository) {
+            const implOutput = outputs.implement as { changes?: Array<{ file: string }> } | undefined;
+            const changedFiles = implOutput?.changes?.map((c) => c.file) ?? [];
+            for (const file of changedFiles) {
+              const meta = yield* Effect.promise(() => fileMetadataRepository.findByPath(file));
+              if (!meta || meta.status !== "complete") {
+                yield* Effect.log(`[StateMachine] Gate-metadata: ${file} lacks complete metadata, blocking commit`);
+                const finishedAt = new Date();
+                yield* persistExecution(repository, {
+                  id: executionId,
+                  routineId: routine.id,
+                  triggerType: event.type,
+                  skillName: skill.id,
+                  status: "failed",
+                  error: `Gate-metadata blocked: ${file} has no complete metadata`,
+                  startedAt,
+                  finishedAt,
+                });
+                return {
+                  executionId,
+                  success: false,
+                  output: `Gate-metadata blocked: ${file} has no complete metadata`,
+                  logs: [`Gate-metadata blocked: ${file} has no complete metadata`],
+                  startedAt,
+                  finishedAt,
+                };
+              }
+            }
+          }
+
           const commitHandler = toolRegistry?.getHandler("git_commit_and_push");
           if (commitHandler) {
             yield* Effect.log(`[StateMachine] Auto-running git_commit_and_push for state ${stateId}`);
@@ -563,7 +598,27 @@ export const runStateMachine = (
       }
       yield* Effect.log(`[StateMachine] State ${stateId} completed`);
       // Persist state machine context for resume
-      yield* persistStateMachineContext(repository, executionId, stateId, outputs, inputs);
+      yield* persistStateMachineContext(repository, executionId, stateId, outputs, inputs, implementReviewIterations);
+
+      // Persist file metadata for atomic-gates audit trail (PostgreSQL version of .metadata/summary.yaml)
+      if (fileMetadataRepository && stateId === "implement") {
+        const changes = (stateOutput as { changes?: Array<{ file: string; description: string }> })?.changes ?? [];
+        for (const change of changes) {
+          yield* Effect.promise(() =>
+            fileMetadataRepository.save({
+              path: change.file,
+              executionId,
+              issueNumber: Number(inputs.issue_number) || undefined,
+              status: "complete",
+              summary: `Modified ${change.file}: ${change.description}`,
+              changes: [change],
+              specialist: "backend",
+              verifiedBy: `execution ${executionId}`,
+            })
+          ).pipe(Effect.ignore);
+        }
+        yield* Effect.log(`[StateMachine] File metadata persisted for ${changes.length} file(s)`);
+      }
       }
 
       }
@@ -586,7 +641,7 @@ export const runStateMachine = (
             output: `Waiting for gate approval: ${state.gate} at state ${stateId}`,
             startedAt,
             metadata: {
-              stateMachineContext: { currentState: stateId, outputs, inputs },
+              stateMachineContext: { currentState: stateId, outputs, inputs, implementReviewIterations },
               gateId: gateResult.gateId,
               gateType: state.gate,
               gateStatus: "pending",
@@ -638,6 +693,35 @@ export const runStateMachine = (
         };
       }
 
+      // Track implement→review loop iterations
+      if (stateId === "review" && nextState === "implement") {
+        implementReviewIterations++;
+        yield* Effect.log(`[StateMachine] implement→review iteration ${implementReviewIterations}/${maxImplementReviewIterations}`);
+        if (implementReviewIterations > maxImplementReviewIterations) {
+          const errMsg = `Max implement→review iterations (${maxImplementReviewIterations}) reached. Manual intervention required.`;
+          yield* Effect.log(`[StateMachine] ${errMsg}`);
+          const finishedAt = new Date();
+          yield* persistExecution(repository, {
+            id: executionId,
+            routineId: routine.id,
+            triggerType: event.type,
+            skillName: skill.id,
+            status: "failed",
+            error: errMsg,
+            startedAt,
+            finishedAt,
+          });
+          return {
+            executionId,
+            success: false,
+            output: errMsg,
+            logs: [errMsg],
+            startedAt,
+            finishedAt,
+          };
+        }
+      }
+
       stateId = nextState;
     }
 
@@ -679,7 +763,8 @@ const persistStateMachineContext = (
   executionId: string,
   stateId: string,
   outputs: Record<string, unknown>,
-  inputs: Record<string, unknown>
+  inputs: Record<string, unknown>,
+  implementReviewIterations: number
 ): Effect.Effect<void, never> =>
   Effect.gen(function* () {
     yield* Effect.tryPromise({
@@ -690,7 +775,7 @@ const persistStateMachineContext = (
             ...existing,
             metadata: {
               ...(existing.metadata || {}),
-              stateMachineContext: { currentState: stateId, outputs, inputs },
+              stateMachineContext: { currentState: stateId, outputs, inputs, implementReviewIterations },
             },
           });
         }
