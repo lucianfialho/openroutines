@@ -112,11 +112,18 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
   ): Effect.Effect<{ url: string; number: number }, GitHubCliError> =>
     Effect.gen(function* () {
       yield* Effect.log(`[GitHub] Creating PR: ${title}`);
-      const output = yield* execGh(
-        `pr create --head ${branch} --title "${escapeShell(title)}" --body "${escapeShell(body)}" --json url,number`
+      // gh pr create does not support --json; create then list to get details
+      yield* execGh(
+        `pr create --head ${branch} --title "${escapeShell(title)}" --body "${escapeShell(body)}"`
       );
-      const parsed = JSON.parse(output) as { url: string; number: number };
-      return parsed;
+      const output = yield* execGh(
+        `pr list --head ${branch} --state open --json number,url`
+      );
+      const parsed = JSON.parse(output) as Array<{ url: string; number: number }>;
+      if (parsed.length === 0) {
+        return yield* Effect.fail(new GitHubCliError("PR created but not found in list"));
+      }
+      return parsed[0];
     });
 
   const addComment = (
