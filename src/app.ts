@@ -119,6 +119,11 @@ export const createApp = async (config: AppConfig) => {
     console.log("[App] GitHub webhook endpoint: POST /webhooks/github");
   }
 
+  // Hello endpoint
+  app.get("/hello", (_req, res) => {
+    res.json({ message: "Hello, world!" });
+  });
+
   // Health check
   app.get("/health", (_req, res) => {
     res.json({
