@@ -18,6 +18,8 @@ COPY package*.json ./
 RUN npm ci --only=production
 
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/src/persistence/migrations ./dist/persistence/migrations
+COPY --from=builder /app/src/gate/migrations ./dist/gate/migrations
 
 EXPOSE 3000
 

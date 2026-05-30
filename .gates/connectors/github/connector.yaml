@@ -1,0 +1,7 @@
+name: github
+description: GitHub CLI connector for repository operations.
+operations:
+  - fetchIssue
+  - listPullRequests
+  - createPullRequest
+  - addComment

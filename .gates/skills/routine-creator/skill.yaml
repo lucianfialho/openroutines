@@ -1,0 +1,63 @@
+id: routine-creator
+name: Routine Creator
+description: Creates a new OpenRoutines routine (and its skill if needed) based on a user goal.
+
+inputs:
+  required:
+    - name: goal
+      type: string
+      description: What the new routine should accomplish
+    - name: routine_name
+      type: string
+      description: kebab-case name for the new routine file
+
+initial_state: analyze
+
+states:
+  analyze:
+    description: Analyze the goal and design the routine + skill
+    agent_prompt: |
+      The user wants to create a new OpenRoutines routine.
+
+      Goal: "{{inputs.goal}}"
+      Routine name: "{{inputs.routine_name}}"
+
+      Design a complete routine YAML and, if needed, a state-machine skill YAML.
+
+      Guidelines:
+      - Routine triggers: use schedule (cron) or api or webhook as appropriate.
+      - Pipeline: use a skill reference.
+      - If the task is complex (multiple steps, gates), design a state-machine skill.
+      - If simple, a markdown skill with a single agent_prompt is enough.
+      - Include realistic gates (manual_approval, test_pass) where appropriate.
+      - Use atomic gates concept: gates block specific state transitions, not just routine start.
+
+      Emit your design as YAML at {{output_path}}:
+        routine_yaml: |
+          <the full routine YAML>
+        skill_yaml: |
+          <the full skill YAML> (or null if using a simple markdown skill)
+        skill_name: <kebab-case skill name>
+        skill_format: "state-machine" | "markdown"
+    transitions:
+      - to: save
+
+  save:
+    description: Save the generated files to disk
+    agent_prompt: |
+      You have designed a routine. Now save it.
+
+      Read the design from the previous state output, then:
+      1. Use write_file to save the routine to "routines/{{inputs.routine_name}}.yaml"
+      2. If skill_yaml is not null, save it to ".gates/skills/<skill_name>/skill.yaml"
+      3. If skill_format is "markdown", save to ".gates/skills/<skill_name>.md"
+
+      Confirm the files were written.
+    tools:
+      - write_file
+      - read_file
+    transitions:
+      - to: done
+
+  done:
+    terminal: true

@@ -1,0 +1,1309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenRoutines — DevOps Intelligence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --primary: #5e6ad2;
+      --primary-hover: #828fff;
+      --primary-focus: #5e69d1;
+      --primary-muted: rgba(94,106,210,0.12);
+      --on-primary: #ffffff;
+      --brand-secure: #7a7fad;
+      --canvas: #010102;
+      --surface-1: #0d0e12;
+      --surface-2: #141519;
+      --surface-3: #1a1b21;
+      --surface-4: #202128;
+      --hairline: #23252a;
+      --hairline-strong: #2a2c33;
+      --hairline-tertiary: #1e2026;
+      --ink: #f7f8f8;
+      --ink-muted: #d0d6e0;
+      --ink-subtle: #8a8f98;
+      --ink-tertiary: #62666d;
+      --semantic-success: #27a644;
+      --semantic-danger: #da3633;
+      --semantic-warning: #d29922;
+      --font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+      --sp-xxs: 4px; --sp-xs: 8px; --sp-sm: 12px; --sp-md: 16px; --sp-lg: 24px; --sp-xl: 32px; --sp-xxl: 48px;
+      --rd-xs: 4px; --rd-sm: 6px; --rd-md: 8px; --rd-lg: 12px; --rd-xl: 16px; --rd-pill: 9999px;
+      --sidebar-width: 240px;
+      --header-height: 56px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+    body {
+      font-family: var(--font-display);
+      background: var(--canvas);
+      color: var(--ink);
+      line-height: 1.5;
+      font-size: 14px;
+      letter-spacing: -0.01px;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--hairline); border-radius: var(--rd-pill); }
+    ::-webkit-scrollbar-thumb:hover { background: var(--hairline-strong); }
+
+    /* ========== APP SHELL ========== */
+    .app { display: flex; height: 100vh; overflow: hidden; }
+
+    /* Sidebar */
+    .sidebar {
+      width: var(--sidebar-width);
+      background: var(--surface-1);
+      border-right: 1px solid var(--hairline);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      z-index: 40;
+    }
+    .sidebar__brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 var(--sp-lg);
+      height: var(--header-height);
+      border-bottom: 1px solid var(--hairline);
+      text-decoration: none;
+    }
+    .sidebar__brand-icon {
+      width: 28px; height: 28px; background: var(--primary);
+      border-radius: var(--rd-md); display: flex; align-items: center; justify-content: center;
+      color: var(--on-primary);
+    }
+    .sidebar__brand-text {
+      font-size: 15px; font-weight: 600; color: var(--ink); letter-spacing: -0.3px;
+    }
+    .sidebar__nav { flex: 1; padding: var(--sp-sm) var(--sp-md); overflow-y: auto; }
+    .sidebar__group { margin-bottom: var(--sp-md); }
+    .sidebar__group-label {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      color: var(--ink-tertiary); letter-spacing: 0.5px;
+      padding: var(--sp-sm) var(--sp-sm) var(--sp-xs);
+    }
+    .sidebar__item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px var(--sp-sm); border-radius: var(--rd-md);
+      color: var(--ink-subtle); font-size: 13px; font-weight: 500;
+      cursor: pointer; transition: all 0.12s ease;
+      text-decoration: none; border: none; background: none; width: 100%;
+    }
+    .sidebar__item:hover { background: var(--surface-2); color: var(--ink-muted); }
+    .sidebar__item.active { background: var(--primary-muted); color: var(--primary); }
+    .sidebar__item .badge-count {
+      margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px;
+      background: var(--primary); color: var(--on-primary); border-radius: var(--rd-pill);
+      font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center;
+    }
+    .sidebar__footer {
+      padding: var(--sp-sm) var(--sp-md);
+      border-top: 1px solid var(--hairline);
+    }
+
+    /* Main */
+    .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+    /* Header */
+    .header {
+      height: var(--header-height);
+      background: rgba(1,1,2,0.85); backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--hairline);
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 var(--sp-lg); flex-shrink: 0; z-index: 30;
+    }
+    .header__left { display: flex; align-items: center; gap: var(--sp-md); }
+    .header__title { font-size: 15px; font-weight: 600; color: var(--ink); }
+    .header__right { display: flex; align-items: center; gap: var(--sp-sm); }
+    .header__btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 6px 12px; border-radius: var(--rd-md); font-size: 13px; font-weight: 500;
+      cursor: pointer; transition: all 0.12s ease; border: none;
+    }
+    .header__btn--primary { background: var(--primary); color: var(--on-primary); }
+    .header__btn--primary:hover { background: var(--primary-hover); }
+    .header__btn--secondary { background: var(--surface-1); color: var(--ink-muted); border: 1px solid var(--hairline); }
+    .header__btn--secondary:hover { border-color: var(--hairline-strong); color: var(--ink); }
+
+    /* Content */
+    .content { flex: 1; overflow-y: auto; padding: var(--sp-lg); }
+
+    /* ========== COMPONENTS ========== */
+    .card {
+      background: var(--surface-1); border: 1px solid var(--hairline);
+      border-radius: var(--rd-lg); overflow: hidden;
+    }
+    .card--flush { background: transparent; border: none; border-radius: 0; }
+    .card__header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: var(--sp-md) var(--sp-lg); min-height: 52px; border-bottom: 1px solid var(--hairline);
+    }
+    .card__header-title { font-size: 14px; font-weight: 600; color: var(--ink); }
+    .card__header-action { font-size: 13px; color: var(--ink-subtle); cursor: pointer; }
+    .card__header-action:hover { color: var(--ink-muted); }
+    .card__body { padding: var(--sp-lg); }
+    .card__body--flush { padding: 0; }
+
+    /* KPI cards */
+    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--sp-md); margin-bottom: var(--sp-lg); }
+    .kpi-card {
+      background: var(--surface-1); border: 1px solid var(--hairline); border-radius: var(--rd-lg);
+      padding: var(--sp-md) var(--sp-lg); display: flex; align-items: flex-start; gap: var(--sp-md);
+    }
+    .kpi-card__icon {
+      width: 36px; height: 36px; border-radius: var(--rd-md);
+      background: var(--surface-2); display: flex; align-items: center; justify-content: center;
+      color: var(--ink-muted); flex-shrink: 0;
+    }
+    .kpi-card__content { flex: 1; min-width: 0; }
+    .kpi-card__label { font-size: 12px; color: var(--ink-subtle); font-weight: 500; margin-bottom: 2px; }
+    .kpi-card__value { font-size: 24px; font-weight: 600; color: var(--ink); letter-spacing: -0.5px; line-height: 1.2; }
+    .kpi-card__sub { font-size: 12px; color: var(--ink-tertiary); margin-top: 2px; }
+
+    /* Charts */
+    .chart-container { position: relative; height: 260px; }
+    .chart-container--sm { height: 200px; }
+
+    /* Tables */
+    .table-wrap { overflow-x: auto; }
+    .table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+    .table th {
+      text-align: left; padding: 10px var(--sp-md); color: var(--ink-subtle); font-weight: 500;
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+      border-bottom: 1px solid var(--hairline); background: var(--surface-1);
+      white-space: nowrap;
+    }
+    .table td { padding: 10px var(--sp-md); border-bottom: 1px solid var(--hairline-tertiary); color: var(--ink-muted); white-space: nowrap; vertical-align: middle; }
+    .table tr:hover td { background: var(--surface-2); color: var(--ink); }
+    .table tr:last-child td { border-bottom: none; }
+    .table td:first-child, .table th:first-child { padding-left: var(--sp-lg); }
+    .table td:last-child, .table th:last-child { padding-right: var(--sp-lg); }
+
+    /* Badges */
+    .badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 8px; border-radius: var(--rd-pill); font-size: 12px; font-weight: 500;
+    }
+    .badge--success { background: rgba(39,166,68,0.12); color: var(--semantic-success); }
+    .badge--danger { background: rgba(218,54,51,0.12); color: var(--semantic-danger); }
+    .badge--warning { background: rgba(210,153,34,0.12); color: var(--semantic-warning); }
+    .badge--info { background: rgba(31,111,235,0.12); color: #58a6ff; }
+    .badge--neutral { background: var(--surface-2); color: var(--ink-subtle); border: 1px solid var(--hairline); }
+    .badge--primary { background: var(--primary-muted); color: var(--primary); }
+    .badge--tag { background: var(--surface-2); color: var(--ink-muted); border: 1px solid var(--hairline); font-size: 11px; }
+
+    /* Status dot */
+    .status-dot { display: inline-flex; align-items: center; gap: 6px; }
+    .status-dot::before {
+      content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor;
+    }
+    .status-dot--completed::before { background: var(--semantic-success); }
+    .status-dot--failed::before { background: var(--semantic-danger); }
+    .status-dot--paused::before { background: var(--semantic-warning); }
+    .status-dot--running::before { background: #58a6ff; animation: pulse 1.5s ease-in-out infinite; }
+    .status-dot--pending::before { background: var(--ink-tertiary); }
+
+    /* Execution list */
+    .exec-list { max-height: 500px; overflow-y: auto; }
+    .exec-item {
+      display: flex; align-items: center; gap: var(--sp-md);
+      padding: var(--sp-sm) var(--sp-lg); border-bottom: 1px solid var(--hairline-tertiary);
+      cursor: pointer; transition: all 0.1s ease;
+    }
+    .exec-item:hover { background: var(--surface-2); }
+    .exec-item.active { background: var(--surface-3); }
+    .exec-item__id { font-family: var(--font-mono); font-size: 12px; color: var(--primary); width: 80px; flex-shrink: 0; }
+    .exec-item__info { flex: 1; min-width: 0; }
+    .exec-item__meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--ink-tertiary); margin-top: 2px; }
+    .exec-item__right { text-align: right; flex-shrink: 0; }
+    .exec-item__dur { font-size: 12px; color: var(--ink-tertiary); }
+    .exec-item__tokens { font-family: var(--font-mono); font-size: 12px; color: var(--ink-subtle); }
+
+    /* Timeline */
+    .timeline { padding: var(--sp-lg); }
+    .span-item {
+      display: flex; gap: var(--sp-md); padding: var(--sp-sm) 0;
+      border-bottom: 1px solid var(--hairline-tertiary);
+    }
+    .span-item:last-child { border-bottom: none; }
+    .span-time { width: 50px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-tertiary); flex-shrink: 0; padding-top: 2px; }
+    .span-body { flex: 1; }
+    .span-type { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; }
+    .span-type--llm_call { color: #a371f7; }
+    .span-type--tool_call { color: #58a6ff; }
+    .span-type--gate_check { color: var(--semantic-warning); }
+    .span-type--execution_start, .span-type--execution_end { color: var(--semantic-success); }
+    .span-name { font-size: 13px; color: var(--ink); margin-top: 2px; }
+    .span-meta { font-size: 11px; color: var(--ink-tertiary); margin-top: 4px; display: flex; gap: var(--sp-sm); }
+    .span-error { color: var(--semantic-danger); font-size: 12px; margin-top: 4px; }
+
+    /* Detail */
+    .detail-grid { display: grid; grid-template-columns: 140px 1fr; gap: var(--sp-xs) var(--sp-md); font-size: 13px; }
+    .detail-grid__label { color: var(--ink-tertiary); }
+    .detail-grid__value { color: var(--ink-muted); }
+    .detail-pre {
+      background: var(--canvas); border: 1px solid var(--hairline); border-radius: var(--rd-md);
+      padding: var(--sp-md); font-family: var(--font-mono); font-size: 12px; line-height: 1.6;
+      overflow-x: auto; white-space: pre-wrap; word-break: break-word; color: var(--ink-muted);
+    }
+    .detail-pre--error { color: var(--semantic-danger); }
+
+    /* Forms */
+    .form { display: flex; flex-direction: column; gap: var(--sp-md); }
+    .form__group { display: flex; flex-direction: column; gap: 4px; }
+    .form__label { font-size: 12px; font-weight: 500; color: var(--ink-subtle); }
+    .form__input, .form__select, .form__textarea {
+      background: var(--canvas); border: 1px solid var(--hairline); border-radius: var(--rd-md);
+      padding: 8px 12px; color: var(--ink); font-family: var(--font-display); font-size: 13px;
+      transition: border-color 0.15s ease;
+    }
+    .form__input:focus, .form__select:focus, .form__textarea:focus {
+      outline: none; border-color: var(--primary-focus); box-shadow: 0 0 0 3px rgba(94,106,210,0.12);
+    }
+    .form__textarea { resize: vertical; min-height: 80px; }
+
+    /* Improvement cards */
+    .imp-card { margin-bottom: var(--sp-md); }
+    .imp-card__suggestion {
+      background: var(--canvas); border: 1px solid var(--hairline); border-radius: var(--rd-md);
+      padding: var(--sp-md); margin: var(--sp-md) 0;
+    }
+    .imp-card__suggestion-label { font-size: 11px; color: var(--ink-tertiary); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: var(--sp-xs); }
+    .imp-card__suggestion pre { font-family: var(--font-mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; color: var(--ink-muted); margin: 0; }
+
+    /* Empty */
+    .empty { text-align: center; padding: var(--sp-xxl) var(--sp-lg); color: var(--ink-tertiary); }
+    .empty__icon { color: var(--ink-subtle); opacity: 0.4; margin-bottom: var(--sp-md); }
+    .empty__title { font-size: 14px; font-weight: 500; color: var(--ink-muted); margin-bottom: 4px; }
+    .empty__desc { font-size: 13px; }
+
+    /* Icons */
+    .icon { display: inline-flex; align-items: center; justify-content: center; width: 1em; height: 1em; }
+    .icon--sm { width: 14px; height: 14px; }
+    .icon--md { width: 18px; height: 18px; }
+    .icon--lg { width: 22px; height: 22px; }
+    .icon--xl { width: 28px; height: 28px; }
+    .lucide-spin { animation: spin 1.5s linear infinite; }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    /* Layout helpers */
+    .flex { display: flex; }
+    .flex-col { flex-direction: column; }
+    .items-center { align-items: center; }
+    .gap-sm { gap: var(--sp-sm); }
+    .gap-md { gap: var(--sp-md); }
+    .gap-lg { gap: var(--sp-lg); }
+    .mb-md { margin-bottom: var(--sp-md); }
+    .mb-lg { margin-bottom: var(--sp-lg); }
+    .mb-xl { margin-bottom: var(--sp-xl); }
+    .hidden { display: none !important; }
+
+    /* Responsive */
+    @media (max-width: 1024px) {
+      .sidebar { display: none; }
+      .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 768px) {
+      .kpi-grid { grid-template-columns: 1fr; }
+      .content { padding: var(--sp-md); }
+      .header { padding: 0 var(--sp-md); }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <a href="#" class="sidebar__brand" onclick="showTab('dashboard'); return false;">
+        <div class="sidebar__brand-icon"><i data-lucide="cpu" class="icon icon--md"></i></div>
+        <span class="sidebar__brand-text">OpenRoutines</span>
+      </a>
+
+      <nav class="sidebar__nav">
+        <div class="sidebar__group">
+          <div class="sidebar__group-label">Overview</div>
+          <button class="sidebar__item active" id="sidebar-dashboard" onclick="showTab('dashboard')">
+            <i data-lucide="layout-dashboard" class="icon icon--md"></i>
+            Dashboard
+          </button>
+          <button class="sidebar__item" id="sidebar-executions" onclick="showTab('executions')">
+            <i data-lucide="play-circle" class="icon icon--md"></i>
+            Executions
+          </button>
+          <button class="sidebar__item" id="sidebar-improvements" onclick="showTab('improvements')">
+            <i data-lucide="sparkles" class="icon icon--md"></i>
+            Improvements
+            <span class="badge-count" id="sidebar-imp-count"></span>
+          </button>
+        </div>
+        <div class="sidebar__group">
+          <div class="sidebar__group-label">Configuration</div>
+          <button class="sidebar__item" onclick="showTab('routines')">
+            <i data-lucide="file-text" class="icon icon--md"></i>
+            Routines
+          </button>
+          <button class="sidebar__item" onclick="showTab('skills')">
+            <i data-lucide="hammer" class="icon icon--md"></i>
+            Skills
+          </button>
+        </div>
+      </nav>
+
+      <div class="sidebar__footer">
+        <div class="sidebar__item" onclick="window.open('/health','_blank')">
+          <i data-lucide="activity" class="icon icon--md"></i>
+          System Health
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <div class="main">
+      <!-- Header -->
+      <header class="header" id="app-header">
+        <div class="header__left">
+          <span class="header__title" id="header-title">Dashboard</span>
+        </div>
+        <div class="header__right">
+          <button class="header__btn header__btn--secondary" onclick="refreshCurrent()">
+            <i data-lucide="refresh-cw" class="icon icon--sm"></i>
+            Refresh
+          </button>
+          <button class="header__btn header__btn--primary" onclick="triggerRoutine()">
+            <i data-lucide="plus" class="icon icon--sm"></i>
+            Trigger
+          </button>
+        </div>
+      </header>
+
+      <!-- Content -->
+      <div class="content" id="app-content">
+
+        <!-- ========== DASHBOARD ========== -->
+        <div id="tab-dashboard">
+          <!-- KPI Row -->
+          <div class="kpi-grid" id="kpi-grid"></div>
+
+          <!-- Charts Row -->
+          <div class="flex gap-lg mb-lg" style="flex-wrap: wrap;">
+            <div class="card" style="flex: 2; min-width: 400px;">
+              <div class="card__header">
+                <span class="card__header-title">Execution Activity</span>
+                <span class="caption" style="color:var(--ink-tertiary)">Last 14 days</span>
+              </div>
+              <div class="card__body">
+                <div class="chart-container"><canvas id="chart-activity"></canvas></div>
+              </div>
+            </div>
+            <div class="card" style="flex: 1; min-width: 280px;">
+              <div class="card__header">
+                <span class="card__header-title">Status Distribution</span>
+              </div>
+              <div class="card__body">
+                <div class="chart-container chart-container--sm"><canvas id="chart-status"></canvas></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tables Row -->
+          <div class="flex gap-lg mb-lg" style="flex-wrap: wrap;">
+            <div class="card" style="flex: 1; min-width: 320px;">
+              <div class="card__header">
+                <span class="card__header-title">Routines</span>
+              </div>
+              <div class="card__body card__body--flush">
+                <div class="table-wrap">
+                  <table class="table" id="db-routines">
+                    <thead><tr><th>Routine</th><th>Executions</th><th>Success</th><th>Avg Tokens</th><th>Avg Duration</th></tr></thead>
+                    <tbody><tr><td colspan="5"><div class="empty"><div class="empty__desc">Loading...</div></div></td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div class="card" style="flex: 1; min-width: 320px;">
+              <div class="card__header">
+                <span class="card__header-title">Tools</span>
+              </div>
+              <div class="card__body card__body--flush">
+                <div class="table-wrap">
+                  <table class="table" id="db-tools">
+                    <thead><tr><th>Tool</th><th>Calls</th><th>Failures</th><th>Avg ms</th></tr></thead>
+                    <tbody><tr><td colspan="4"><div class="empty"><div class="empty__desc">Loading...</div></div></td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Bottom Row: Tags + Insights -->
+          <div class="flex gap-lg" style="flex-wrap: wrap;">
+            <div class="card" style="flex: 1; min-width: 240px;">
+              <div class="card__header"><span class="card__header-title">Top Auto-Tags</span></div>
+              <div class="card__body card__body--flush">
+                <div class="table-wrap">
+                  <table class="table" id="db-tags">
+                    <thead><tr><th>Tag</th><th>Count</th></tr></thead>
+                    <tbody><tr><td colspan="2"><div class="empty"><div class="empty__desc">Loading...</div></div></td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div class="card" style="flex: 2; min-width: 320px;">
+              <div class="card__header"><span class="card__header-title">Insights</span></div>
+              <div class="card__body" id="db-insights"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ========== EXECUTIONS ========== -->
+        <div id="tab-executions" class="hidden">
+          <div class="flex gap-lg" style="flex-wrap: wrap; align-items: flex-start;">
+            <!-- List -->
+            <div class="card" style="flex: 1; min-width: 340px; max-width: 480px;">
+              <div class="card__header">
+                <span class="card__header-title">Recent Executions</span>
+                <span class="header__btn header__btn--secondary" style="padding:4px 10px;font-size:12px" onclick="loadExecutions()">
+                  <i data-lucide="refresh-cw" class="icon icon--sm"></i>
+                </span>
+              </div>
+              <div class="exec-list" id="execution-list">
+                <div class="empty">
+                  <div class="empty__icon"><i data-lucide="loader-2" class="icon icon--xl lucide-spin"></i></div>
+                  <div class="empty__desc">Loading executions...</div>
+                </div>
+              </div>
+            </div>
+            <!-- Detail -->
+            <div class="card" style="flex: 2; min-width: 400px;">
+              <div class="card__header"><span class="card__header-title">Execution Detail</span></div>
+              <div id="detail-content">
+                <div class="empty">
+                  <div class="empty__icon"><i data-lucide="file-search" class="icon icon--xl"></i></div>
+                  <div class="empty__title">Select an execution</div>
+                  <div class="empty__desc">Click an item from the list to view spans, output, and feedback.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ========== IMPROVEMENTS ========== -->
+        <div id="tab-improvements" class="hidden">
+          <div class="mb-md" style="display:flex;align-items:center;gap:var(--sp-sm)">
+            <div class="card-title">AI-Generated Suggestions</div>
+            <span class="caption" style="color:var(--ink-tertiary)">Based on negative execution feedback</span>
+          </div>
+          <div id="improvements-list"></div>
+        </div>
+
+        <!-- ========== ROUTINES ========== -->
+        <div id="tab-routines" class="hidden">
+          <div class="mb-md" style="display:flex;align-items:center;gap:var(--sp-sm)">
+            <div class="card-title">Routines</div>
+            <span class="caption" style="color:var(--ink-tertiary)">Loaded from routines/*.yaml</span>
+          </div>
+          <div id="routines-list"></div>
+        </div>
+
+        <!-- ========== SKILLS ========== -->
+        <div id="tab-skills" class="hidden">
+          <div class="mb-md" style="display:flex;align-items:center;gap:var(--sp-sm)">
+            <div class="card-title">Skills</div>
+            <span class="caption" style="color:var(--ink-tertiary)">Loaded from .gates/skills/*.md</span>
+          </div>
+          <div id="skills-list"></div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let executions = [];
+    let selectedId = null;
+    let currentTab = 'dashboard';
+    let charts = {};
+
+    const TAB_TITLES = {
+      dashboard: 'Dashboard',
+      executions: 'Executions',
+      improvements: 'Improvements',
+      routines: 'Routines',
+      skills: 'Skills',
+    };
+
+    function showTab(tab) {
+      currentTab = tab;
+      document.getElementById('header-title').textContent = TAB_TITLES[tab] || tab;
+
+      ['dashboard','executions','improvements','routines','skills'].forEach(t => {
+        document.getElementById('tab-' + t)?.classList.toggle('hidden', t !== tab);
+        document.getElementById('sidebar-' + t)?.classList.toggle('active', t === tab);
+      });
+
+      if (tab === 'dashboard') loadDashboard();
+      if (tab === 'executions') loadExecutions();
+      if (tab === 'improvements') loadImprovements();
+      if (tab === 'routines') loadRoutines();
+      if (tab === 'skills') loadSkills();
+      if (window.lucide) lucide.createIcons();
+    }
+
+    function refreshCurrent() {
+      if (currentTab === 'dashboard') loadDashboard();
+      if (currentTab === 'executions') loadExecutions();
+      if (currentTab === 'improvements') loadImprovements();
+      if (currentTab === 'routines') loadRoutines();
+      if (currentTab === 'skills') loadSkills();
+    }
+
+    async function triggerRoutine() {
+      const routineId = prompt('Routine ID to trigger:', 'issue-to-pr');
+      if (!routineId) return;
+      try {
+        const res = await fetch('/trigger/' + routineId, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const data = await res.json();
+        alert('Triggered: ' + (data.executionId || data.error || 'unknown'));
+      } catch (e) { alert('Failed: ' + e.message); }
+    }
+
+    /* ---------- Helpers ---------- */
+    function statusIcon(status) {
+      const map = { completed: 'check-circle-2', failed: 'x-circle', paused: 'pause-circle', running: 'loader-2', pending: 'clock' };
+      return map[status] || 'circle';
+    }
+    function statusBadgeClass(status) { return 'badge--' + status; }
+    function statusDotClass(status) { return 'status-dot--' + status; }
+    function formatDuration(startedAt, finishedAt) {
+      if (!finishedAt) return '—';
+      const ms = new Date(finishedAt) - new Date(startedAt);
+      if (ms < 1000) return ms + 'ms';
+      return (ms / 1000).toFixed(1) + 's';
+    }
+    function formatTokens(n) {
+      if (!n) return '0';
+      if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+      return n.toString();
+    }
+    function formatDate(d) {
+      if (!d) return '—';
+      const date = new Date(d);
+      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    }
+
+    /* ---------- Charts ---------- */
+    function initCharts() {
+      Chart.defaults.color = '#8a8f98';
+      Chart.defaults.borderColor = '#23252a';
+      Chart.defaults.font.family = "'Inter', sans-serif";
+      Chart.defaults.font.size = 11;
+    }
+
+    function renderActivityChart(buckets) {
+      const ctx = document.getElementById('chart-activity');
+      if (!ctx) return;
+      if (charts.activity) charts.activity.destroy();
+      charts.activity = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: buckets.map(b => formatDate(b.date)),
+          datasets: [
+            { label: 'Completed', data: buckets.map(b => b.completed), borderColor: '#27a644', backgroundColor: 'rgba(39,166,68,0.08)', fill: true, tension: 0.3, pointRadius: 2 },
+            { label: 'Failed', data: buckets.map(b => b.failed), borderColor: '#da3633', backgroundColor: 'rgba(218,54,51,0.08)', fill: true, tension: 0.3, pointRadius: 2 },
+            { label: 'Paused', data: buckets.map(b => b.paused), borderColor: '#d29922', backgroundColor: 'rgba(210,153,34,0.08)', fill: true, tension: 0.3, pointRadius: 2 },
+          ]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: { legend: { position: 'top', align: 'end', labels: { boxWidth: 10, usePointStyle: true } } },
+          scales: { x: { grid: { display: false } }, y: { beginAtZero: true, grid: { color: '#1e2026' }, ticks: { stepSize: 1 } } }
+        }
+      });
+    }
+
+    function renderStatusChart(metrics) {
+      const ctx = document.getElementById('chart-status');
+      if (!ctx) return;
+      if (charts.status) charts.status.destroy();
+      const data = [metrics.completed || 0, metrics.failed || 0, metrics.paused || 0];
+      const total = data.reduce((a,b) => a+b, 0);
+      if (total === 0) {
+        ctx.parentElement.innerHTML = '<div class="empty"><div class="empty__desc">No data</div></div>';
+        return;
+      }
+      charts.status = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: ['Completed', 'Failed', 'Paused'],
+          datasets: [{ data, backgroundColor: ['#27a644', '#da3633', '#d29922'], borderWidth: 0, hoverOffset: 4 }]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          cutout: '70%',
+          plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, usePointStyle: true, padding: 16 } } }
+        }
+      });
+    }
+
+    /* ---------- Dashboard ---------- */
+    async function loadDashboard() {
+      try {
+        const [metricsRes, timelineRes] = await Promise.all([
+          fetch('/metrics/overview'),
+          fetch('/metrics/timeline?days=14')
+        ]);
+        const m = await metricsRes.json();
+        const t = await timelineRes.json();
+
+        // KPIs
+        const kpi = document.getElementById('kpi-grid');
+        kpi.innerHTML = `
+          <div class="kpi-card">
+            <div class="kpi-card__icon"><i data-lucide="layers" class="icon icon--lg"></i></div>
+            <div class="kpi-card__content">
+              <div class="kpi-card__label">Total Executions</div>
+              <div class="kpi-card__value">${m.totalExecutions}</div>
+            </div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__icon" style="color:var(--semantic-success)"><i data-lucide="trending-up" class="icon icon--lg"></i></div>
+            <div class="kpi-card__content">
+              <div class="kpi-card__label">Success Rate</div>
+              <div class="kpi-card__value" style="color:var(--semantic-success)">${m.successRate}%</div>
+            </div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__icon"><i data-lucide="cpu" class="icon icon--lg"></i></div>
+            <div class="kpi-card__content">
+              <div class="kpi-card__label">Total Tokens</div>
+              <div class="kpi-card__value">${formatTokens(m.totalTokens)}</div>
+            </div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-card__icon"><i data-lucide="timer" class="icon icon--lg"></i></div>
+            <div class="kpi-card__content">
+              <div class="kpi-card__label">Avg Duration</div>
+              <div class="kpi-card__value">${(m.averageDurationMs / 1000).toFixed(1)}s</div>
+            </div>
+          </div>
+        `;
+
+        // Charts
+        initCharts();
+        renderActivityChart(t.buckets || []);
+        renderStatusChart(m);
+
+        // Routines table
+        const routinesBody = m.routines?.length
+          ? m.routines.map(r => `<tr><td><strong>${r.routineId}</strong></td><td>${r.count}</td><td><span class="badge ${r.successRate >= 90 ? 'badge--success' : r.successRate >= 70 ? 'badge--neutral' : 'badge--warning'}">${r.successRate}%</span></td><td>${formatTokens(r.avgTokens)}</td><td>${(r.avgDurationMs / 1000).toFixed(1)}s</td></tr>`).join('')
+          : '<tr><td colspan="5"><div class="empty"><div class="empty__desc">No data yet</div></div></td></tr>';
+        document.querySelector('#db-routines tbody').innerHTML = routinesBody;
+
+        // Tools table
+        const toolsBody = m.tools?.length
+          ? m.tools.map(t => `<tr><td><strong>${t.name}</strong></td><td>${t.calls}</td><td>${t.failures > 0 ? '<span class="badge badge--danger">' + t.failures + '</span>' : t.failures}</td><td>${t.avgDurationMs}ms</td></tr>`).join('')
+          : '<tr><td colspan="4"><div class="empty"><div class="empty__desc">No data yet</div></div></td></tr>';
+        document.querySelector('#db-tools tbody').innerHTML = toolsBody;
+
+        // Tags table
+        const tagsBody = m.topAutoTags?.length
+          ? m.topAutoTags.map(t => `<tr><td><span class="badge badge--tag">${t.tag}</span></td><td>${t.count}</td></tr>`).join('')
+          : '<tr><td colspan="2"><div class="empty"><div class="empty__desc">No data yet</div></div></td></tr>';
+        document.querySelector('#db-tags tbody').innerHTML = tagsBody;
+
+        // Insights
+        const insights = [];
+        if (m.mostFailingTool) insights.push({ icon: 'wrench', label: 'Most Failing Tool', value: m.mostFailingTool, color: '#da3633' });
+        if (m.mostRejectedGate) insights.push({ icon: 'shield-alert', label: 'Most Rejected Gate', value: m.mostRejectedGate, color: '#d29922' });
+        if (m.mostUsedRoutine) insights.push({ icon: 'file-text', label: 'Most Used Routine', value: m.mostUsedRoutine, color: '#58a6ff' });
+
+        document.getElementById('db-insights').innerHTML = insights.length
+          ? insights.map(i => `
+            <div style="display:flex;align-items:center;gap:var(--sp-md);padding:var(--sp-sm) 0;border-bottom:1px solid var(--hairline-tertiary)">
+              <div style="width:36px;height:36px;border-radius:var(--rd-md);background:var(--surface-2);display:flex;align-items:center;justify-content:center;color:${i.color}">
+                <i data-lucide="${i.icon}" class="icon icon--md"></i>
+              </div>
+              <div>
+                <div style="font-size:12px;color:var(--ink-subtle);font-weight:500">${i.label}</div>
+                <div style="font-size:14px;font-weight:600;color:var(--ink)">${i.value}</div>
+              </div>
+            </div>
+          `).join('')
+          : '<div class="empty"><div class="empty__desc">No insights yet</div></div>';
+
+        if (window.lucide) lucide.createIcons();
+      } catch (err) {
+        console.error('Dashboard error:', err);
+      }
+    }
+
+    /* ---------- Executions ---------- */
+    async function loadExecutions() {
+      try {
+        const res = await fetch('/executions?limit=50');
+        const data = await res.json();
+        executions = data.records || [];
+        renderList();
+      } catch (err) {
+        document.getElementById('execution-list').innerHTML = '<div class="empty"><div class="empty__title">Failed to load</div></div>';
+      }
+    }
+
+    function renderList() {
+      const list = document.getElementById('execution-list');
+      if (!executions.length) {
+        list.innerHTML = `
+          <div class="empty">
+            <div class="empty__icon"><i data-lucide="folder-open" class="icon icon--xl"></i></div>
+            <div class="empty__title">No executions yet</div>
+            <div class="empty__desc">Trigger a routine to see it here.</div>
+          </div>`;
+        if (window.lucide) lucide.createIcons();
+        return;
+      }
+      list.innerHTML = executions.map(ex => {
+        const autoTags = (ex.metadata?.autoTags || []).map(t => `<span class="badge badge--tag">${t}</span>`).join('');
+        const risk = ex.metadata?.riskLevel;
+        const riskBadge = risk ? `<span class="badge badge--${risk === 'low' ? 'success' : risk === 'medium' ? 'warning' : 'danger'}">${risk}</span>` : '';
+        const isRunning = ex.status === 'running';
+        return `
+        <div class="exec-item ${ex.id === selectedId ? 'active' : ''}" onclick="selectExecution('${ex.id}')">
+          <div class="exec-item__id">${ex.id.slice(0, 8)}</div>
+          <div class="exec-item__info">
+            <div style="display:flex;align-items:center;gap:6px">
+              <span class="badge ${statusBadgeClass(ex.status)}">
+                <i data-lucide="${statusIcon(ex.status)}" class="icon icon--sm ${isRunning ? 'lucide-spin' : ''}"></i>
+                ${ex.status}
+              </span>
+              ${riskBadge}
+              <span style="font-size:12px;color:var(--ink-muted)">${ex.routineId}</span>
+            </div>
+            <div class="exec-item__meta">
+              ${autoTags}
+            </div>
+          </div>
+          <div class="exec-item__right">
+            <div class="exec-item__dur">${formatDuration(ex.startedAt, ex.finishedAt)}</div>
+            <div class="exec-item__tokens">${ex.totalTokens || 0} tok</div>
+          </div>
+        </div>
+      `}).join('');
+      if (window.lucide) lucide.createIcons();
+    }
+
+    async function selectExecution(id) {
+      selectedId = id;
+      renderList();
+      const ex = executions.find(e => e.id === id);
+      if (!ex) return;
+      const detail = document.getElementById('detail-content');
+      detail.innerHTML = '<div class="empty"><div class="empty__icon"><i data-lucide="loader-2" class="icon icon--xl lucide-spin"></i></div><div class="empty__desc">Loading...</div></div>';
+      if (window.lucide) lucide.createIcons();
+
+      try {
+        const [spansRes, feedbackRes] = await Promise.all([
+          fetch(`/executions/${id}/spans`), fetch(`/executions/${id}/feedback`)
+        ]);
+        const spansData = await spansRes.json();
+        const feedbackData = await feedbackRes.json();
+        renderDetail(ex, spansData.spans || [], feedbackData.feedback);
+      } catch (err) {
+        detail.innerHTML = '<div class="empty"><div class="empty__title">Failed to load details</div></div>';
+      }
+    }
+
+    function renderDetail(ex, spans, feedback) {
+      const detail = document.getElementById('detail-content');
+      const analysis = ex.metadata || {};
+
+      const timelineHtml = spans.length ? spans.map(span => {
+        const typeClass = 'span-type--' + span.type;
+        const dur = span.durationMs ? `<span style="color:var(--semantic-warning)">${span.durationMs}ms</span>` : '';
+        const tokens = span.totalTokens ? `<span style="color:#58a6ff">${span.totalTokens} tok</span>` : '';
+        const error = span.error ? `<div class="span-error">${span.error}</div>` : '';
+        return `
+          <div class="span-item">
+            <div class="span-time">${new Date(span.startedAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</div>
+            <div class="span-body">
+              <div class="span-type ${typeClass}">${span.type}</div>
+              <div class="span-name">${span.name || ''}</div>
+              <div class="span-meta">${dur} ${tokens}</div>
+              ${error}
+            </div>
+          </div>
+        `;
+      }).join('') : '<div class="timeline-empty">No spans recorded</div>';
+
+      const insightsHtml = (analysis.insights || []).length
+        ? analysis.insights.map(i => `<div class="insight-item"><span class="insight-icon"><i data-lucide="lightbulb" class="icon icon--sm"></i></span>${i}</div>`).join('')
+        : '<div class="timeline-empty">No insights</div>';
+
+      detail.innerHTML = `
+        <div class="detail-section">
+          <div class="detail-section__title">Overview</div>
+          <div class="detail-grid">
+            <div class="detail-grid__label">ID</div><div class="detail-grid__value mono">${ex.id}</div>
+            <div class="detail-grid__label">Routine</div><div class="detail-grid__value">${ex.routineId}</div>
+            <div class="detail-grid__label">Skill</div><div class="detail-grid__value">${ex.skillName}</div>
+            <div class="detail-grid__label">Status</div>
+            <div class="detail-grid__value"><span class="status-dot ${statusDotClass(ex.status)}">${ex.status}</span></div>
+            ${analysis.riskLevel ? `<div class="detail-grid__label">Risk</div><div class="detail-grid__value"><span class="badge badge--${analysis.riskLevel === 'low' ? 'success' : analysis.riskLevel === 'medium' ? 'warning' : 'danger'}">${analysis.riskLevel}</span></div>` : ''}
+            <div class="detail-grid__label">Started</div><div class="detail-grid__value">${new Date(ex.startedAt).toLocaleString()}</div>
+            <div class="detail-grid__label">Duration</div><div class="detail-grid__value">${formatDuration(ex.startedAt, ex.finishedAt)}</div>
+            <div class="detail-grid__label">Tokens</div><div class="detail-grid__value">${ex.totalTokens || 0}</div>
+            <div class="detail-grid__label">Trigger</div><div class="detail-grid__value">${ex.triggerType}</div>
+          </div>
+          ${(analysis.autoTags || []).length ? `<div style="margin-top:12px;display:flex;gap:4px;flex-wrap:wrap">${analysis.autoTags.map(t => `<span class="badge badge--tag">${t}</span>`).join('')}</div>` : ''}
+        </div>
+
+        <div class="detail-section">
+          <div class="detail-section__title">Insights</div>
+          ${insightsHtml}
+        </div>
+
+        <div class="detail-section">
+          <div class="detail-section__title">Timeline</div>
+          <div class="timeline">${timelineHtml}</div>
+        </div>
+
+        ${ex.output ? `<div class="detail-section"><div class="detail-section__title">Output</div><pre class="detail-pre">${ex.output}</pre></div>` : ''}
+        ${ex.error ? `<div class="detail-section"><div class="detail-section__title">Error</div><pre class="detail-pre detail-pre--error">${ex.error}</pre></div>` : ''}
+
+        <div class="detail-section">
+          <div class="detail-section__title">Feedback</div>
+          <form class="form" onsubmit="saveFeedback(event, '${ex.id}')">
+            <div class="form__group">
+              <label class="form__label">Rating</label>
+              <select class="form__select" name="rating">
+                <option value="">Select...</option>
+                <option value="5" ${feedback?.rating === 5 ? 'selected' : ''}>⭐⭐⭐⭐⭐ Excellent</option>
+                <option value="4" ${feedback?.rating === 4 ? 'selected' : ''}>⭐⭐⭐⭐ Good</option>
+                <option value="3" ${feedback?.rating === 3 ? 'selected' : ''}>⭐⭐⭐ OK</option>
+                <option value="2" ${feedback?.rating === 2 ? 'selected' : ''}>⭐⭐ Poor</option>
+                <option value="1" ${feedback?.rating === 1 ? 'selected' : ''}>⭐ Bad</option>
+              </select>
+            </div>
+            <div class="form__group">
+              <label class="form__label">Tags (comma separated)</label>
+              <input class="form__input" type="text" name="tags" placeholder="false-positive, needs-improvement" value="${(feedback?.tags || []).join(', ')}" />
+            </div>
+            <div class="form__group">
+              <label class="form__label">Notes</label>
+              <textarea class="form__textarea" name="notes" rows="3" placeholder="What worked? What didn't?">${feedback?.notes || ''}</textarea>
+            </div>
+            <button type="submit" class="header__btn header__btn--primary" style="align-self:flex-start">Save Feedback</button>
+          </form>
+        </div>
+      `;
+      if (window.lucide) lucide.createIcons();
+    }
+
+    async function saveFeedback(event, executionId) {
+      event.preventDefault();
+      const form = event.target;
+      const tags = form.tags.value.split(',').map(t => t.trim()).filter(Boolean);
+      try {
+        await fetch(`/executions/${executionId}/feedback`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rating: form.rating.value ? parseInt(form.rating.value) : undefined, tags, notes: form.notes.value })
+        });
+        alert('Feedback saved!');
+      } catch (err) { alert('Failed to save feedback'); }
+    }
+
+    /* ---------- Improvements ---------- */
+    async function loadImprovements() {
+      try {
+        const res = await fetch('/metrics/improvements');
+        const data = await res.json();
+        const list = document.getElementById('improvements-list');
+        const count = data.improvements?.length || 0;
+        const countBadge = document.getElementById('sidebar-imp-count');
+        countBadge.textContent = count;
+        countBadge.style.display = count > 0 ? 'inline-flex' : 'none';
+
+        if (!count) {
+          list.innerHTML = `
+            <div class="empty">
+              <div class="empty__icon"><i data-lucide="sparkles" class="icon icon--xl"></i></div>
+              <div class="empty__title">No suggestions yet</div>
+              <div class="empty__desc">Give negative feedback on an execution to generate AI-powered improvement suggestions.</div>
+            </div>`;
+          if (window.lucide) lucide.createIcons();
+          return;
+        }
+
+        list.innerHTML = data.improvements.map(imp => `
+          <div class="card imp-card">
+            <div class="card__header">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span class="card__header-title">${imp.skillName}</span>
+                <span class="badge badge--primary">${imp.type}</span>
+              </div>
+              <span class="badge badge--${imp.confidence === 'high' ? 'danger' : imp.confidence === 'medium' ? 'warning' : 'neutral'}">${imp.confidence}</span>
+            </div>
+            <div class="card__body">
+              <p style="font-size:14px;color:var(--ink-muted);margin-bottom:12px">${imp.description}</p>
+              <div class="imp-card__suggestion">
+                <div class="imp-card__suggestion-label">Suggested for section: ${imp.targetSection}</div>
+                <pre>${imp.suggestedContent}</pre>
+              </div>
+              <div style="display:flex;gap:8px">
+                <button onclick="applyImprovement('${imp.id}')" class="header__btn header__btn--primary" style="padding:6px 14px;font-size:13px">Apply</button>
+                <button onclick="dismissImprovement('${imp.id}')" class="header__btn header__btn--secondary" style="padding:6px 14px;font-size:13px">Dismiss</button>
+              </div>
+            </div>
+          </div>
+        `).join('');
+        if (window.lucide) lucide.createIcons();
+      } catch (err) {
+        document.getElementById('improvements-list').innerHTML = '<div class="empty"><div class="empty__title">Failed to load</div></div>';
+      }
+    }
+
+    async function applyImprovement(id) {
+      try { await fetch(`/metrics/improvements/${id}/apply`, { method: 'POST' }); loadImprovements(); }
+      catch (err) { alert('Failed to apply'); }
+    }
+    async function dismissImprovement(id) {
+      try { await fetch(`/metrics/improvements/${id}/dismiss`, { method: 'POST' }); loadImprovements(); }
+      catch (err) { alert('Failed to dismiss'); }
+    }
+
+    async function loadRoutines() {
+      try {
+        const res = await fetch('/routines');
+        const data = await res.json();
+        const list = document.getElementById('routines-list');
+        if (!data.routines?.length) {
+          list.innerHTML = '<div class="empty"><div class="empty__desc">No routines loaded.</div></div>';
+          return;
+        }
+        list.innerHTML = data.routines.map(r => {
+          const triggers = r.triggers?.map(t => {
+            if (t.type === 'schedule') return `<span class="badge badge--neutral"><i data-lucide="clock" class="icon icon--sm"></i> cron: ${t.cron}</span>`;
+            if (t.type === 'github') return `<span class="badge badge--neutral"><i data-lucide="github" class="icon icon--sm"></i> ${t.events?.join(', ') || 'all'}</span>`;
+            return `<span class="badge badge--neutral">${t.type}</span>`;
+          }).join(' ') || '';
+          const gates = r.gates?.map(g => `<span class="badge badge--warning">${g}</span>`).join(' ') || '';
+          return `
+            <div class="card" style="margin-bottom:var(--sp-md)">
+              <div class="card__header">
+                <span class="card__header-title">${r.id}</span>
+                <button class="header__btn header__btn--primary" style="padding:4px 10px;font-size:12px" onclick="triggerRoutineById('${r.id}')">Run</button>
+              </div>
+              <div class="card__body">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">${triggers}</div>
+                <div style="font-size:13px;color:var(--ink-muted);margin-bottom:8px">Skill: <strong>${r.pipeline?.skill || '?'}</strong></div>
+                ${gates ? `<div style="display:flex;gap:4px;flex-wrap:wrap">${gates}</div>` : ''}
+              </div>
+            </div>
+          `;
+        }).join('');
+        if (window.lucide) lucide.createIcons();
+      } catch (err) {
+        document.getElementById('routines-list').innerHTML = '<div class="empty"><div class="empty__title">Failed to load</div></div>';
+      }
+    }
+
+    async function loadSkills() {
+      try {
+        const res = await fetch('/skills');
+        const data = await res.json();
+        const list = document.getElementById('skills-list');
+        if (!data.skills?.length) {
+          list.innerHTML = '<div class="empty"><div class="empty__desc">No skills loaded.</div></div>';
+          return;
+        }
+        list.innerHTML = data.skills.map(s => `
+          <div class="card" style="margin-bottom:var(--sp-md);cursor:pointer" onclick="showSkill('${s.name}')">
+            <div class="card__header">
+              <span class="card__header-title">${s.name}</span>
+              <span class="caption" style="color:var(--ink-tertiary)">${s.file}</span>
+            </div>
+            <div class="card__body">
+              <div style="font-size:13px;color:var(--ink-muted)">Click to view markdown content</div>
+            </div>
+          </div>
+        `).join('');
+      } catch (err) {
+        document.getElementById('skills-list').innerHTML = '<div class="empty"><div class="empty__title">Failed to load</div></div>';
+      }
+    }
+
+    async function showSkill(name) {
+      try {
+        const res = await fetch('/skills/' + encodeURIComponent(name));
+        const data = await res.json();
+        const list = document.getElementById('skills-list');
+
+        if (data.format === 'state-machine') {
+          // Load state structure
+          const statesRes = await fetch('/skills/' + encodeURIComponent(name) + '/states');
+          const stateData = await statesRes.json();
+          renderStateMachineSkill(list, data.name, stateData);
+          return;
+        }
+
+        // Simple markdown-like rendering
+        const html = data.content
+          .replace(/^# (.*$)/gim, '<h1 style="font-size:20px;font-weight:600;margin-bottom:12px;color:var(--ink)">$1</h1>')
+          .replace(/^## (.*$)/gim, '<h2 style="font-size:16px;font-weight:600;margin-top:16px;margin-bottom:8px;color:var(--ink)">$1</h2>')
+          .replace(/^### (.*$)/gim, '<h3 style="font-size:14px;font-weight:600;margin-top:12px;margin-bottom:6px;color:var(--ink-muted)">$1</h3>')
+          .replace(/^- \[ \] (.*$)/gim, '<div style="display:flex;gap:8px;align-items:center;margin:4px 0"><span style="width:14px;height:14px;border:1px solid var(--hairline);border-radius:3px;display:inline-block"></span><span>$1</span></div>')
+          .replace(/^- \[x\] (.*$)/gim, '<div style="display:flex;gap:8px;align-items:center;margin:4px 0"><span style="width:14px;height:14px;border:1px solid var(--semantic-success);background:var(--semantic-success);border-radius:3px;display:inline-block"></span><span style="text-decoration:line-through;color:var(--ink-tertiary)">$1</span></div>')
+          .replace(/^- (.*$)/gim, '<li style="margin:4px 0;color:var(--ink-muted)">$1</li>')
+          .replace(/```(\w+)?\n([\s\S]*?)```/g, '<pre style="background:var(--canvas);border:1px solid var(--hairline);border-radius:var(--rd-md);padding:var(--sp-md);overflow-x:auto;font-family:var(--font-mono);font-size:12px;line-height:1.6;margin:8px 0">$2</pre>')
+          .replace(/`([^`]+)`/g, '<code style="background:var(--surface-2);padding:2px 4px;border-radius:var(--rd-xs);font-family:var(--font-mono);font-size:12px">$1</code>')
+          .replace(/\n\n/g, '</p><p style="margin:8px 0;color:var(--ink-muted)">')
+          .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+        list.innerHTML = `
+          <div style="margin-bottom:var(--sp-md)">
+            <button class="header__btn header__btn--secondary" style="padding:6px 12px;font-size:13px" onclick="loadSkills()">
+              <i data-lucide="arrow-left" class="icon icon--sm"></i> Back
+            </button>
+          </div>
+          <div class="card">
+            <div class="card__header">
+              <span class="card__header-title">${data.name}</span>
+              <span class="badge badge--neutral">Markdown</span>
+            </div>
+            <div class="card__body" style="font-size:14px;line-height:1.6">
+              <p style="margin:8px 0;color:var(--ink-muted)">${html}</p>
+            </div>
+          </div>
+        `;
+        if (window.lucide) lucide.createIcons();
+      } catch (err) {
+        alert('Failed to load skill: ' + err.message);
+      }
+    }
+
+    function renderStateMachineSkill(container, name, stateData) {
+      const states = stateData.states || [];
+      const initialState = stateData.initial_state;
+
+      // Build state cards
+      const stateCards = states.map(s => {
+        const isInitial = s.id === initialState;
+        const isTerminal = s.terminal;
+        const hasGate = !!s.gate;
+        const gateBadge = hasGate ? `<span class="badge badge--warning"><i data-lucide="shield" class="icon icon--sm"></i> ${s.gate}</span>` : '';
+        const typeBadge = isTerminal ? '<span class="badge badge--success">terminal</span>' : isInitial ? '<span class="badge badge--primary">initial</span>' : '';
+        const delegateBadge = s.delegate_to ? `<span class="badge badge--info"><i data-lucide="git-branch" class="icon icon--sm"></i> ${s.delegate_to}</span>` : '';
+
+        const transitions = (s.transitions || []).map(t => {
+          const condition = t.when ? `<span style="font-size:11px;color:var(--ink-tertiary)">when: ${t.when}</span>` : '';
+          return `<div style="display:flex;align-items:center;gap:6px;margin:4px 0">
+            <i data-lucide="arrow-right" class="icon icon--sm" style="color:var(--primary)"></i>
+            <span style="font-size:13px;color:var(--ink-muted)">${t.to}</span>
+            ${condition}
+          </div>`;
+        }).join('');
+
+        return `
+          <div class="card" style="min-width:220px;max-width:280px;flex-shrink:0;">
+            <div class="card__header" style="min-height:40px;">
+              <span class="card__header-title">${s.id}</span>
+              <div style="display:flex;gap:4px;flex-wrap:wrap">${typeBadge}${gateBadge}${delegateBadge}</div>
+            </div>
+            <div class="card__body" style="padding:var(--sp-md);">
+              ${s.description ? `<div style="font-size:12px;color:var(--ink-subtle);margin-bottom:8px">${s.description}</div>` : ''}
+              ${transitions ? `<div style="border-top:1px solid var(--hairline-tertiary);padding-top:8px;margin-top:8px">
+                <div style="font-size:11px;color:var(--ink-tertiary);margin-bottom:4px">TRANSITIONS</div>
+                ${transitions}
+              </div>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      // Build arrows between states (simple horizontal flow)
+      const arrows = states.length > 1
+        ? `<div style="display:flex;align-items:center;justify-content:center;gap:var(--sp-md);padding:var(--sp-md) 0;">
+            ${states.map((s, i) => {
+              if (i === states.length - 1) return '';
+              return `<div style="display:flex;align-items:center;color:var(--ink-tertiary)">
+                <i data-lucide="arrow-right" class="icon icon--md"></i>
+              </div>`;
+            }).filter(Boolean).join('')}
+           </div>`
+        : '';
+
+      container.innerHTML = `
+        <div style="margin-bottom:var(--sp-md)">
+          <button class="header__btn header__btn--secondary" style="padding:6px 12px;font-size:13px" onclick="loadSkills()">
+            <i data-lucide="arrow-left" class="icon icon--sm"></i> Back
+          </button>
+        </div>
+        <div class="card" style="margin-bottom:var(--sp-md)">
+          <div class="card__header">
+            <span class="card__header-title">${name}</span>
+            <div style="display:flex;gap:8px">
+              <span class="badge badge--primary">State Machine</span>
+              <button class="header__btn header__btn--secondary" style="padding:4px 10px;font-size:12px" onclick="editSkillYAML('${name}')">
+                <i data-lucide="edit-3" class="icon icon--sm"></i> Edit YAML
+              </button>
+            </div>
+          </div>
+          <div class="card__body">
+            <div style="font-size:12px;color:var(--ink-subtle);margin-bottom:var(--sp-md)">
+              ID: ${stateData.id} · Initial: ${initialState} · States: ${states.length}
+            </div>
+            <div style="display:flex;gap:var(--sp-md);overflow-x:auto;padding-bottom:var(--sp-sm)">
+              ${stateCards}
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card__header">
+            <span class="card__header-title">YAML Source</span>
+          </div>
+          <div class="card__body" style="font-size:13px;color:var(--ink-muted)">
+            <pre style="background:var(--canvas);border:1px solid var(--hairline);border-radius:var(--rd-md);padding:var(--sp-md);overflow-x:auto;font-family:var(--font-mono);font-size:12px;line-height:1.6">${document.getElementById('skills-list').dataset.yaml || 'Load from API'}</pre>
+          </div>
+        </div>
+      `;
+      if (window.lucide) lucide.createIcons();
+
+      // Load YAML content for source view
+      fetch('/skills/' + encodeURIComponent(name))
+        .then(r => r.json())
+        .then(d => {
+          const pre = container.querySelector('pre');
+          if (pre && d.content) pre.textContent = d.content;
+        });
+    }
+
+    async function editSkillYAML(name) {
+      try {
+        const res = await fetch('/skills/' + encodeURIComponent(name));
+        const data = await res.json();
+        if (!data.content) { alert('No content to edit'); return; }
+
+        const container = document.getElementById('skills-list');
+        container.innerHTML = `
+          <div style="margin-bottom:var(--sp-md)">
+            <button class="header__btn header__btn--secondary" style="padding:6px 12px;font-size:13px" onclick="loadSkills()">
+              <i data-lucide="arrow-left" class="icon icon--sm"></i> Back
+            </button>
+            <span style="font-weight:600;margin-left:12px">Editing: ${name}</span>
+          </div>
+          <div style="display:flex;gap:var(--sp-md);flex-wrap:wrap">
+            <div style="flex:1;min-width:320px">
+              <div class="card">
+                <div class="card__header">
+                  <span class="card__header-title">YAML Editor</span>
+                  <button class="header__btn" style="padding:4px 12px;font-size:12px" onclick="saveSkillYAML('${name}')">
+                    <i data-lucide="save" class="icon icon--sm"></i> Save
+                  </button>
+                </div>
+                <div class="card__body" style="padding:0">
+                  <textarea id="skill-editor" style="width:100%;min-height:500px;font-family:var(--font-mono);font-size:13px;line-height:1.6;padding:var(--sp-md);border:none;outline:none;background:var(--canvas);color:var(--ink);resize:vertical" spellcheck="false">${escapeHtml(data.content)}</textarea>
+                </div>
+              </div>
+            </div>
+            <div style="flex:1;min-width:320px">
+              <div class="card">
+                <div class="card__header">
+                  <span class="card__header-title">Live Preview</span>
+                </div>
+                <div class="card__body" id="skill-preview" style="min-height:200px">
+                  <div style="color:var(--ink-tertiary);font-size:13px">Type to see preview...</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+        if (window.lucide) lucide.createIcons();
+        // Initial preview
+        updateSkillPreview();
+        // Live preview on input
+        document.getElementById('skill-editor').addEventListener('input', updateSkillPreview);
+      } catch (err) {
+        alert('Failed to load skill for editing: ' + err.message);
+      }
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function updateSkillPreview() {
+      const textarea = document.getElementById('skill-editor');
+      const preview = document.getElementById('skill-preview');
+      if (!textarea || !preview) return;
+      const yaml = textarea.value;
+      // Simple preview: show state count and basic validation
+      const statesMatch = yaml.match(/^states:/m);
+      const idMatch = yaml.match(/^id:\s*(.+)$/m);
+      const initialMatch = yaml.match(/^initial_state:\s*(.+)$/m);
+      const stateBlocks = yaml.match(/^\s{2}\w+:/gm) || [];
+      preview.innerHTML = `
+        <div style="font-size:12px;color:var(--ink-subtle);margin-bottom:8px">
+          <div>ID: ${idMatch ? idMatch[1].trim() : '—'}</div>
+          <div>Initial: ${initialMatch ? initialMatch[1].trim() : '—'}</div>
+          <div>States detected: ${stateBlocks.length}</div>
+        </div>
+        <pre style="background:var(--canvas);border:1px solid var(--hairline);border-radius:var(--rd-md);padding:var(--sp-md);overflow-x:auto;font-family:var(--font-mono);font-size:11px;line-height:1.5;max-height:400px">${escapeHtml(yaml)}</pre>
+      `;
+    }
+
+    async function saveSkillYAML(name) {
+      const textarea = document.getElementById('skill-editor');
+      if (!textarea) return;
+      try {
+        const res = await fetch('/skills/' + encodeURIComponent(name), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: textarea.value }),
+        });
+        const data = await res.json();
+        if (data.saved) {
+          alert('Skill saved successfully');
+          showSkill(name);
+        } else {
+          alert('Failed to save: ' + (data.error || 'unknown'));
+        }
+      } catch (err) {
+        alert('Failed to save skill: ' + err.message);
+      }
+    }
+
+    async function triggerRoutineById(id) {
+      try {
+        const res = await fetch('/trigger/' + id, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const data = await res.json();
+        alert('Triggered ' + id + ': ' + (data.executionId || data.error || 'unknown'));
+      } catch (err) {
+        alert('Failed to trigger: ' + err.message);
+      }
+    }
+
+    /* ---------- Init ---------- */
+    showTab('dashboard');
+    setInterval(() => {
+      if (currentTab === 'dashboard') loadDashboard();
+      if (currentTab === 'executions') loadExecutions();
+      if (currentTab === 'improvements') loadImprovements();
+      if (currentTab === 'routines') loadRoutines();
+      if (currentTab === 'skills') loadSkills();
+    }, 5000);
+  </script>
+</body>
+</html>

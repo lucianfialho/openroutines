@@ -88,6 +88,23 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
       return parsed;
     });
 
+  const getPullRequest = (
+    number: number
+  ): Effect.Effect<{ number: number; title: string; body: string; headRefName: string; files: string[] }, GitHubCliError> =>
+    Effect.gen(function* () {
+      yield* Effect.log(`[GitHub] Getting PR #${number}`);
+      const prOutput = yield* execGh(
+        `pr view ${number} --json number,title,body,headRefName`
+      );
+      const pr = JSON.parse(prOutput) as { number: number; title: string; body: string; headRefName: string };
+      const filesOutput = yield* execGh(
+        `pr view ${number} --json files`
+      );
+      const filesData = JSON.parse(filesOutput) as { files?: Array<{ path: string }> };
+      const files = (filesData.files || []).map((f) => f.path);
+      return { ...pr, files };
+    });
+
   const createPullRequest = (
     branch: string,
     title: string,
@@ -113,9 +130,24 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
       );
     });
 
+  const listIssues = (
+    state: "open" | "closed" | "all" = "open",
+    limit: number = 30
+  ): Effect.Effect<Issue[], GitHubCliError> =>
+    Effect.gen(function* () {
+      yield* Effect.log(`[GitHub] Listing ${state} issues`);
+      const output = yield* execGh(
+        `issue list --state ${state} --limit ${limit} --json number,title,body,state,labels`
+      );
+      const parsed = JSON.parse(output) as Issue[];
+      return parsed;
+    });
+
   return {
     fetchIssue,
+    listIssues,
     listPullRequests,
+    getPullRequest,
     createPullRequest,
     addComment,
   };

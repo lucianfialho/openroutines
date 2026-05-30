@@ -15,6 +15,8 @@ export interface ExecutionResult {
   logs: string[];
   startedAt: Date;
   finishedAt: Date;
+  paused?: boolean;
+  gateId?: string;
 }
 
 export class EngineError extends Error {

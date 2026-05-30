@@ -9,6 +9,8 @@ import type { Routine, TriggerDef } from "./types.js";
 export interface TriggerEvent {
   type: string;
   payload: unknown;
+  routineId?: string;
+  executionId?: string;
 }
 
 export const matchesTrigger = (
@@ -20,7 +22,9 @@ export const matchesTrigger = (
   if (triggerDef.type === "github" && triggerDef.events) {
     const payload = event.payload as { event?: string } | undefined;
     const eventName = payload?.event;
-    if (!eventName) return true; // match all GitHub events if no specific filter
+    // If the trigger specifies events, require a matching event name.
+    // If no event name is provided in the payload, this trigger does NOT match.
+    if (!eventName) return false;
     return triggerDef.events.includes(eventName);
   }
 
@@ -41,6 +45,15 @@ export const resolveRoutine = (
   routines: Routine[],
   event: TriggerEvent
 ): { matched: Routine } | { error: "none" | "ambiguous"; count: number } => {
+  // When routineId is explicitly provided (manual trigger), force that routine
+  // without requiring the trigger payload to match perfectly.
+  if (event.routineId) {
+    const forced = routines.find((r) => r.id === event.routineId);
+    if (forced) {
+      return { matched: forced };
+    }
+    return { error: "none", count: 0 };
+  }
   const matches = findMatchingRoutines(routines, event);
   if (matches.length === 0) {
     return { error: "none", count: 0 };

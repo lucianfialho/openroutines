@@ -1,0 +1,135 @@
+id: solve-issue
+name: Solve GitHub Issue
+description: Takes a GitHub issue, implements the fix/feature, verifies, and opens a PR.
+
+inputs:
+  required:
+    - name: repo
+      type: string
+      description: owner/repo slug
+    - name: issue_number
+      type: integer
+      description: Issue number to solve
+
+initial_state: fetch_issue
+
+states:
+  fetch_issue:
+    description: Fetch issue details from GitHub
+    agent_prompt: |
+      Fetch issue #{{inputs.issue_number}} from {{inputs.repo}}.
+      Use the github_fetch_issue tool to get title, body, and labels.
+
+      Emit YAML at {{output_path}}:
+        issue:
+          number: integer
+          title: string
+          body: string
+          labels: [string]
+    tools:
+      - github_fetch_issue
+    transitions:
+      - to: analyze
+
+  analyze:
+    description: Analyze issue and plan implementation
+    agent_prompt: |
+      You have this issue to solve:
+
+      Title: {{outputs.fetch_issue.issue.title}}
+      Body: {{outputs.fetch_issue.issue.body}}
+      Labels: {{outputs.fetch_issue.issue.labels}}
+
+      Analyze the codebase to understand what needs to change.
+      Read relevant files using read_file. List files using run_shell with `ls` or `find`.
+
+      Create a detailed implementation plan.
+
+      Emit YAML at {{output_path}}:
+        plan:
+          summary: string
+          files_to_read: [string]
+          files_to_modify: [string]
+          files_to_create: [string]
+          test_strategy: string
+    tools:
+      - read_file
+      - run_shell
+    transitions:
+      - to: implement
+
+  implement:
+    description: Write code changes
+    agent_prompt: |
+      Implement the changes according to the plan:
+
+      {{outputs.analyze.plan.summary}}
+
+      Files to modify: {{outputs.analyze.plan.files_to_modify}}
+      Files to create: {{outputs.analyze.plan.files_to_create}}
+
+      Use write_file to create new files and modify existing ones.
+      Use read_file to check current content before modifying.
+
+      Emit YAML at {{output_path}}:
+        changes:
+          - file: string
+            action: "created" | "modified"
+            description: string
+    tools:
+      - read_file
+      - write_file
+      - run_shell
+    transitions:
+      - to: verify
+
+  verify:
+    description: Run tests and lint
+    agent_prompt: |
+      Verify the changes are correct.
+      Run: `npm test` and `npx tsc --noEmit` using run_shell.
+      If tests fail or there are type errors, fix them using write_file.
+
+      Emit YAML at {{output_path}}:
+        verification:
+          tests_passed: boolean
+          typecheck_passed: boolean
+          lint_passed: boolean
+          notes: string
+    tools:
+      - run_shell
+      - write_file
+    transitions:
+      - to: pr_gate
+
+  pr_gate:
+    description: Human approval before creating PR
+    gate: manual_approval
+    transitions:
+      - to: create_pr
+
+  create_pr:
+    description: Create pull request on GitHub
+    agent_prompt: |
+      Create a pull request for the changes.
+      Use git commands via run_shell to:
+      1. Create branch: feat/issue-{{inputs.issue_number}}-<slug>
+      2. Stage and commit changes
+      3. Push branch
+
+      Then use github_create_pull_request to open the PR.
+      Reference issue #{{inputs.issue_number}} in the PR body.
+
+      Emit YAML at {{output_path}}:
+        pr:
+          url: string
+          number: integer
+          branch: string
+    tools:
+      - run_shell
+      - github_create_pull_request
+    transitions:
+      - to: done
+
+  done:
+    terminal: true

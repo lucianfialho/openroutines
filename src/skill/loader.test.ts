@@ -19,11 +19,24 @@ describe("loadSkill", () => {
 
   it("should load a yaml skill", () => {
     const dir = mkdtempSync(join(tmpdir(), "skills-"));
-    writeFileSync(join(dir, "deploy.yaml"), "steps:\n  - build\n  - push");
+    const yaml = `id: deploy
+name: Deploy Service
+initial_state: build
+states:
+  build:
+    agent_prompt: Build the service
+    transitions:
+      - to: push
+  push:
+    agent_prompt: Push the image
+    terminal: true
+`;
+    writeFileSync(join(dir, "deploy.yaml"), yaml);
 
     const skill = loadSkill(dir, "deploy");
     expect(skill.name).toBe("deploy");
-    expect(skill.content).toContain("steps:");
+    expect(skill.format).toBe("state-machine");
+    expect(skill.stateMachine?.states.build?.agent_prompt).toBe("Build the service");
 
     rmSync(dir, { recursive: true });
   });

@@ -26,9 +26,12 @@ export const makeGateEngine = (config: GateEngineConfig) => {
 
   const checkGate = async (
     executionId: string,
-    type: Gate["type"]
+    type: Gate["type"],
+    stateId?: string
   ): Promise<{ approved: true } | { approved: false; gateId: string }> => {
-    const existing = await repository.findByExecution(executionId);
+    const existing = stateId
+      ? await repository.findByExecutionAndState(executionId, stateId)
+      : await repository.findByExecution(executionId);
 
     if (existing) {
       if (existing.status === "approved") {
@@ -44,6 +47,7 @@ export const makeGateEngine = (config: GateEngineConfig) => {
     const gate: Gate = {
       id: randomUUID(),
       executionId,
+      stateId,
       type,
       status: "pending",
       createdAt: new Date(),
@@ -62,3 +66,5 @@ export const makeGateEngine = (config: GateEngineConfig) => {
 
   return { checkGate, approve, reject };
 };
+
+export type GateEngine = ReturnType<typeof makeGateEngine>;

@@ -49,6 +49,7 @@ export const RoutineSchema = z.object({
     })
     .optional(),
   connectors: z.array(ConnectorSchema).optional(),
+  gates: z.array(z.enum(["manual_approval", "security_review", "test_pass"])).optional(),
 });
 
 export type RoutineInput = z.infer<typeof RoutineSchema>;

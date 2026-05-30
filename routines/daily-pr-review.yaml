@@ -5,9 +5,11 @@ triggers:
   - type: github
     events: [pull_request.opened]
 pipeline:
-  skill: solve-issue
+  skill: pr-review
 environment:
   network: { mode: trusted }
 connectors:
   - name: github
     source: .gates/connectors/github/connector.yaml
+gates:
+  - security_review

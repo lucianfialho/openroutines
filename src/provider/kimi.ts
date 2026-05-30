@@ -8,6 +8,7 @@
  * - Support streaming and non-streaming completions
  * - Handle rate limits (429) with exponential backoff retry
  * - Track token usage per execution
+ * - Function calling / tool use
  */
 
 import { Data, Effect, Schedule } from "effect";
@@ -15,9 +16,11 @@ import OpenAI from "openai";
 import type {
   CompletionRequest,
   CompletionResponse,
+  Message,
   StreamChunk,
   TokenUsage,
 } from "./types.js";
+import type { ToolDefinition, ToolCall } from "../tool/types.js";
 
 export interface KimiConfig {
   apiKey: string;
@@ -33,8 +36,8 @@ export class KimiError extends Data.TaggedError("KimiError")<{
   cause?: unknown;
 }> {}
 
-const DEFAULT_MODEL = "kimi-k2-6";
-const DEFAULT_BASE_URL = "https://api.moonshot.cn/v1";
+const DEFAULT_MODEL = "kimi-for-coding";
+const DEFAULT_BASE_URL = "https://api.kimi.com/coding/v1";
 
 /** Build an OpenAI client configured for Moonshot API. */
 const makeClient = (config: KimiConfig): OpenAI =>
@@ -66,12 +69,68 @@ const mapError = (err: unknown): KimiError => {
 /** Check if the error is a rate-limit (429). */
 const isRateLimit = (err: KimiError): boolean => err.status === 429;
 
-/** Build retry policy from config. */
-const makeRetryPolicy = (retries: number) =>
-  Schedule.compose(
-    Schedule.exponential("1 second"),
-    Schedule.recurs(retries)
-  ).pipe(Schedule.whileInput<KimiError>((err) => isRateLimit(err)));
+/** Build retry options from config. */
+const makeRetryOptions = (retries: number) => ({
+  schedule: Schedule.addDelay(Schedule.recurs(retries), () => Effect.succeed("1 second")),
+  while: (err: KimiError) => isRateLimit(err),
+});
+
+/** Convert our ToolDefinition to OpenAI tool format. */
+const toOpenAiTools = (
+  tools: ToolDefinition[]
+): OpenAI.Chat.Completions.ChatCompletionTool[] =>
+  tools.map((t) => ({
+    type: "function",
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters as Record<string, unknown>,
+    },
+  }));
+
+/** Convert our Message[] to OpenAI message format. */
+const toOpenAiMessages = (
+  messages: Message[]
+): OpenAI.Chat.Completions.ChatCompletionMessageParam[] =>
+  messages.map((m) => {
+    if (m.role === "tool") {
+      return {
+        role: "tool",
+        content: m.content,
+        tool_call_id: m.toolCallId ?? "",
+      };
+    }
+    if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
+      return {
+        role: "assistant",
+        content: m.content,
+        tool_calls: m.toolCalls.map((tc) => ({
+          id: tc.id,
+          type: "function" as const,
+          function: {
+            name: tc.name,
+            arguments: JSON.stringify(tc.arguments),
+          },
+        })),
+      };
+    }
+    return {
+      role: m.role,
+      content: m.content,
+    };
+  });
+
+/** Extract tool calls from OpenAI response. */
+const extractToolCalls = (
+  message: OpenAI.Chat.Completions.ChatCompletionMessage
+): ToolCall[] | undefined => {
+  if (!message.tool_calls || message.tool_calls.length === 0) return undefined;
+  return message.tool_calls.map((tc) => ({
+    id: tc.id,
+    name: tc.function.name,
+    arguments: JSON.parse(tc.function.arguments) as Record<string, unknown>,
+  }));
+};
 
 export const makeKimiProvider = (config: KimiConfig) => {
   if (!config.apiKey || config.apiKey.trim().length === 0) {
@@ -82,34 +141,58 @@ export const makeKimiProvider = (config: KimiConfig) => {
   const model = config.model ?? DEFAULT_MODEL;
   const timeoutMs = config.timeoutMs ?? 30_000;
   const retries = config.retries ?? 3;
-  const retryPolicy = makeRetryPolicy(retries);
+  const retryOptions = makeRetryOptions(retries);
 
-  const complete = (request: CompletionRequest): Effect.Effect<CompletionResponse, KimiError> =>
+  const buildMessages = (
+    request: CompletionRequest
+  ): OpenAI.Chat.Completions.ChatCompletionMessageParam[] => {
+    if (request.messages && request.messages.length > 0) {
+      return toOpenAiMessages(request.messages);
+    }
+    return [
+      ...(request.system
+        ? [{ role: "system" as const, content: request.system }]
+        : []),
+      { role: "user" as const, content: request.prompt ?? "" },
+    ];
+  };
+
+  const complete = (
+    request: CompletionRequest
+  ): Effect.Effect<CompletionResponse, KimiError> =>
     Effect.gen(function* () {
-      yield* Effect.log(`[Kimi] Non-streaming completion (${request.prompt.length} chars)`);
+      const inputDesc = request.prompt
+        ? `${request.prompt.length} chars`
+        : `${request.messages?.length ?? 0} messages`;
+      yield* Effect.log(`[Kimi] Non-streaming completion (${inputDesc})`);
 
       const response = yield* Effect.tryPromise({
         try: () =>
           Promise.race([
             client.chat.completions.create({
               model,
-              messages: [
-                ...(request.system ? [{ role: "system" as const, content: request.system }] : []),
-                { role: "user" as const, content: request.prompt },
-              ],
+              messages: buildMessages(request),
               temperature: request.temperature ?? 0.2,
               max_tokens: request.maxTokens ?? 4096,
+              ...(request.tools && request.tools.length > 0
+                ? { tools: toOpenAiTools(request.tools) }
+                : {}),
             }),
             new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error("Request timeout")), timeoutMs)
+              setTimeout(
+                () => reject(new Error("Request timeout")),
+                timeoutMs
+              )
             ),
           ]),
         catch: mapError,
-      }).pipe(Effect.retry(retryPolicy));
+      }).pipe(Effect.retry(retryOptions));
 
       const choice = response.choices[0];
       if (!choice) {
-        return yield* Effect.fail(new KimiError({ message: "No completion choice returned" }));
+        return yield* Effect.fail(
+          new KimiError({ message: "No completion choice returned" })
+        );
       }
 
       const usage: TokenUsage = {
@@ -127,6 +210,7 @@ export const makeKimiProvider = (config: KimiConfig) => {
         usage,
         model: response.model,
         finishReason: choice.finish_reason ?? "stop",
+        toolCalls: extractToolCalls(choice.message),
       };
     });
 
@@ -134,27 +218,29 @@ export const makeKimiProvider = (config: KimiConfig) => {
     request: CompletionRequest
   ): Effect.Effect<AsyncIterable<StreamChunk>, KimiError> =>
     Effect.gen(function* () {
-      yield* Effect.log(`[Kimi] Streaming completion (${request.prompt.length} chars)`);
+      yield* Effect.log(
+        `[Kimi] Streaming completion (${request.prompt?.length ?? 0} chars)`
+      );
 
       const stream = yield* Effect.tryPromise({
         try: () =>
           Promise.race([
             client.chat.completions.create({
               model,
-              messages: [
-                ...(request.system ? [{ role: "system" as const, content: request.system }] : []),
-                { role: "user" as const, content: request.prompt },
-              ],
+              messages: buildMessages(request),
               temperature: request.temperature ?? 0.2,
               max_tokens: request.maxTokens ?? 4096,
               stream: true,
             }),
             new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error("Request timeout")), timeoutMs)
+              setTimeout(
+                () => reject(new Error("Request timeout")),
+                timeoutMs
+              )
             ),
           ]),
         catch: mapError,
-      }).pipe(Effect.retry(retryPolicy));
+      }).pipe(Effect.retry(retryOptions));
 
       const iterator: AsyncIterable<StreamChunk> = {
         async *[Symbol.asyncIterator]() {
@@ -176,14 +262,13 @@ export const makeKimiProvider = (config: KimiConfig) => {
 
             yield {
               content: delta,
-              usage:
-                finishReason
-                  ? {
-                      promptTokens: totalPromptTokens,
-                      completionTokens: totalCompletionTokens,
-                      totalTokens: totalPromptTokens + totalCompletionTokens,
-                    }
-                  : undefined,
+              usage: finishReason
+                ? {
+                    promptTokens: totalPromptTokens,
+                    completionTokens: totalCompletionTokens,
+                    totalTokens: totalPromptTokens + totalCompletionTokens,
+                  }
+                : undefined,
               finishReason: finishReason ?? undefined,
             };
           }

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Effect, Cause } from "effect";
 import { makeGitHubConnector, GitHubCliError } from "./github.js";
 
@@ -117,18 +117,17 @@ describe("makeGitHubConnector", () => {
     mockStderr = "Authentication failed";
 
     const connector = makeGitHubConnector(config);
-    let capturedError: Error | undefined;
+    const exit = await Effect.runPromiseExit(connector.fetchIssue(1));
 
-    await Effect.runPromise(
-      connector.fetchIssue(1).pipe(
-        Effect.catchAll((err) => {
-          capturedError = err;
-          return Effect.succeed(undefined);
-        })
-      )
-    );
-
-    expect(capturedError).toBeInstanceOf(GitHubCliError);
-    expect((capturedError as GitHubCliError).stderr).toBe("Authentication failed");
+    expect(exit._tag).toBe("Failure");
+    if (exit._tag === "Failure") {
+      const result = Cause.findError(exit.cause);
+      expect(result._tag).toBe("Success");
+      if (result._tag === "Success") {
+        const err = result.success;
+        expect(err).toBeInstanceOf(GitHubCliError);
+        expect((err as GitHubCliError).stderr).toBe("Authentication failed");
+      }
+    }
   });
 });

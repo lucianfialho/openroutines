@@ -71,7 +71,7 @@ describe("createGitHubWebhookHandler", () => {
     expect(queue.jobs[0]).toMatchObject({
       trigger: {
         type: "github",
-        payload: { event: "pull_request", body },
+        payload: { event: "pull_request.opened", body },
       },
     });
   });
@@ -161,7 +161,7 @@ describe("createGitHubWebhookHandler", () => {
     expect(res.statusCode).toBe(202);
     expect(queue.jobs[0]).toMatchObject({
       trigger: {
-        payload: { event: "issues", body },
+        payload: { event: "issues.opened", body },
       },
     });
   });

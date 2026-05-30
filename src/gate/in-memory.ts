@@ -15,7 +15,13 @@ export const makeInMemoryGateRepository = (): GateRepository => {
     },
     findByExecution: async (executionId) => {
       for (const gate of store.values()) {
-        if (gate.executionId === executionId) return gate;
+        if (gate.executionId === executionId && !gate.stateId) return gate;
+      }
+      return undefined;
+    },
+    findByExecutionAndState: async (executionId, stateId) => {
+      for (const gate of store.values()) {
+        if (gate.executionId === executionId && gate.stateId === stateId) return gate;
       }
       return undefined;
     },

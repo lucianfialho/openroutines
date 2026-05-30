@@ -35,13 +35,15 @@ describe("matchesTrigger", () => {
     ).toBe(false);
   });
 
-  it("should match github trigger when no event filter in payload", () => {
+  it("should NOT match github trigger when no event filter in payload", () => {
+    // Triggers with specific events require the event name in the payload.
+    // This prevents ambiguous matching when multiple routines use github triggers.
     expect(
       matchesTrigger(
         { type: "github", events: ["pull_request.opened"] },
         { type: "github", payload: {} }
       )
-    ).toBe(true);
+    ).toBe(false);
   });
 });
 

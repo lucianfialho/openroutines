@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "required": ["verdict", "summary"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"] },
+    "summary": { "type": "string" }
+  }
+}

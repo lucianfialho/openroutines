@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Effect } from "effect";
 import OpenAI from "openai";
-import { makeKimiProvider, KimiError } from "./kimi.js";
+import { makeKimiProvider } from "./kimi.js";
 
 vi.mock("openai", () => {
   return {

@@ -55,7 +55,7 @@ describe("makeGateEngine", () => {
     const repo = makeInMemoryGateRepository();
     const engine = makeGateEngine({ repository: repo });
 
-    const blocked = await engine.checkGate("exec-1", "security_review");
+    await engine.checkGate("exec-1", "security_review");
     const gate = await repo.findByExecution("exec-1");
     expect(gate?.type).toBe("security_review");
   });

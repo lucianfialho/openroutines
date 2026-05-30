@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { verifySignature, SignatureMismatchError } from "./github-verifier.js";
+import { verifySignature } from "./github-verifier.js";
 import { createHmac } from "crypto";
 
 const makeSignature = (secret: string, payload: string): string => {

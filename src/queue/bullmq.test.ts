@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { makeBullMqQueue } from "./bullmq.js";
 import type { Job } from "./types.js";
 
@@ -15,7 +15,7 @@ vi.mock("bullmq", () => ({
       close: vi.fn(),
     };
   }),
-  Worker: vi.fn(function (name: string, processor: Function, opts: unknown) {
+  Worker: vi.fn(function (name: string, processor: (job: unknown) => Promise<unknown>, opts: unknown) {
     return {
       name,
       processor,

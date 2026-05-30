@@ -9,3 +9,5 @@ environment:
 connectors:
   - name: github
     source: .gates/connectors/github/connector.yaml
+gates:
+  - manual_approval

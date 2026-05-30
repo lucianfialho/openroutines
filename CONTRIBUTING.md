@@ -71,16 +71,19 @@ Before marking PR ready:
 
 ## Adding a New Connector
 
-1. Create `src/connector/<name>.ts`
-2. Export a factory function that returns Effect-based operations
-3. Add tests with mocked CLI commands
-4. Update `docs/ARCHITECTURE.md`
+1. Create `src/tool/<name>-tools.ts`
+2. Export a factory function `make<Name>Tools(config)` that returns an array of `ToolDefinition`
+3. Register the tools in `src/app.ts` via `toolRegistry.registerMany()`
+4. Add tests with mocked CLI commands
+5. Update `docs/ARCHITECTURE.md`
 
 ## Adding a New Skill
 
 1. Create `.gates/skills/<name>.md`
 2. Follow the skill template (Goal, Input, Output, Steps)
 3. Reference the skill in a routine YAML
+
+See [`docs/TEMPLATES.md`](docs/TEMPLATES.md) for skill and routine templates.
 
 ## Architecture Decisions
 

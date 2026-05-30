@@ -1,0 +1,58 @@
+id: pr-review
+version: 1
+description: Review a PR with structured analysis passes
+
+inputs:
+  required:
+    - name: pr_number
+      type: integer
+      description: The PR number to review
+
+initial_state: fetch_pr
+
+states:
+  fetch_pr:
+    description: Fetch PR details from GitHub
+    agent_prompt: |
+      Use `gh pr view {{inputs.pr_number}} --json number,title,body,files,author`
+      to fetch the PR details.
+
+      Emit YAML at {{output_path}}:
+        pr:
+          number: integer
+          title: string
+          body: string
+          files: [string]
+          author: string
+    transitions:
+      - to: analyze
+
+  analyze:
+    description: Analyze the PR for issues
+    agent_prompt: |
+      Analyze the PR files for: bugs, security issues, missing tests,
+      performance problems, and style issues.
+
+      Emit YAML at {{output_path}}:
+        findings:
+          - file: string
+            line: integer
+            severity: "error" | "warning" | "info"
+            message: string
+    transitions:
+      - to: verdict
+
+  verdict:
+    description: Emit final review verdict
+    agent_prompt: |
+      Based on the findings, emit a final verdict.
+
+      Emit YAML at {{output_path}}:
+        verdict: "APPROVE" | "REQUEST_CHANGES" | "COMMENT"
+        summary: string
+    gate: manual_approval
+    transitions:
+      - to: done
+
+  done:
+    terminal: true

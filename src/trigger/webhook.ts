@@ -7,6 +7,7 @@
 
 import type { Request, Response, Express } from "express";
 import express from "express";
+import { randomUUID } from "crypto";
 import { verifySignature } from "./github-verifier.js";
 import type { JobQueue } from "../queue/types.js";
 
@@ -39,12 +40,15 @@ export const createGitHubWebhookHandler = (config: WebhookConfig) => {
       return;
     }
 
+    // Build full event name: e.g. "issues.opened", "pull_request.opened"
+    const action = req.body?.action;
+    const fullEvent = action ? `${eventType}.${action}` : eventType;
+
     const job = {
-      id: crypto.randomUUID(),
-      routineId: "github-webhook", // resolved by engine matcher
+      id: randomUUID(),
       trigger: {
         type: "github" as const,
-        payload: { event: eventType, body: req.body },
+        payload: { event: fullEvent, body: req.body },
       },
     };
 

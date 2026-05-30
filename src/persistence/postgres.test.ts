@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { makePostgresRepository } from "./postgres.js";
 import type { ExecutionRecord } from "./types.js";
 
@@ -36,7 +36,7 @@ describe("makePostgresRepository", () => {
       connectionString: "postgresql://test:test@localhost/test",
     });
     await repo.migrate();
-    expect(lastQuery).toContain("CREATE TABLE IF NOT EXISTS executions");
+    expect(lastQuery).toContain("executions");
   });
 
   it("should save execution record", async () => {

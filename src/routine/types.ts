@@ -10,6 +10,7 @@ export interface Routine {
   pipeline: Pipeline;
   environment?: Environment;
   connectors?: Array<ConnectorRef>;
+  gates?: Array<"manual_approval" | "security_review" | "test_pass">;
 }
 
 export interface TriggerDef {

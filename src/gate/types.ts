@@ -10,6 +10,7 @@ export type GateStatus = "pending" | "approved" | "rejected";
 export interface Gate {
   id: string;
   executionId: string;
+  stateId?: string;
   type: "manual_approval" | "security_review" | "test_pass";
   status: GateStatus;
   reason?: string;
@@ -20,5 +21,6 @@ export interface Gate {
 export interface GateRepository {
   save: (gate: Gate) => Promise<void>;
   findByExecution: (executionId: string) => Promise<Gate | undefined>;
+  findByExecutionAndState: (executionId: string, stateId: string) => Promise<Gate | undefined>;
   resolve: (gateId: string, status: GateStatus, reason?: string) => Promise<void>;
 }

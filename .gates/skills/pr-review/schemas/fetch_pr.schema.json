@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "required": ["pr"],
+  "properties": {
+    "pr": {
+      "type": "object",
+      "required": ["number", "title", "body", "files", "author"],
+      "properties": {
+        "number": { "type": "integer" },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "files": { "type": "array", "items": { "type": "string" } },
+        "author": { "type": "string" }
+      }
+    }
+  }
+}

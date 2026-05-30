@@ -1,0 +1,18 @@
+id: self-improve
+name: Self-Improve
+description: Analyzes recent executions and creates new routines to fill gaps.
+
+triggers:
+  - type: schedule
+    cron: "0 9 * * 1"  # Every Monday at 9am
+  - type: api
+    path: /trigger/self-improve
+
+gates:
+  - manual_approval
+
+pipeline:
+  skill: routine-creator
+  inputs:
+    goal: "Analyze recent OpenRoutines executions and create a new routine that addresses the most common failure pattern or missing automation."
+    routine_name: "auto-generated"

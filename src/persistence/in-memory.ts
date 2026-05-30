@@ -16,5 +16,13 @@ export const makeInMemoryRepository = (): ExecutionRepository => {
     findById: async (id) => store.get(id),
     findByRoutine: async (routineId) =>
       Array.from(store.values()).filter((r) => r.routineId === routineId),
+    findAll: async (opts) => {
+      const all = Array.from(store.values()).sort(
+        (a, b) => b.startedAt.getTime() - a.startedAt.getTime()
+      );
+      const offset = opts?.offset ?? 0;
+      const limit = opts?.limit ?? all.length;
+      return all.slice(offset, offset + limit);
+    },
   };
 };

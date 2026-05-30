@@ -9,7 +9,7 @@ import type { TriggerEvent } from "../routine/matcher.js";
 
 export interface Job {
   id: string;
-  routineId: string;
+  routineId?: string;
   trigger: TriggerEvent;
 }
 

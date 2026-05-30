@@ -4,11 +4,22 @@
  * Shared types for LLM provider adapters.
  */
 
+import type { ToolDefinition, ToolCall } from "../tool/types.js";
+
+export interface Message {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string;
+  toolCallId?: string;
+  toolCalls?: ToolCall[];
+}
+
 export interface CompletionRequest {
-  prompt: string;
+  prompt?: string;
+  messages?: Message[];
   system?: string;
   temperature?: number;
   maxTokens?: number;
+  tools?: ToolDefinition[];
 }
 
 export interface CompletionResponse {
@@ -16,6 +27,7 @@ export interface CompletionResponse {
   usage: TokenUsage;
   model: string;
   finishReason: string;
+  toolCalls?: ToolCall[];
 }
 
 export interface TokenUsage {
