@@ -4,11 +4,14 @@ services:
   app:
     build: .
     ports:
-      - "3001:3000"
+      - "3003:3000"
     env_file:
       - .env
     environment:
       - NODE_ENV=production
+      - PORT=3000
+      - PROJECT_ROOT=/repo
+      - WORKTREE_BASE=/tmp/or-worktrees
       - DATABASE_URL=postgresql://openroutines:openroutines@postgres:5432/openroutines
       - REDIS_URL=redis://redis:6379
       - KIMI_API_KEY=${KIMI_API_KEY}
@@ -17,8 +20,10 @@ services:
       - postgres
       - redis
     volumes:
+      - .:/repo:rw
       - ./routines:/app/routines:ro
       - ./.gates:/app/.gates:ro
+      - worktrees:/tmp/or-worktrees
 
   postgres:
     image: postgres:16-alpine
@@ -41,3 +46,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  worktrees:
