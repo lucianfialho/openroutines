@@ -100,6 +100,13 @@ export const makeGitWorktreeTools = (): Tool[] => [
         await execAsync('git config user.name "OpenRoutines Bot"', {
           cwd: worktreePath,
         });
+        // Ensure node_modules symlink is ignored so git add -A doesn't stage it
+        try {
+          const { appendFileSync } = await import("fs");
+          appendFileSync(`${worktreePath}/.gitignore`, "\nnode_modules\n", "utf8");
+        } catch {
+          // ignore if .gitignore append fails
+        }
 
         // Store for later cleanup
         const executionId = args._executionId as string | undefined;
