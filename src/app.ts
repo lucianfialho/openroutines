@@ -659,6 +659,11 @@ export const createApp = async (config: AppConfig) => {
     res.sendFile(join(process.cwd(), "public", "index.html"));
   });
 
+  // Echo endpoint
+  app.get("/echo", (req, res) => {
+    res.json({ echo: req.query.message || "hello" });
+  });
+
   // Health check
   app.get("/health", (_req, res) => {
     res.json({
