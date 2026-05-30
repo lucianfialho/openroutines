@@ -190,9 +190,12 @@ export const makeKimiProvider = (config: KimiConfig) => {
 
       const choice = response.choices[0];
       if (!choice) {
-        return yield* Effect.fail(
-          new KimiError({ message: "No completion choice returned" })
-        );
+        yield* Effect.logError(`[Kimi] No completion choice returned. Response: ${JSON.stringify(response)}`);
+        return yield* Effect.fail(new KimiError({ message: "No completion choice returned" }));
+      }
+
+      if (choice.finish_reason === "length") {
+        yield* Effect.logWarning(`[Kimi] Completion truncated due to max_tokens limit`);
       }
 
       const usage: TokenUsage = {

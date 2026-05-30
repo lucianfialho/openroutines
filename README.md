@@ -59,6 +59,14 @@ See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for the full walkthrough.
 | BullMQ Queue | ✅ Redis-backed job queue |
 | CI/CD | ✅ GitHub Actions (test + type-check + Docker) |
 
+## Deploy Options
+
+| Target | Best For | Docs |
+|---|---|---|
+| **Vercel + Neon** | Free serverless, always-on webhooks | [`VERCEL-DEPLOY.md`](VERCEL-DEPLOY.md) |
+| **Tailscale + Local** | Private tailnet, self-hosted | [`TAILSCALE-DEPLOY.md`](TAILSCALE-DEPLOY.md) |
+| **Docker Compose** | Local dev, full control | [`docker-compose.yml`](docker-compose.yml) |
+
 ## Architecture
 
 ```
