@@ -663,7 +663,8 @@ export const createApp = async (config: AppConfig) => {
 
   // Web UI
   app.get("/ui", (_req, res) => {
-    res.sendFile(join(process.cwd(), "public", "index.html"));
+    const projectRoot = process.env.PROJECT_ROOT || process.cwd();
+    res.sendFile(join(projectRoot, "public", "index.html"));
   });
 
   // Health check
