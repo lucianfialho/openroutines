@@ -142,6 +142,11 @@ states:
       4. Was any existing functionality accidentally modified?
       5. Are there any duplicate declarations or redundant code?
       6. If changes is empty but the issue requires changes, REJECT.
+      7. If the issue mentions tests, acceptance criteria, or verification steps, were they addressed? If not, REJECT.
+      8. Run `git status --short` in the worktree. Are there untracked files that should NOT be committed (symlinks, .env, node_modules, etc.)? If yes, REJECT.
+      9. Does the change address ALL parts of the issue, or only the most visible symptom? If only symptom, REJECT.
+      10. If the fix touches git, .gitignore, or worktree logic, verify with `git check-ignore` that the affected paths are correctly ignored.
+      11. Is the commit message appropriate? If the issue is a bug, it should use `fix:`, not `feat:`.
 
       If everything looks correct, emit_output:
         content: |

@@ -234,8 +234,13 @@ export const runStateMachine = (
           if (commitHandler) {
             yield* Effect.log(`[StateMachine] Auto-running git_commit_and_push for state ${stateId}`);
             try {
+              const issueTitle = String((outputs.fetch_issue as any)?.issue?.title ?? "implement changes");
+              const issueLabels = ((outputs.fetch_issue as any)?.issue?.labels ?? []) as Array<{ name: string }>;
+              const isBug = issueLabels.some((l) => l.name === "bug") || /bug|fix|crash|error|race|leak/i.test(issueTitle);
+              const prefix = isBug ? "fix" : "feat";
+              const commitMessage = `${prefix}: ${issueTitle} (closes #${inputs.issue_number})`;
               const commitResult = yield* Effect.promise(() =>
-                commitHandler({ cwd: worktreePath, message: `feat: implement changes (closes #${inputs.issue_number})` })
+                commitHandler({ cwd: worktreePath, message: commitMessage })
               );
               const parsed = JSON.parse(String(commitResult));
               if (parsed && !parsed.error) {
@@ -256,8 +261,12 @@ export const runStateMachine = (
             if (prHandler) {
               yield* Effect.log(`[StateMachine] Auto-running github_create_pull_request for state ${stateId}`);
               try {
+                const issueTitle = String((outputs.fetch_issue as any)?.issue?.title ?? "implement changes");
+                const issueLabels = ((outputs.fetch_issue as any)?.issue?.labels ?? []) as Array<{ name: string }>;
+                const isBug = issueLabels.some((l) => l.name === "bug") || /bug|fix|crash|error|race|leak/i.test(issueTitle);
+                const prTitle = `${isBug ? "fix" : "feat"}: ${issueTitle}`;
                 const prResult = yield* Effect.promise(() =>
-                  prHandler({ branch, title: `feat: implement changes`, body: `Closes #${inputs.issue_number}` })
+                  prHandler({ branch, title: prTitle, body: `Closes #${inputs.issue_number}` })
                 );
                 const parsed = JSON.parse(String(prResult));
                 if (parsed && !parsed.error) {
