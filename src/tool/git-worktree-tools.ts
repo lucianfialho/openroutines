@@ -9,13 +9,15 @@
 
 import { exec } from "child_process";
 import { promisify } from "util";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, symlinkSync } from "fs";
 import { tmpdir } from "os";
 import { resolve } from "path";
 import type { Tool } from "./types.js";
 
 const execAsync = promisify(exec);
-const PROJECT_ROOT = resolve(process.cwd());
+const PROJECT_ROOT = process.env.PROJECT_ROOT
+  ? resolve(process.env.PROJECT_ROOT)
+  : resolve(process.cwd());
 
 interface WorktreeInfo {
   path: string;
@@ -44,7 +46,9 @@ export const makeGitWorktreeTools = (): Tool[] => [
     },
     handler: async (args) => {
       const branch = String(args.branch);
-      const worktreePath = mkdtempSync(resolve(tmpdir(), "or-worktree-"));
+      // Use a persistent directory for worktrees so they survive container restarts
+      const worktreeBase = process.env.WORKTREE_BASE || tmpdir();
+      const worktreePath = mkdtempSync(resolve(worktreeBase, "or-worktree-"));
 
       try {
         // Create worktree from current HEAD (has latest local code)
@@ -52,6 +56,18 @@ export const makeGitWorktreeTools = (): Tool[] => [
           `git worktree add -b ${branch} ${worktreePath} HEAD`,
           { cwd: PROJECT_ROOT }
         );
+
+        // Symlink node_modules so npm commands work in worktree
+        // When PROJECT_ROOT is mounted (e.g. in Docker), node_modules lives
+        // in the app directory (process.cwd()), not in the mounted repo.
+        const nodeModulesSource = process.env.PROJECT_ROOT
+          ? `${resolve(process.cwd())}/node_modules`
+          : `${PROJECT_ROOT}/node_modules`;
+        try {
+          symlinkSync(nodeModulesSource, `${worktreePath}/node_modules`, "junction");
+        } catch {
+          // ignore if symlink already exists or fails
+        }
 
         // Configure git user in worktree (needed for commits)
         await execAsync('git config user.email "openroutines@bot.local"', {

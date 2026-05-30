@@ -13,7 +13,9 @@ import type { Tool } from "./types.js";
 
 const execAsync = promisify(exec);
 
-const PROJECT_ROOT = resolve(process.cwd());
+const PROJECT_ROOT = process.env.PROJECT_ROOT
+  ? resolve(process.env.PROJECT_ROOT)
+  : resolve(process.cwd());
 
 const sanitizePath = (inputPath: string, cwd?: string): string => {
   const base = cwd ? resolve(cwd) : PROJECT_ROOT;
@@ -171,7 +173,7 @@ export const makeFilesystemTools = (): Tool[] => [
 
       let content = readFileSync(filePath, "utf-8");
       const operations = args.operations as Array<{ type: string; search: string; content: string }>;
-      const applied: Array<{ type: string; search: string; applied: boolean }> = [];
+      const applied: Array<{ type: string; search: string; applied: boolean; reason?: string }> = [];
 
       for (const op of operations) {
         const search = String(op.search);
@@ -179,7 +181,13 @@ export const makeFilesystemTools = (): Tool[] => [
         const index = content.indexOf(search);
 
         if (index === -1) {
-          applied.push({ type: op.type, search, applied: false });
+          applied.push({ type: op.type, search, applied: false, reason: "search not found" });
+          continue;
+        }
+
+        // Prevent duplicate insertions
+        if (op.type === "insert_after" && content.includes(replacement)) {
+          applied.push({ type: op.type, search, applied: false, reason: "content already exists" });
           continue;
         }
 
