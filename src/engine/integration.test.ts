@@ -354,7 +354,9 @@ describe("OpenRoutines E2E Pipeline", () => {
           return {
             ...tool,
             handler: async (args: any) => {
+              console.log("[HOOK] git_create_worktree called with:", args);
               const result = await tool.handler(args);
+              console.log("[HOOK] git_create_worktree result:", result);
               const parsed = JSON.parse(String(result));
               if (parsed.worktree?.path) {
                 worktreePath = parsed.worktree.path;
