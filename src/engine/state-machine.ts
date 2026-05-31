@@ -124,6 +124,9 @@ export const runStateMachine = (
 
       yield* Effect.log(`[StateMachine] State: ${stateId}`);
 
+      // Persist context at the START of each state so resume begins from the correct state
+      yield* persistStateMachineContext(repository, executionId, stateId, outputs, inputs, implementReviewIterations);
+
       // Terminal state
       if (state.terminal) {
         yield* Effect.log(`[StateMachine] Reached terminal state: ${stateId}`);

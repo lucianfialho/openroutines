@@ -14,10 +14,15 @@ export const makeInMemoryGateRepository = (): GateRepository => {
       store.set(gate.id, gate);
     },
     findByExecution: async (executionId) => {
+      let mostRecent: Gate | undefined;
       for (const gate of store.values()) {
-        if (gate.executionId === executionId && !gate.stateId) return gate;
+        if (gate.executionId === executionId) {
+          if (!mostRecent || gate.createdAt > mostRecent.createdAt) {
+            mostRecent = gate;
+          }
+        }
       }
-      return undefined;
+      return mostRecent;
     },
     findByExecutionAndState: async (executionId, stateId) => {
       for (const gate of store.values()) {

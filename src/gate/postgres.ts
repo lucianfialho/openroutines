@@ -63,7 +63,7 @@ export const makePostgresGateRepository = (
     executionId: string
   ): Promise<Gate | undefined> => {
     const result = await pool.query(
-      `SELECT * FROM gates WHERE execution_id = $1 AND state_id IS NULL ORDER BY created_at DESC LIMIT 1`,
+      `SELECT * FROM gates WHERE execution_id = $1 ORDER BY created_at DESC LIMIT 1`,
       [executionId]
     );
     if (result.rows.length === 0) return undefined;
