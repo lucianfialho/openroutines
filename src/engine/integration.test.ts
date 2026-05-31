@@ -69,12 +69,27 @@ interface MockLLMScenario {
 }
 
 function createMockProvider(scenarios: MockLLMScenario[]) {
-  let callIndex = 0;
+  let scenarioIndex = 0;
+  let lastToolCalls: string[] = [];
 
   return {
     complete: (request: CompletionRequest) =>
       Effect.gen(function* () {
-        const scenario = scenarios[callIndex];
+        // If last assistant message had tool calls, return final answer (tools were executed)
+        const lastAssistantMsg = request.messages?.slice().reverse().find((m) => m.role === "assistant");
+        if (lastAssistantMsg?.toolCalls && lastAssistantMsg.toolCalls.length > 0) {
+          // Check if any tool results are pending (last message is tool)
+          const lastMsg = request.messages?.[request.messages.length - 1];
+          if (lastMsg?.role === "tool") {
+            return {
+              content: "Continuing after tool execution",
+              usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+              toolCalls: [],
+            };
+          }
+        }
+
+        const scenario = scenarios[scenarioIndex];
         if (!scenario) {
           return {
             content: "No more scenarios",
@@ -83,11 +98,15 @@ function createMockProvider(scenarios: MockLLMScenario[]) {
           };
         }
 
-        callIndex++;
+        // Only advance to next scenario if this is a new state (not a follow-up)
+        const currentToolNames = scenario.toolCalls.map((tc) => tc.name).sort().join(",");
+        if (lastToolCalls.join(",") !== currentToolNames) {
+          scenarioIndex++;
+          lastToolCalls = scenario.toolCalls.map((tc) => tc.name);
+        }
 
-        // Build tool calls from scenario
         const toolCalls = scenario.toolCalls.map((tc) => ({
-          id: `call-${callIndex}-${tc.name}`,
+          id: `call-${scenarioIndex}-${tc.name}`,
           name: tc.name,
           arguments: tc.args,
         }));
