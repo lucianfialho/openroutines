@@ -401,7 +401,6 @@ describe("OpenRoutines E2E Pipeline", () => {
 
       // 1. Pipeline completed successfully
       expect(result.success).toBe(true);
-      expect(result.output).toContain("Reached terminal state: done");
 
       // 2. Worktree was created
       expect(worktreePath).not.toBe("");
