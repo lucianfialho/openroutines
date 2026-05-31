@@ -69,50 +69,51 @@ interface MockLLMScenario {
 }
 
 function createMockProvider(scenarios: MockLLMScenario[]) {
-  let scenarioIndex = 0;
-  let lastToolCalls: string[] = [];
+  const scenarioMap = new Map(scenarios.map((s) => [s.stateId, s]));
 
   return {
     complete: (request: CompletionRequest) =>
       Effect.gen(function* () {
-        // If last assistant message had tool calls, return final answer (tools were executed)
+        const prompt = request.prompt || request.messages?.[request.messages.length - 1]?.content || "";
+
+        // If last assistant message had tool calls and last message is tool result,
+        // return final answer to close the tool loop
+        const lastMsg = request.messages?.[request.messages.length - 1];
         const lastAssistantMsg = request.messages?.slice().reverse().find((m) => m.role === "assistant");
-        if (lastAssistantMsg?.toolCalls && lastAssistantMsg.toolCalls.length > 0) {
-          // Check if any tool results are pending (last message is tool)
-          const lastMsg = request.messages?.[request.messages.length - 1];
-          if (lastMsg?.role === "tool") {
-            return {
-              content: "Continuing after tool execution",
-              usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
-              toolCalls: [],
-            };
-          }
+        if (lastAssistantMsg?.toolCalls && lastAssistantMsg.toolCalls.length > 0 && lastMsg?.role === "tool") {
+          return {
+            content: "Final answer after tool execution",
+            usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+            toolCalls: [],
+          };
         }
 
-        const scenario = scenarios[scenarioIndex];
+        // Identify state from prompt content
+        let stateId = "unknown";
+        if (prompt.includes("Fetch issue")) stateId = "fetch_issue";
+        else if (prompt.includes("Analyze issue")) stateId = "analyze";
+        else if (prompt.includes("Create worktree")) stateId = "create_worktree";
+        else if (prompt.includes("Implement fix")) stateId = "implement";
+        else if (prompt.includes("Run tests")) stateId = "verify";
+        else if (prompt.includes("Commit changes")) stateId = "commit_and_push";
+
+        const scenario = scenarioMap.get(stateId);
         if (!scenario) {
           return {
-            content: "No more scenarios",
+            content: `No scenario for state: ${stateId}`,
             usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
             toolCalls: [],
           };
         }
 
-        // Only advance to next scenario if this is a new state (not a follow-up)
-        const currentToolNames = scenario.toolCalls.map((tc) => tc.name).sort().join(",");
-        if (lastToolCalls.join(",") !== currentToolNames) {
-          scenarioIndex++;
-          lastToolCalls = scenario.toolCalls.map((tc) => tc.name);
-        }
-
         const toolCalls = scenario.toolCalls.map((tc) => ({
-          id: `call-${scenarioIndex}-${tc.name}`,
+          id: `call-${stateId}-${tc.name}`,
           name: tc.name,
           arguments: tc.args,
         }));
 
         return {
-          content: `Mock response for ${scenario.stateId}`,
+          content: `Mock response for ${stateId}`,
           usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
           toolCalls,
         };
