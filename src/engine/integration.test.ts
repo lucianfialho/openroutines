@@ -74,19 +74,8 @@ function createMockProvider(scenarios: MockLLMScenario[]) {
   return {
     complete: (request: CompletionRequest) =>
       Effect.gen(function* () {
-        const prompt = request.prompt || request.messages?.[request.messages.length - 1]?.content || "";
-
-        // If last assistant message had tool calls and last message is tool result,
-        // return final answer to close the tool loop
-        const lastMsg = request.messages?.[request.messages.length - 1];
-        const lastAssistantMsg = request.messages?.slice().reverse().find((m) => m.role === "assistant");
-        if (lastAssistantMsg?.toolCalls && lastAssistantMsg.toolCalls.length > 0 && lastMsg?.role === "tool") {
-          return {
-            content: "Final answer after tool execution",
-            usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
-            toolCalls: [],
-          };
-        }
+        // Get prompt from either direct prompt or last user message
+        const prompt = request.prompt || request.messages?.filter((m) => m.role === "user").pop()?.content || "";
 
         // Identify state from prompt content
         let stateId = "unknown";
