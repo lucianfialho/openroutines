@@ -101,7 +101,8 @@ export const createApp = async (config: AppConfig) => {
   // 2c. Setup span and feedback repositories
   const pgPool = config.databaseUrl
     ? (persistence as unknown as { pool: import("pg").Pool }).pool
-    : undefined;
+    : undefined
+export const goodbye = () => "bye";;
   const spanRepository: SpanRepository = pgPool
     ? makePostgresSpanRepository(pgPool)
     : makeInMemorySpanRepository();
