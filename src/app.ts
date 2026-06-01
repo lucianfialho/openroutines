@@ -670,6 +670,11 @@ export const goodbye = () => "bye";;
 
   // Health check
   app.get("/health", (_req, res) => {
+  // Version endpoint
+  app.get("/version", (_req, res) => {
+    res.json({ version: process.env.npm_package_version || "0.0.0" });
+  });
+
     res.json({
       status: "ok",
       routines: routines.length,
