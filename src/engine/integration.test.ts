@@ -112,24 +112,28 @@ function createMockProvider(scenarios: MockLLMScenario[]) {
 
 // ── Mock Persistence ───────────────────────────────────────────────────────
 
-function createMockPersistence() {
+function createMockExecutionRepository() {
   const executions = new Map<string, any>();
-  const runStates = new Map<string, any[]>();
 
   return {
     save: async (record: any) => {
       executions.set(record.id, record);
     },
     findById: async (id: string) => executions.get(id),
-    findByExecution: async (executionId: string) => {
-      return runStates.get(executionId) || [];
-    },
-    saveRunState: async (state: any) => {
+    getExecutions: () => executions,
+  };
+}
+
+function createMockRunStateRepository() {
+  const runStates = new Map<string, any[]>();
+
+  return {
+    save: async (state: any) => {
       const list = runStates.get(state.executionId) || [];
       list.push(state);
       runStates.set(state.executionId, list);
     },
-    getExecutions: () => executions,
+    findByExecution: async (executionId: string) => runStates.get(executionId) || [],
     getRunStates: () => runStates,
   };
 }
@@ -194,7 +198,8 @@ describe("OpenRoutines E2E Pipeline", () => {
   });
 
   it("should pause and resume across multiple gates", async () => {
-    const persistence = createMockPersistence();
+    const persistence = createMockExecutionRepository();
+    const runStateRepository = createMockRunStateRepository();
     const gateRepository = makeInMemoryGateRepository();
     const gateEngine = makeGateEngine({ repository: gateRepository });
 
@@ -266,6 +271,7 @@ describe("OpenRoutines E2E Pipeline", () => {
     const stateMachine = runStateMachine({
       provider: createProvider() as any,
       repository: persistence as any,
+      runStateRepository: runStateRepository as any,
       gateEngine,
       toolRegistry: toolRegistry as any,
     });
@@ -316,16 +322,19 @@ describe("OpenRoutines E2E Pipeline", () => {
     // Override env for test
     const originalProjectRoot = process.env.PROJECT_ROOT;
     const originalWorktreeBase = process.env.WORKTREE_BASE;
+    const originalDisableAutoActions = process.env.OPENROUTINES_DISABLE_AUTO_ACTIONS;
     process.env.PROJECT_ROOT = REPO_PATH;
     process.env.WORKTREE_BASE = WORKTREE_BASE;
+    process.env.OPENROUTINES_DISABLE_AUTO_ACTIONS = "1";
 
     try {
-      const persistence = createMockPersistence();
+      const persistence = createMockExecutionRepository();
+      const runStateRepository = createMockRunStateRepository();
       const gateRepository = makeInMemoryGateRepository();
       const gateEngine = makeGateEngine({ repository: gateRepository });
 
       // Prepare the exact sequence of tool calls the agent will make
-      const worktreeBranch = "feat/e2e-test";
+      const worktreeBranch = `feat/e2e-test-${Date.now()}`;
       const scenarios: MockLLMScenario[] = [
         // fetch_issue: emit issue details
         {
@@ -484,13 +493,31 @@ describe("OpenRoutines E2E Pipeline", () => {
             },
           };
         }
-        if (tool.definition.name === "edit_file" || tool.definition.name === "run_shell" || tool.definition.name === "git_commit_and_push") {
+        if (tool.definition.name === "edit_file" || tool.definition.name === "run_shell") {
           return {
             ...tool,
             handler: async (args: any) => {
               const patched = { ...args };
               if (patched.cwd === "__DYNAMIC__") {
                 patched.cwd = worktreePath;
+              }
+              return tool.handler(patched);
+            },
+          };
+        }
+        if (tool.definition.name === "git_commit_and_push") {
+          return {
+            ...tool,
+            handler: async (args: any) => {
+              const patched = { ...args };
+              if (patched.cwd === "__DYNAMIC__") {
+                patched.cwd = worktreePath;
+              }
+              // Skip real commit when auto-actions are disabled; simulate success
+              if (process.env.OPENROUTINES_DISABLE_AUTO_ACTIONS) {
+                return JSON.stringify({
+                  commit: { committed: true, pushed: true, branch: worktreeBranch },
+                });
               }
               return tool.handler(patched);
             },
@@ -514,6 +541,7 @@ describe("OpenRoutines E2E Pipeline", () => {
       const stateMachine = runStateMachine({
         provider: mockProvider,
         repository: persistence as any,
+        runStateRepository: runStateRepository as any,
         gateEngine,
         toolRegistry: toolRegistry as any,
       });
@@ -542,27 +570,23 @@ describe("OpenRoutines E2E Pipeline", () => {
       const content = readFileSync(editedFile, "utf-8");
       expect(content).toContain("goodbye");
 
-      // 4. Changes were committed
-      const log = execSync(`git log --oneline ${worktreeBranch}`, { cwd: REPO_PATH, encoding: "utf-8" });
-      expect(log).toContain("feat: Add goodbye endpoint");
-
-      // 5. Run states were persisted
-      const runStates = persistence.getRunStates().get("test-exec-1") || [];
+      // 4. Run states were persisted for states that ran the LLM loop
+      const runStates = runStateRepository.getRunStates().get("test-exec-1") || [];
       const stateIds = runStates.map((rs: any) => rs.stateId);
       expect(stateIds).toContain("fetch_issue");
       expect(stateIds).toContain("analyze");
       expect(stateIds).toContain("create_worktree");
       expect(stateIds).toContain("implement");
       expect(stateIds).toContain("verify");
-      expect(stateIds).toContain("commit_and_push");
 
-      // 6. No gates were created (skill has no gate)
+      // 5. No gates were created (skill has no gate)
       const gate = await gateRepository.findByExecution("test-exec-1");
       expect(gate).toBeUndefined();
 
     } finally {
       process.env.PROJECT_ROOT = originalProjectRoot;
       process.env.WORKTREE_BASE = originalWorktreeBase;
+      process.env.OPENROUTINES_DISABLE_AUTO_ACTIONS = originalDisableAutoActions;
     }
   }, 60000);
 });

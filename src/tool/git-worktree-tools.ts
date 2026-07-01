@@ -15,9 +15,9 @@ import { resolve } from "path";
 import type { Tool } from "./types.js";
 
 const execAsync = promisify(exec);
-const PROJECT_ROOT = process.env.PROJECT_ROOT
-  ? resolve(process.env.PROJECT_ROOT)
-  : resolve(process.cwd());
+
+const getProjectRoot = () =>
+  process.env.PROJECT_ROOT ? resolve(process.env.PROJECT_ROOT) : resolve(process.cwd());
 
 interface WorktreeInfo {
   path: string;
@@ -54,20 +54,20 @@ export const makeGitWorktreeTools = (): Tool[] => [
         // Clean up existing branch/worktree with same name to avoid conflicts
         try {
           // Check if branch exists and delete it
-          await execAsync(`git branch -D ${branch}`, { cwd: PROJECT_ROOT });
+          await execAsync(`git branch -D ${branch}`, { cwd: getProjectRoot() });
         } catch {
           // Branch didn't exist, ignore
         }
         // Also check for any existing worktree with this branch and remove it
         try {
-          const { stdout: worktreeList } = await execAsync("git worktree list --porcelain", { cwd: PROJECT_ROOT });
+          const { stdout: worktreeList } = await execAsync("git worktree list --porcelain", { cwd: getProjectRoot() });
           const lines = worktreeList.split("\n");
           for (let i = 0; i < lines.length; i++) {
             if (lines[i].startsWith("worktree ")) {
               const wtPath = lines[i].replace("worktree ", "");
               const branchLine = lines[i + 2]; // branch <name> or detached
               if (branchLine && branchLine.includes(branch)) {
-                await execAsync(`git worktree remove ${wtPath} --force`, { cwd: PROJECT_ROOT });
+                await execAsync(`git worktree remove ${wtPath} --force`, { cwd: getProjectRoot() });
               }
             }
           }
@@ -78,7 +78,7 @@ export const makeGitWorktreeTools = (): Tool[] => [
         // Create worktree from current HEAD (has latest local code)
         await execAsync(
           `git worktree add -b ${branch} ${worktreePath} HEAD`,
-          { cwd: PROJECT_ROOT }
+          { cwd: getProjectRoot() }
         );
 
         // Symlink node_modules so npm commands work in worktree
@@ -86,7 +86,7 @@ export const makeGitWorktreeTools = (): Tool[] => [
         // in the app directory (process.cwd()), not in the mounted repo.
         const nodeModulesSource = process.env.PROJECT_ROOT
           ? `${resolve(process.cwd())}/node_modules`
-          : `${PROJECT_ROOT}/node_modules`;
+          : `${getProjectRoot()}/node_modules`;
         try {
           symlinkSync(nodeModulesSource, `${worktreePath}/node_modules`, "junction");
         } catch {
@@ -227,12 +227,12 @@ export const makeGitWorktreeTools = (): Tool[] => [
       try {
         // Remove worktree from git
         await execAsync(`git worktree remove ${cwd}`, {
-          cwd: PROJECT_ROOT,
+          cwd: getProjectRoot(),
         });
 
         // Delete local branch
         await execAsync(`git branch -D ${branch}`, {
-          cwd: PROJECT_ROOT,
+          cwd: getProjectRoot(),
         });
 
         return JSON.stringify({ removed: true, path: cwd, branch });
@@ -256,10 +256,10 @@ export const cleanupWorktree = async (executionId: string): Promise<void> => {
   if (!info) return;
   try {
     await execAsync(`git worktree remove ${info.path} --force`, {
-      cwd: PROJECT_ROOT,
+      cwd: getProjectRoot(),
     });
     await execAsync(`git branch -D ${info.branch}`, {
-      cwd: PROJECT_ROOT,
+      cwd: getProjectRoot(),
     });
   } catch {
     // Best effort cleanup

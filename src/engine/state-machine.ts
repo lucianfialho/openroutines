@@ -20,6 +20,8 @@ import { evaluateCondition } from "./condition.js";
 import { validate, type JsonSchema } from "./schema-validate.js";
 import { readFileSync, mkdirSync } from "fs";
 
+const AUTO_ACTIONS_ENABLED = !process.env.OPENROUTINES_DISABLE_AUTO_ACTIONS;
+
 export interface StateMachineConfig {
   provider: {
     complete: (request: CompletionRequest) => Effect.Effect<
@@ -192,7 +194,7 @@ export const runStateMachine = (
           }
 
           const commitHandler = toolRegistry?.getHandler("git_commit_and_push");
-          if (commitHandler) {
+          if (commitHandler && AUTO_ACTIONS_ENABLED) {
             yield* Effect.log(`[StateMachine] Auto-running git_commit_and_push for state ${stateId}`);
             try {
               const issueTitle = String((outputs.fetch_issue as any)?.issue?.title ?? "implement changes");
@@ -215,7 +217,7 @@ export const runStateMachine = (
           }
         }
 
-        if (stateId === "create_pr") {
+        if (stateId === "create_pr" && AUTO_ACTIONS_ENABLED) {
           const branch = (outputs.commit_and_push as { commit?: { branch?: string } } | undefined)?.commit?.branch;
           if (branch) {
             const prHandler = toolRegistry?.getHandler("github_create_pull_request");
