@@ -171,7 +171,8 @@ export const makeFilesystemTools = (): Tool[] => [
         return JSON.stringify({ error: `File not found: ${args.path}` });
       }
 
-      let content = readFileSync(filePath, "utf-8");
+      const originalContent = readFileSync(filePath, "utf-8");
+      let content = originalContent;
       const operations = args.operations as Array<{ type: string; search: string; content: string }>;
       const applied: Array<{ type: string; search: string; applied: boolean; reason?: string }> = [];
 
@@ -201,6 +202,29 @@ export const makeFilesystemTools = (): Tool[] => [
       }
 
       writeFileSync(filePath, content, "utf-8");
+
+      // Type-check TypeScript files after editing when a config is present
+      if (filePath.endsWith(".ts")) {
+        const checkCwd = cwd ?? PROJECT_ROOT;
+        if (existsSync(resolve(checkCwd, "tsconfig.json"))) {
+          const tscPath = resolve(PROJECT_ROOT, "node_modules", ".bin", "tsc");
+          const command = existsSync(tscPath) ? `${tscPath} --noEmit` : "npx tsc --noEmit";
+          try {
+            await execAsync(command, { cwd: checkCwd, timeout: 60000 });
+          } catch (err) {
+            writeFileSync(filePath, originalContent, "utf-8");
+            const stderr = err instanceof Error && "stderr" in err ? String(err.stderr) : String(err);
+            return JSON.stringify({
+              path: args.path,
+              edited: false,
+              operations: applied,
+              error: "TypeScript check failed after edit; changes reverted",
+              typescriptErrors: stderr,
+            });
+          }
+        }
+      }
+
       return JSON.stringify({ path: args.path, edited: true, operations: applied, bytes: content.length });
     },
   },

@@ -6,7 +6,7 @@
  * (PostgreSQL + BullMQ) configurations via environment variables.
  */
 
-import { readdirSync, readFileSync, existsSync, writeFileSync } from "fs";
+import { readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import express from "express";
 import { Effect } from "effect";
@@ -101,8 +101,7 @@ export const createApp = async (config: AppConfig) => {
   // 2c. Setup span and feedback repositories
   const pgPool = config.databaseUrl
     ? (persistence as unknown as { pool: import("pg").Pool }).pool
-    : undefined
-export const goodbye = () => "bye";;
+    : undefined;
   const spanRepository: SpanRepository = pgPool
     ? makePostgresSpanRepository(pgPool)
     : makeInMemorySpanRepository();
@@ -562,7 +561,6 @@ export const goodbye = () => "bye";;
         writeFileSync(flatYml, content, "utf-8");
       } else {
         // Create new skill in nested directory
-        const { mkdirSync } = require("fs");
         if (!existsSync(dirPath)) mkdirSync(dirPath, { recursive: true });
         writeFileSync(yamlInDir, content, "utf-8");
       }
@@ -678,6 +676,19 @@ export const goodbye = () => "bye";;
       queue: config.redisUrl ? "bullmq" : "in-memory",
       tools: toolRegistry.listDefinitions().length,
       gates: "migrate" in gateRepository ? "postgresql" : "in-memory",
+    });
+  });
+
+  app.get("/health/detailed", (_req, res) => {
+    res.json({
+      status: "ok",
+      routines: routines.length,
+      provider: config.kimiApiKey ? "kimi" : "stub",
+      persistence: config.databaseUrl ? "postgresql" : "in-memory",
+      queue: config.redisUrl ? "bullmq" : "in-memory",
+      tools: toolRegistry.listDefinitions().length,
+      gates: "migrate" in gateRepository ? "postgresql" : "in-memory",
+      memory: process.memoryUsage(),
     });
   });
 

@@ -18,7 +18,7 @@ import { renderTemplate, type TemplateContext } from "./template.js";
 import { extractOutput } from "./output.js";
 import { evaluateCondition } from "./condition.js";
 import { validate, type JsonSchema } from "./schema-validate.js";
-import { readFileSync } from "fs";
+import { readFileSync, mkdirSync } from "fs";
 
 export interface StateMachineConfig {
   provider: {
@@ -73,10 +73,9 @@ export const runStateMachine = (
     let completionTokens = 0;
     let totalTokens = 0;
 
-    while (stateId) {
-      iterations++;
-      if (iterations > maxIterations) {
-        yield* Effect.log(`[StateMachine] Max iterations exceeded`);
+    const fail = (error: string): Effect.Effect<ExecutionResult, never> =>
+      Effect.gen(function* () {
+        yield* Effect.log(`[StateMachine] Execution failed: ${error}`);
         const finishedAt = new Date();
         yield* persistExecution(repository, {
           id: executionId,
@@ -84,42 +83,54 @@ export const runStateMachine = (
           triggerType: event.type,
           skillName: skill.id,
           status: "failed",
-          error: "Max iterations exceeded",
+          error,
           startedAt,
           finishedAt,
         });
         return {
           executionId,
           success: false,
-          output: "Max iterations exceeded",
-          logs: ["Max iterations exceeded"],
+          output: error,
+          logs: [error],
           startedAt,
           finishedAt,
         };
+      });
+
+    const succeed = (output: string): Effect.Effect<ExecutionResult, never> =>
+      Effect.gen(function* () {
+        const finishedAt = new Date();
+        yield* persistExecution(repository, {
+          id: executionId,
+          routineId: routine.id,
+          triggerType: event.type,
+          skillName: skill.id,
+          status: "completed",
+          output,
+          startedAt,
+          finishedAt,
+        });
+        return {
+          executionId,
+          success: true,
+          output,
+          logs: [`Reached terminal state: ${stateId}`],
+          startedAt,
+          finishedAt,
+        };
+      });
+
+    while (stateId) {
+      iterations++;
+      if (iterations > maxIterations) {
+        yield* Effect.log(`[StateMachine] Max iterations exceeded`);
+        return yield* fail("Max iterations exceeded");
       }
 
       const state = skill.states[stateId];
       if (!state) {
         yield* Effect.log(`[StateMachine] Unknown state: ${stateId}`);
-        const finishedAt = new Date();
-        yield* persistExecution(repository, {
-          id: executionId,
-          routineId: routine.id,
-          triggerType: event.type,
-          skillName: skill.id,
-          status: "failed",
-          error: `Unknown state: ${stateId}`,
-          startedAt,
-          finishedAt,
-        });
-        return {
-          executionId,
-          success: false,
-          output: `Unknown state: ${stateId}`,
-          logs: [`Unknown state: ${stateId}`],
-          startedAt,
-          finishedAt,
-        };
+        return yield* fail(`Unknown state: ${stateId}`);
       }
 
       yield* Effect.log(`[StateMachine] State: ${stateId}`);
@@ -130,26 +141,9 @@ export const runStateMachine = (
       // Terminal state
       if (state.terminal) {
         yield* Effect.log(`[StateMachine] Reached terminal state: ${stateId}`);
-        const finishedAt = new Date();
         const finalOutput = outputs[stateId] ?? "";
-        yield* persistExecution(repository, {
-          id: executionId,
-          routineId: routine.id,
-          triggerType: event.type,
-          skillName: skill.id,
-          status: "completed",
-          output: typeof finalOutput === "string" ? finalOutput : JSON.stringify(finalOutput),
-          startedAt,
-          finishedAt,
-        });
-        return {
-          executionId,
-          success: true,
-          output: typeof finalOutput === "string" ? finalOutput : JSON.stringify(finalOutput),
-          logs: [`Reached terminal state: ${stateId}`],
-          startedAt,
-          finishedAt,
-        };
+        const output = typeof finalOutput === "string" ? finalOutput : JSON.stringify(finalOutput);
+        return yield* succeed(output);
       }
 
       // Use worktree path as base for output if available
@@ -168,32 +162,14 @@ export const runStateMachine = (
         yield* Effect.log(`[StateMachine] State ${stateId} is gate-only, skipping LLM`);
       } else if (!state.agent_prompt) {
         yield* Effect.log(`[StateMachine] State ${stateId} has no agent_prompt and no gate`);
-        const finishedAt = new Date();
-        yield* persistExecution(repository, {
-          id: executionId,
-          routineId: routine.id,
-          triggerType: event.type,
-          skillName: skill.id,
-          status: "failed",
-          error: `State ${stateId} has no agent_prompt and no gate`,
-          startedAt,
-          finishedAt,
-        });
-        return {
-          executionId,
-          success: false,
-          output: `State ${stateId} has no agent_prompt and no gate`,
-          logs: [`State ${stateId} has no agent_prompt and no gate`],
-          startedAt,
-          finishedAt,
-        };
+        return yield* fail(`State ${stateId} has no agent_prompt and no gate`);
       } else {
         // Normal state with agent_prompt — run LLM
         // Ensure output directory exists in worktree
         if (worktreePath && !state.output_path) {
           const outputDir = `${worktreePath}/.gates/outputs/${executionId}`;
           try {
-            require("fs").mkdirSync(outputDir, { recursive: true });
+            mkdirSync(outputDir, { recursive: true });
           } catch {
             // ignore
           }
@@ -210,25 +186,7 @@ export const runStateMachine = (
               const meta = yield* Effect.promise(() => fileMetadataRepository.findByPath(file));
               if (!meta || meta.status !== "complete") {
                 yield* Effect.log(`[StateMachine] Gate-metadata: ${file} lacks complete metadata, blocking commit`);
-                const finishedAt = new Date();
-                yield* persistExecution(repository, {
-                  id: executionId,
-                  routineId: routine.id,
-                  triggerType: event.type,
-                  skillName: skill.id,
-                  status: "failed",
-                  error: `Gate-metadata blocked: ${file} has no complete metadata`,
-                  startedAt,
-                  finishedAt,
-                });
-                return {
-                  executionId,
-                  success: false,
-                  output: `Gate-metadata blocked: ${file} has no complete metadata`,
-                  logs: [`Gate-metadata blocked: ${file} has no complete metadata`],
-                  startedAt,
-                  finishedAt,
-                };
+                return yield* fail(`Gate-metadata blocked: ${file} has no complete metadata`);
               }
             }
           }
@@ -359,30 +317,10 @@ export const runStateMachine = (
             .pipe(
               Effect.tapError((err) => Effect.logError(`[StateMachine] LLM error: ${err}`)),
               Effect.matchEffect({
-                onFailure: (err) =>
-                  Effect.gen(function* () {
-                    const errMsg = err instanceof Error ? err.message : String(err);
-                    yield* Effect.log(`[StateMachine] LLM call failed for state ${stateId}: ${errMsg}`);
-                    const finishedAt = new Date();
-                    yield* persistExecution(repository, {
-                      id: executionId,
-                      routineId: routine.id,
-                      triggerType: event.type,
-                      skillName: skill.id,
-                      status: "failed",
-                      error: `LLM error in state ${stateId}: ${errMsg}`,
-                      startedAt,
-                      finishedAt,
-                    });
-                    return {
-                      executionId,
-                      success: false,
-                      output: `LLM error in state ${stateId}: ${errMsg}`,
-                      logs: [`LLM error in state ${stateId}: ${errMsg}`],
-                      startedAt,
-                      finishedAt,
-                    } as ExecutionResult;
-                  }),
+                onFailure: (err) => {
+                  const errMsg = err instanceof Error ? err.message : String(err);
+                  return fail(`LLM error in state ${stateId}: ${errMsg}`);
+                },
                 onSuccess: (value) => Effect.succeed(value),
               })
             );
@@ -527,25 +465,7 @@ export const runStateMachine = (
           } catch (err) {
             const errMsg = err instanceof Error ? err.message : String(err);
             yield* Effect.log(`[StateMachine] Output extraction failed for state ${stateId}: ${errMsg}`);
-            const finishedAt = new Date();
-            yield* persistExecution(repository, {
-              id: executionId,
-              routineId: routine.id,
-              triggerType: event.type,
-              skillName: skill.id,
-              status: "failed",
-              error: `Output extraction failed in state ${stateId}: ${errMsg}`,
-              startedAt,
-              finishedAt,
-            });
-            return {
-              executionId,
-              success: false,
-              output: `Output extraction failed in state ${stateId}: ${errMsg}`,
-              logs: [`Output extraction failed in state ${stateId}: ${errMsg}`],
-              startedAt,
-              finishedAt,
-            };
+            return yield* fail(`Output extraction failed in state ${stateId}: ${errMsg}`);
           }
         }
 
@@ -576,25 +496,7 @@ export const runStateMachine = (
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           yield* Effect.log(`[StateMachine] Schema validation failed for state ${stateId}: ${errMsg}`);
-          const finishedAt = new Date();
-          yield* persistExecution(repository, {
-            id: executionId,
-            routineId: routine.id,
-            triggerType: event.type,
-            skillName: skill.id,
-            status: "failed",
-            error: `Schema validation failed in state ${stateId}: ${errMsg}`,
-            startedAt,
-            finishedAt,
-          });
-          return {
-            executionId,
-            success: false,
-            output: `Schema validation failed in state ${stateId}: ${errMsg}`,
-            logs: [`Schema validation failed in state ${stateId}: ${errMsg}`],
-            startedAt,
-            finishedAt,
-          };
+          return yield* fail(`Schema validation failed in state ${stateId}: ${errMsg}`);
         }
       }
 
@@ -706,25 +608,7 @@ export const runStateMachine = (
 
       if (!nextState) {
         yield* Effect.log(`[StateMachine] No matching transition from state ${stateId}`);
-        const finishedAt = new Date();
-        yield* persistExecution(repository, {
-          id: executionId,
-          routineId: routine.id,
-          triggerType: event.type,
-          skillName: skill.id,
-          status: "failed",
-          error: `No matching transition from state ${stateId}`,
-          startedAt,
-          finishedAt,
-        });
-        return {
-          executionId,
-          success: false,
-          output: `No matching transition from state ${stateId}`,
-          logs: [`No matching transition from state ${stateId}`],
-          startedAt,
-          finishedAt,
-        };
+        return yield* fail(`No matching transition from state ${stateId}`);
       }
 
       // Track implement→review loop iterations
@@ -734,25 +618,7 @@ export const runStateMachine = (
         if (implementReviewIterations > maxImplementReviewIterations) {
           const errMsg = `Max implement→review iterations (${maxImplementReviewIterations}) reached. Manual intervention required.`;
           yield* Effect.log(`[StateMachine] ${errMsg}`);
-          const finishedAt = new Date();
-          yield* persistExecution(repository, {
-            id: executionId,
-            routineId: routine.id,
-            triggerType: event.type,
-            skillName: skill.id,
-            status: "failed",
-            error: errMsg,
-            startedAt,
-            finishedAt,
-          });
-          return {
-            executionId,
-            success: false,
-            output: errMsg,
-            logs: [errMsg],
-            startedAt,
-            finishedAt,
-          };
+          return yield* fail(errMsg);
         }
       }
 
@@ -760,25 +626,7 @@ export const runStateMachine = (
     }
 
     // Should not reach here
-    const finishedAt = new Date();
-    yield* persistExecution(repository, {
-      id: executionId,
-      routineId: routine.id,
-      triggerType: event.type,
-      skillName: skill.id,
-      status: "failed",
-      error: "State machine exited without reaching terminal state",
-      startedAt,
-      finishedAt,
-    });
-    return {
-      executionId,
-      success: false,
-      output: "State machine exited without reaching terminal state",
-      logs: ["State machine exited without reaching terminal state"],
-      startedAt,
-      finishedAt,
-    };
+    return yield* fail("State machine exited without reaching terminal state");
   });
 
 const persistExecution = (

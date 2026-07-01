@@ -43,7 +43,7 @@ export const makeGateEngine = (config: GateEngineConfig) => {
       return { approved: false, gateId: existing.id };
     }
 
-    // No gate exists yet — create one and block
+    // No gate exists yet — create one atomically and block
     const gate: Gate = {
       id: randomUUID(),
       executionId,
@@ -52,8 +52,8 @@ export const makeGateEngine = (config: GateEngineConfig) => {
       status: "pending",
       createdAt: new Date(),
     };
-    await repository.save(gate);
-    return { approved: false, gateId: gate.id };
+    const created = await repository.findOrCreate(gate);
+    return { approved: false, gateId: created.id };
   };
 
   const approve = async (gateId: string, reason?: string): Promise<void> => {

@@ -59,6 +59,35 @@ export const makePostgresGateRepository = (
     );
   };
 
+  const findOrCreate = async (gate: Gate): Promise<Gate> => {
+    const result = await pool.query(
+      `INSERT INTO gates (
+        id, execution_id, state_id, type, status, reason, created_at, resolved_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ON CONFLICT (execution_id, COALESCE(state_id, '')) DO NOTHING
+      RETURNING *`,
+      [
+        gate.id,
+        gate.executionId,
+        gate.stateId ?? null,
+        gate.type,
+        gate.status,
+        gate.reason ?? null,
+        gate.createdAt,
+        gate.resolvedAt ?? null,
+      ]
+    );
+    if (result.rows.length === 0) {
+      // Conflict occurred; fetch the existing gate
+      const existing = gate.stateId
+        ? await findByExecutionAndState(gate.executionId, gate.stateId)
+        : await findByExecution(gate.executionId);
+      if (!existing) throw new Error("Gate not found after conflict");
+      return existing;
+    }
+    return rowToGate(result.rows[0]);
+  };
+
   const findByExecution = async (
     executionId: string
   ): Promise<Gate | undefined> => {
@@ -93,7 +122,7 @@ export const makePostgresGateRepository = (
     );
   };
 
-  return { save, findByExecution, findByExecutionAndState, resolve, migrate, pool };
+  return { save, findOrCreate, findByExecution, findByExecutionAndState, resolve, migrate, pool };
 };
 
 const rowToGate = (row: Record<string, unknown>): Gate => ({

@@ -193,6 +193,125 @@ describe("OpenRoutines E2E Pipeline", () => {
     teardownRepo();
   });
 
+  it("should pause and resume across multiple gates", async () => {
+    const persistence = createMockPersistence();
+    const gateRepository = makeInMemoryGateRepository();
+    const gateEngine = makeGateEngine({ repository: gateRepository });
+
+    const multiGateSkill: SkillStateMachine = {
+      id: "test-multi-gate",
+      initial_state: "start",
+      states: {
+        start: {
+          agent_prompt: "Start",
+          tools: ["emit_output"],
+          transitions: [{ to: "gate_a" }],
+        },
+        gate_a: {
+          agent_prompt: "Gate A",
+          gate: "manual_approval",
+          tools: ["emit_output"],
+          transitions: [{ to: "gate_b" }],
+        },
+        gate_b: {
+          agent_prompt: "Gate B",
+          gate: "manual_approval",
+          tools: ["emit_output"],
+          transitions: [{ to: "done" }],
+        },
+        done: {
+          terminal: true,
+        },
+      },
+    };
+
+    const multiGateRoutine: Routine = {
+      id: "test-multi-gate-routine",
+      triggers: [{ type: "api" }],
+      pipeline: { skill: "test-multi-gate" },
+    };
+
+    function createProvider() {
+      return {
+        complete: (request: CompletionRequest) =>
+          Effect.gen(function* () {
+            const prompt = request.prompt || request.messages?.filter((m) => m.role === "user").pop()?.content || "";
+            let stateId = "unknown";
+            if (prompt.includes("Start")) stateId = "start";
+            else if (prompt.includes("Gate A")) stateId = "gate_a";
+            else if (prompt.includes("Gate B")) stateId = "gate_b";
+
+            return {
+              content: `Mock response for ${stateId}`,
+              usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+              toolCalls: [
+                {
+                  id: `call-${stateId}-emit_output`,
+                  name: "emit_output",
+                  arguments: { content: JSON.stringify({ ok: true, state: stateId }) },
+                },
+              ],
+            };
+          }),
+      };
+    }
+
+    const baseTools = [...makeFilesystemTools(), ...makeGitWorktreeTools()];
+    const toolRegistry = {
+      getHandler: (name: string) => baseTools.find((t) => t.definition.name === name)?.handler,
+      getDefinition: (name: string) => baseTools.find((t) => t.definition.name === name)?.definition,
+      listDefinitions: () => baseTools.map((t) => t.definition),
+    };
+
+    const stateMachine = runStateMachine({
+      provider: createProvider() as any,
+      repository: persistence as any,
+      gateEngine,
+      toolRegistry: toolRegistry as any,
+    });
+
+    const event: TriggerEvent = { type: "api", payload: {} };
+
+    // First run: should pause at gate_a
+    const first = await Effect.runPromise(
+      stateMachine(multiGateSkill, multiGateRoutine, event, "multi-exec-1")
+    );
+    expect(first.success).toBe(false);
+    expect(first.paused).toBe(true);
+
+    const gateA = await gateRepository.findByExecutionAndState("multi-exec-1", "gate_a");
+    expect(gateA).toBeDefined();
+    expect(gateA?.status).toBe("pending");
+
+    const contextA = (persistence.getExecutions().get("multi-exec-1") as any)?.metadata?.stateMachineContext;
+    expect(contextA?.currentState).toBe("gate_a");
+
+    // Approve gate_a and resume
+    await gateEngine.approve(gateA!.id, "approved");
+    const second = await Effect.runPromise(
+      stateMachine(multiGateSkill, multiGateRoutine, event, "multi-exec-1", contextA)
+    );
+    expect(second.success).toBe(false);
+    expect(second.paused).toBe(true);
+
+    const gateB = await gateRepository.findByExecutionAndState("multi-exec-1", "gate_b");
+    expect(gateB).toBeDefined();
+    expect(gateB?.status).toBe("pending");
+
+    const contextB = (persistence.getExecutions().get("multi-exec-1") as any)?.metadata?.stateMachineContext;
+    expect(contextB?.currentState).toBe("gate_b");
+
+    // Approve gate_b and resume
+    await gateEngine.approve(gateB!.id, "approved");
+    const third = await Effect.runPromise(
+      stateMachine(multiGateSkill, multiGateRoutine, event, "multi-exec-1", contextB)
+    );
+    expect(third.success).toBe(true);
+
+    const execution = persistence.getExecutions().get("multi-exec-1");
+    expect(execution?.status).toBe("completed");
+  });
+
   it("should complete the full pipeline end-to-end", async () => {
     // Override env for test
     const originalProjectRoot = process.env.PROJECT_ROOT;
@@ -274,7 +393,7 @@ describe("OpenRoutines E2E Pipeline", () => {
                 operations: [
                   {
                     type: "insert_after",
-                    target: 'export const app = () => "hello";',
+                    search: 'export const app = () => "hello";',
                     content: '\nexport const goodbye = () => "bye";',
                   },
                 ],
@@ -425,7 +544,7 @@ describe("OpenRoutines E2E Pipeline", () => {
 
       // 4. Changes were committed
       const log = execSync(`git log --oneline ${worktreeBranch}`, { cwd: REPO_PATH, encoding: "utf-8" });
-      expect(log).toContain("feat: add goodbye endpoint");
+      expect(log).toContain("feat: Add goodbye endpoint");
 
       // 5. Run states were persisted
       const runStates = persistence.getRunStates().get("test-exec-1") || [];

@@ -96,6 +96,10 @@ states:
       Files to create: {{outputs.analyze.plan.files_to_create}}
       Worktree: {{outputs.create_worktree.worktree.path}}
 
+      Previous verification result (if retrying after verify):
+      {{outputs.verify.verification}}
+      If tests or typecheck failed above, fix those failures first.
+
       CRITICAL: You are editing the OpenRoutines SOURCE CODE in the worktree.
       Use edit_file to make TARGETED changes to existing source files.
       Do NOT rewrite entire files — only change the specific lines needed.
@@ -195,6 +199,10 @@ states:
       - emit_output
       - read_file
     transitions:
+      - to: implement
+        when: outputs.verify.verification.tests_passed == false
+      - to: implement
+        when: outputs.verify.verification.typecheck_passed == false
       - to: pr_gate
 
   pr_gate:

@@ -20,6 +20,7 @@ export interface Gate {
 
 export interface GateRepository {
   save: (gate: Gate) => Promise<void>;
+  findOrCreate: (gate: Gate) => Promise<Gate>;
   findByExecution: (executionId: string) => Promise<Gate | undefined>;
   findByExecutionAndState: (executionId: string, stateId: string) => Promise<Gate | undefined>;
   resolve: (gateId: string, status: GateStatus, reason?: string) => Promise<void>;
