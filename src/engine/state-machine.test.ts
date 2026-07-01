@@ -13,6 +13,7 @@ import {
   executeLLMStep,
   checkGateTransition,
   runAutoActions,
+  persistImplementFileMetadata,
   persistStateContext,
 } from "./state-machine.js";
 import type { SkillStateMachineState } from "../skill/schema.js";
@@ -235,6 +236,31 @@ describe("executeLLMStep", () => {
     expect(r.kind).toBe("error");
     if (r.kind === "error") expect(r.error).toContain("LLM error in state s1: boom");
   });
+
+  it("threads structured tool results and tokens across multiple rounds", async () => {
+    let call = 0;
+    const multi = {
+      complete: () => {
+        call++;
+        return Effect.succeed(
+          call === 1
+            ? response({ toolCalls: [{ id: "t1", name: "read_file", arguments: { path: "a" } }], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } })
+            : response({ content: "final answer", usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 } })
+        );
+      },
+    };
+    const registry = registryOf({ read_file: async () => JSON.stringify({ found: "data" }) });
+    const r = await Effect.runPromise(
+      executeLLMStep(multi as any, "skill", state({ tools: ["read_file"] }), "s1", "prompt", registry, undefined, "exec1")
+    );
+    expect(call).toBe(2);
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") {
+      expect(r.lastStructuredToolResult).toEqual({ found: "data" });
+      expect(r.llmResponse.content).toBe("final answer");
+      expect(r.usage.totalTokens).toBe(5);
+    }
+  });
 });
 
 describe("checkGateTransition", () => {
@@ -256,12 +282,39 @@ describe("runAutoActions", () => {
     expect(r).toEqual({ succeeded: false });
   });
 
-  it("blocks a commit when file metadata is incomplete", async () => {
+  it("blocks a commit when file metadata is missing", async () => {
     const fileMetadata = { findByPath: async () => undefined } as any;
     const outputs = { implement: { changes: [{ file: "src/a.ts" }] } };
     const r = await Effect.runPromise(runAutoActions("commit_and_push", "/wt", outputs, {}, undefined, fileMetadata));
     expect(r.succeeded).toBe(false);
     expect(r.blocked).toContain("src/a.ts");
+  });
+
+  it("blocks a commit when metadata exists but is not complete", async () => {
+    const fileMetadata = { findByPath: async () => ({ path: "src/a.ts", status: "stub" }) } as any;
+    const outputs = { implement: { changes: [{ file: "src/a.ts" }] } };
+    const r = await Effect.runPromise(runAutoActions("commit_and_push", "/wt", outputs, {}, undefined, fileMetadata));
+    expect(r.succeeded).toBe(false);
+    expect(r.blocked).toContain("src/a.ts");
+  });
+});
+
+describe("persistImplementFileMetadata", () => {
+  it("saves metadata for each implement change", async () => {
+    const saved: any[] = [];
+    const repo = { save: async (m: any) => { saved.push(m); } } as any;
+    const output = { changes: [{ file: "src/a.ts", description: "edit a" }, { file: "src/b.ts", description: "edit b" }] };
+    await Effect.runPromise(persistImplementFileMetadata(repo, "implement", output, { issue_number: 7 }, "exec1"));
+    expect(saved).toHaveLength(2);
+    expect(saved[0]).toMatchObject({ path: "src/a.ts", status: "complete", issueNumber: 7, executionId: "exec1", specialist: "backend" });
+    expect(saved[0].summary).toContain("edit a");
+  });
+
+  it("is a no-op for non-implement states and when the repo is absent", async () => {
+    const repo = { save: async () => { throw new Error("should not save"); } } as any;
+    const output = { changes: [{ file: "x", description: "y" }] };
+    await expect(Effect.runPromise(persistImplementFileMetadata(repo, "verify", output, {}, "e1"))).resolves.toBeUndefined();
+    await expect(Effect.runPromise(persistImplementFileMetadata(undefined, "implement", output, {}, "e1"))).resolves.toBeUndefined();
   });
 });
 
