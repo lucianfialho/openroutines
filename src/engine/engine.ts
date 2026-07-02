@@ -31,6 +31,10 @@ export interface EngineConfig {
   routines: Routine[];
   skillsDir: string;
   provider: ProviderAdapter;
+  /** Name-keyed provider registry for state-machine skills that declare `provider:` (F1). */
+  providerRegistry?: import("../provider/registry.js").ProviderRegistry;
+  /** Handlers for `type: script` states (F1). */
+  scriptRegistry?: import("../script/registry.js").ScriptRegistry;
   repository: ExecutionRepository;
   toolRegistry?: ToolRegistry;
   gateEngine?: GateEngine;
@@ -161,6 +165,8 @@ export const makeEngine = (config: EngineConfig) => {
 
         return yield* runStateMachine({
           provider,
+          providerRegistry: config.providerRegistry,
+          scriptRegistry: config.scriptRegistry,
           repository,
           runStateRepository: config.runStateRepository,
           fileMetadataRepository,

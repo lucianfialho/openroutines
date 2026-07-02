@@ -315,15 +315,15 @@ describe("checkGateTransition", () => {
 });
 
 describe("runAutoActions", () => {
-  it("does nothing for a non-auto state", async () => {
-    const r = await Effect.runPromise(runAutoActions("implement", "/wt", {}, {}, undefined, undefined));
+  it("does nothing for a state without auto_action", async () => {
+    const r = await Effect.runPromise(runAutoActions(state({}), "implement", "/wt", {}, {}, undefined, undefined));
     expect(r).toEqual({ succeeded: false });
   });
 
   it("blocks a commit when file metadata is missing", async () => {
     const fileMetadata = { findByPath: async () => undefined } as any;
     const outputs = { implement: { changes: [{ file: "src/a.ts" }] } };
-    const r = await Effect.runPromise(runAutoActions("commit_and_push", "/wt", outputs, {}, undefined, fileMetadata));
+    const r = await Effect.runPromise(runAutoActions(state({ auto_action: "commit_and_push" }), "commit_and_push", "/wt", outputs, {}, undefined, fileMetadata));
     expect(r.succeeded).toBe(false);
     expect(r.blocked).toContain("src/a.ts");
   });
@@ -331,7 +331,16 @@ describe("runAutoActions", () => {
   it("blocks a commit when metadata exists but is not complete", async () => {
     const fileMetadata = { findByPath: async () => ({ path: "src/a.ts", status: "stub" }) } as any;
     const outputs = { implement: { changes: [{ file: "src/a.ts" }] } };
-    const r = await Effect.runPromise(runAutoActions("commit_and_push", "/wt", outputs, {}, undefined, fileMetadata));
+    const r = await Effect.runPromise(runAutoActions(state({ auto_action: "commit_and_push" }), "commit_and_push", "/wt", outputs, {}, undefined, fileMetadata));
+    expect(r.succeeded).toBe(false);
+    expect(r.blocked).toContain("src/a.ts");
+  });
+
+  it("dispatches by auto_action value, not by state name", async () => {
+    // A state NOT named commit_and_push still auto-commits when it declares the action.
+    const fileMetadata = { findByPath: async () => undefined } as any;
+    const outputs = { implement: { changes: [{ file: "src/a.ts" }] } };
+    const r = await Effect.runPromise(runAutoActions(state({ auto_action: "commit_and_push" }), "finalize", "/wt", outputs, {}, undefined, fileMetadata));
     expect(r.succeeded).toBe(false);
     expect(r.blocked).toContain("src/a.ts");
   });
@@ -364,19 +373,21 @@ describe("persistStateContext", () => {
       findById: async (id: string) => records.get(id),
       save: async (rec: any) => { records.set(rec.id, rec); },
     } as any;
-    await Effect.runPromise(persistStateContext(repo, "exec1", "s2", { out: 1 }, { in: 2 }, 1));
+    await Effect.runPromise(persistStateContext(repo, "exec1", "s2", { out: 1 }, { in: 2 }, { "a->b": 1 }, 0.07, { default: 0.07 }));
     const saved = records.get("exec1");
     expect(saved.metadata.existing).toBe(true);
     expect(saved.metadata.stateMachineContext).toEqual({
       currentState: "s2",
       outputs: { out: 1 },
       inputs: { in: 2 },
-      implementReviewIterations: 1,
+      transitionCounts: { "a->b": 1 },
+      totalCostUsd: 0.07,
+      costByProvider: { default: 0.07 },
     });
   });
 
   it("is a no-op when the execution does not exist", async () => {
     const repo = { findById: async () => undefined, save: async () => { throw new Error("should not save"); } } as any;
-    await expect(Effect.runPromise(persistStateContext(repo, "missing", "s1", {}, {}, 0))).resolves.toBeUndefined();
+    await expect(Effect.runPromise(persistStateContext(repo, "missing", "s1", {}, {}, {}, 0, {}))).resolves.toBeUndefined();
   });
 });

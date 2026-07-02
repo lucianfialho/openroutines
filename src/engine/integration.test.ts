@@ -672,7 +672,7 @@ describe("runStateMachine — F0 hardening", () => {
           agent_prompt: "VERIFY step",
           tools: ["emit_output"],
           transitions: [
-            { to: "implement", when: "output.verify.verification.tests_passed == false" },
+            { to: "implement", when: "output.verify.verification.tests_passed == false", max_retries: 2 },
             { to: "done" },
           ],
         },
@@ -689,7 +689,8 @@ describe("runStateMachine — F0 hardening", () => {
     expect(result.success).toBe(false);
     const rec = persistence.getExecutions().get("verifycap-1");
     expect(rec?.status).toBe("failed");
-    expect(String(rec?.error)).toContain("verify→implement");
+    // The cap is now declarative (max_retries on the edge), counted by from->to key.
+    expect(String(rec?.error)).toContain("verify->implement");
   });
 
   it("#132 — a noResponse step persists status:failed instead of wedging the execution", async () => {
@@ -710,7 +711,7 @@ describe("runStateMachine — F0 hardening", () => {
     expect(persistence.getExecutions().get("noresp-1")?.status).toBe("failed");
   });
 
-  it("#132 — verifyIterations is serialized into the resume context on a gate pause", async () => {
+  it("#132/#136 — transition retry state is serialized into the resume context on a gate pause", async () => {
     const skill: SkillStateMachine = {
       id: "gate-ctx",
       initial_state: "work",
@@ -727,6 +728,7 @@ describe("runStateMachine — F0 hardening", () => {
 
     expect(result.paused).toBe(true);
     const ctx = persistence.getExecutions().get("gatectx-1")?.metadata?.stateMachineContext;
-    expect(ctx).toHaveProperty("verifyIterations");
+    // Retry state is now the generic transitionCounts map, serialized on pause.
+    expect(ctx).toHaveProperty("transitionCounts");
   });
 });

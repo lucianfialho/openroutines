@@ -176,6 +176,7 @@ states:
         when: output.review.review.verdict == "approved"
       - to: implement
         when: output.review.review.verdict == "rejected"
+        max_retries: 3
 
   verify:
     description: Run tests and lint in the worktree
@@ -201,8 +202,10 @@ states:
     transitions:
       - to: implement
         when: output.verify.verification.tests_passed == false
+        max_retries: 2
       - to: implement
         when: output.verify.verification.typecheck_passed == false
+        max_retries: 2
       - to: pr_gate
 
   pr_gate:
@@ -213,6 +216,7 @@ states:
 
   commit_and_push:
     description: Commit changes and push branch from worktree
+    auto_action: commit_and_push
     agent_prompt: |
       CRITICAL: You MUST call git_commit_and_push BEFORE calling emit_output.
 
@@ -234,6 +238,7 @@ states:
 
   create_pr:
     description: Create pull request on GitHub
+    auto_action: create_pr
     agent_prompt: |
       CRITICAL: Create the PR FIRST, then remove worktree, then emit output.
 

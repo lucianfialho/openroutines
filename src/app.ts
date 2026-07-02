@@ -18,6 +18,10 @@ import type { Routine } from "./routine/types.js";
 import { makeEngine } from "./engine/engine.js";
 import { makeKimiCodingProvider } from "./provider/kimi-coding.js";
 import { makeKimiCliProvider } from "./provider/kimi-cli.js";
+import { makeProviderRegistry } from "./provider/registry.js";
+import { makeScriptRegistry } from "./script/registry.js";
+import { makePostgresExecutionProcessRepository } from "./persistence/execution-process-repo.js";
+import { cleanupZombieProcesses } from "./provider/process-cleanup.js";
 
 import { makeInMemoryRepository } from "./persistence/in-memory.js";
 import { makePostgresRepository } from "./persistence/postgres.js";
@@ -54,6 +58,12 @@ export interface AppConfig {
   port: number;
   kimiApiKey?: string;
   kimiModel?: string;
+  /** Anthropic API key for the billed claude-api provider (judge/architecture roles). */
+  anthropicApiKey?: string;
+  /** --settings file passed to the headless claude-cli provider. */
+  claudeCliSettingsFile?: string;
+  /** Default model for the claude-cli provider. */
+  claudeCliModel?: string;
   githubToken?: string;
   githubRepo?: string;
   githubWebhookSecret?: string;
@@ -187,7 +197,25 @@ export const createApp = async (config: AppConfig) => {
     ? makePostgresFileMetadataRepository(pgPool)
     : makeInMemoryFileMetadataRepository();
 
-  // 3. Setup provider
+  // Track spawned coarse-state processes so timeouts kill the group and boot
+  // reaps zombies. Postgres-only (real processes only matter in production).
+  const executionProcessRepository = pgPool
+    ? makePostgresExecutionProcessRepository(pgPool)
+    : undefined;
+
+  if (executionProcessRepository) {
+    try {
+      const cleanup = await cleanupZombieProcesses(executionProcessRepository);
+      console.log(`[App] Zombie process cleanup: checked ${cleanup.checked}, killed ${cleanup.killed}`);
+    } catch (err) {
+      console.error("[App] Zombie process cleanup failed:", err);
+    }
+  }
+
+  // 3. Setup provider(s)
+  // Default provider — used by markdown/ReAct skills and by state-machine states
+  // that do not declare `provider:`. State-machine states can override per state
+  // via the name-keyed registry below.
   let provider: Parameters<typeof makeEngine>[0]["provider"];
   if (config.kimiApiKey) {
     provider = makeKimiCodingProvider({
@@ -201,6 +229,21 @@ export const createApp = async (config: AppConfig) => {
     });
     console.log("[App] Using Kimi CLI provider (local)");
   }
+
+  const providerRegistry = makeProviderRegistry({
+    kimiCli: { model: config.kimiModel },
+    claudeCli: {
+      settingsFile: config.claudeCliSettingsFile,
+      model: config.claudeCliModel,
+      processRepository: executionProcessRepository,
+    },
+    claudeApi: config.anthropicApiKey ? { apiKey: config.anthropicApiKey } : undefined,
+  });
+  const scriptRegistry = makeScriptRegistry();
+  console.log(
+    `[App] Provider registry ready (claude-api: ${config.anthropicApiKey ? "on" : "off"})`
+  );
+
   // 4. Setup tool registry (GitHub tools if configured)
   const toolRegistry = new ToolRegistry();
   if (config.githubToken && config.githubRepo) {
@@ -230,6 +273,8 @@ export const createApp = async (config: AppConfig) => {
     routines,
     skillsDir: config.skillsDir,
     provider: provider as Parameters<typeof makeEngine>[0]["provider"],
+    providerRegistry,
+    scriptRegistry,
     repository: persistence,
     toolRegistry,
     gateEngine,

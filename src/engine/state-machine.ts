@@ -12,6 +12,8 @@
 import { Effect } from "effect";
 import type { SkillStateMachine, SkillStateMachineState } from "../skill/schema.js";
 import type { CompletionRequest, CompletionResponse, Message } from "../provider/types.js";
+import type { ProviderRegistry, ProviderName } from "../provider/registry.js";
+import type { ScriptRegistry } from "../script/registry.js";
 import type { ToolCall, ToolDefinition } from "../tool/types.js";
 import type { ExecutionResult } from "./types.js";
 import type { TriggerEvent } from "../routine/matcher.js";
@@ -35,6 +37,10 @@ export interface StateMachineConfig {
   provider: {
     complete: (request: CompletionRequest) => Effect.Effect<CompletionResponse, Error>;
   };
+  /** Resolves providers by name/model for states that declare `provider:` (F1). */
+  providerRegistry?: ProviderRegistry;
+  /** Resolves deterministic handlers for `type: script` states (F1). */
+  scriptRegistry?: ScriptRegistry;
   repository: ExecutionRepository;
   runStateRepository?: RunStateRepository;
   fileMetadataRepository?: FileMetadataRepository;
@@ -48,8 +54,12 @@ export interface StateMachineContext {
   currentState: string;
   outputs: Record<string, unknown>;
   inputs?: Record<string, unknown>;
-  implementReviewIterations?: number;
-  verifyIterations?: number;
+  /** Per-edge (`${from}->${to}`) retry counters, generalizing the old hardcoded loop counters. */
+  transitionCounts?: Record<string, number>;
+  /** Running total USD cost across invocations, preserved across resume. */
+  totalCostUsd?: number;
+  /** Running USD cost per provider name, preserved across resume. */
+  costByProvider?: Record<string, number>;
 }
 
 type Provider = StateMachineConfig["provider"];
@@ -96,7 +106,7 @@ export const runStateMachine = (
 ): Effect.Effect<ExecutionResult, never> => {
   const startedAt = new Date();
   const program = Effect.gen(function* () {
-    const { provider, repository, runStateRepository, fileMetadataRepository, gateEngine, toolRegistry } = config;
+    const { provider, providerRegistry, scriptRegistry, repository, runStateRepository, fileMetadataRepository, gateEngine, toolRegistry } = config;
     const outputs: Record<string, unknown> = {};
 
     // Build inputs from event payload, or restore from resumed context
@@ -109,10 +119,9 @@ export const runStateMachine = (
       Object.assign(outputs, context.outputs);
       yield* Effect.log(`[StateMachine] Resuming execution ${executionId} at state ${stateId}`);
     }
-    let implementReviewIterations = context?.implementReviewIterations ?? 0;
-    const maxImplementReviewIterations = 3;
-    let verifyIterations = context?.verifyIterations ?? 0;
-    const maxVerifyIterations = 2;
+    const transitionCounts: Record<string, number> = context?.transitionCounts ? { ...context.transitionCounts } : {};
+    let totalCostUsd = context?.totalCostUsd ?? 0;
+    const costByProvider: Record<string, number> = context?.costByProvider ? { ...context.costByProvider } : {};
     let iterations = 0;
     const maxIterations = 50;
 
@@ -127,6 +136,8 @@ export const runStateMachine = (
           skillName: skill.id,
           status: "failed",
           error,
+          costUsd: totalCostUsd,
+          providerBreakdown: costByProvider,
           startedAt,
           finishedAt,
         });
@@ -143,6 +154,8 @@ export const runStateMachine = (
           skillName: skill.id,
           status: "completed",
           output,
+          costUsd: totalCostUsd,
+          providerBreakdown: costByProvider,
           startedAt,
           finishedAt,
         });
@@ -172,7 +185,7 @@ export const runStateMachine = (
           output: `Waiting for gate approval: ${state.gate} at state ${stateId}`,
           startedAt,
           metadata: {
-            stateMachineContext: { currentState: stateId, outputs, inputs, implementReviewIterations, verifyIterations },
+            stateMachineContext: { currentState: stateId, outputs, inputs, transitionCounts, totalCostUsd, costByProvider },
             gateId,
             gateType: state.gate,
             gateStatus: "pending",
@@ -206,7 +219,7 @@ export const runStateMachine = (
       yield* Effect.log(`[StateMachine] State: ${stateId}`);
 
       // Persist context at the START of each state so resume begins from the correct state
-      yield* persistStateContext(repository, executionId, stateId, outputs, inputs, implementReviewIterations, verifyIterations);
+      yield* persistStateContext(repository, executionId, stateId, outputs, inputs, transitionCounts, totalCostUsd, costByProvider);
 
       // Terminal state
       if (state.terminal) {
@@ -218,7 +231,44 @@ export const runStateMachine = (
 
       const { worktreePath, outputPath, templateOutputPath } = resolveOutputPaths(state, outputs, executionId, stateId);
 
-      if (!state.agent_prompt && state.gate) {
+      if (state.type === "script") {
+        // Deterministic (non-LLM) state: resolve a handler and run it, skipping
+        // the tool-use loop but keeping the normal persist/gate/transition flow.
+        const scriptName = state.script ?? stateId;
+        const handler = scriptRegistry?.get(scriptName);
+        if (!handler) {
+          return yield* fail(`No script handler registered for '${scriptName}' (state ${stateId})`);
+        }
+        const scriptResult: { ok: true; value: Record<string, unknown> | string } | { ok: false; error: string } =
+          yield* Effect.tryPromise({
+            try: () => handler({ inputs, outputs, executionId, stateId }),
+            catch: (e) => (e instanceof Error ? e.message : String(e)),
+          }).pipe(
+            Effect.matchEffect({
+              onFailure: (msg: string) => Effect.succeed({ ok: false as const, error: msg }),
+              onSuccess: (value) => Effect.succeed({ ok: true as const, value }),
+            })
+          );
+        if (!scriptResult.ok) {
+          return yield* fail(`Script handler '${scriptName}' threw: ${scriptResult.error}`);
+        }
+        if (typeof scriptResult.value === "string") {
+          return yield* fail(`Script '${scriptName}' failed: ${scriptResult.value}`);
+        }
+        outputs[stateId] = scriptResult.value;
+        yield* Effect.log(`[StateMachine] Script state ${stateId} completed`);
+        yield* persistStateContext(repository, executionId, stateId, outputs, inputs, transitionCounts, totalCostUsd, costByProvider);
+      } else if (state.type === "fanout") {
+        // N provider calls in parallel inside one state; aggregate into {lentes, approved}.
+        const fanout = yield* runFanout(state, inputs, outputs, templateOutputPath, providerRegistry, provider);
+        totalCostUsd += fanout.costUsd;
+        for (const [pk, c] of Object.entries(fanout.costByProvider)) {
+          costByProvider[pk] = (costByProvider[pk] ?? 0) + c;
+        }
+        outputs[stateId] = fanout.output;
+        yield* Effect.log(`[StateMachine] Fanout state ${stateId} completed (${fanout.output.lentes.length} lenses, approved=${fanout.output.approved})`);
+        yield* persistStateContext(repository, executionId, stateId, outputs, inputs, transitionCounts, totalCostUsd, costByProvider);
+      } else if (!state.agent_prompt && state.gate) {
         yield* Effect.log(`[StateMachine] State ${stateId} is gate-only, skipping LLM`);
       } else if (!state.agent_prompt) {
         yield* Effect.log(`[StateMachine] State ${stateId} has no agent_prompt and no gate`);
@@ -233,7 +283,7 @@ export const runStateMachine = (
           }
         }
 
-        const auto = yield* runAutoActions(stateId, worktreePath, outputs, inputs, toolRegistry, fileMetadataRepository);
+        const auto = yield* runAutoActions(state, stateId, worktreePath, outputs, inputs, toolRegistry, fileMetadataRepository);
         if (auto.blocked) {
           return yield* fail(auto.blocked);
         }
@@ -256,13 +306,24 @@ export const runStateMachine = (
             })).pipe(Effect.ignore);
           }
 
-          const step = yield* executeLLMStep(provider, skill.id, state, stateId, prompt, toolRegistry, worktreePath, executionId, config.maxToolIterations);
+          // Resolve this state's provider from the registry (falls back to the default).
+          const stateProvider = (state.provider && providerRegistry)
+            ? providerRegistry.resolve(state.provider as ProviderName, state.model)
+            : provider;
+
+          const step = yield* executeLLMStep(stateProvider, skill.id, state, stateId, prompt, toolRegistry, worktreePath, executionId, config.maxToolIterations);
           if (step.kind === "error") {
             return yield* fail(step.error);
           }
           if (step.kind === "noResponse") {
             return yield* fail(`No LLM response for state ${stateId}`);
           }
+
+          // Accumulate real USD cost (claude-cli reports it; others leave it undefined → 0).
+          const invocationCost = step.llmResponse.costUsd ?? 0;
+          totalCostUsd += invocationCost;
+          const providerKey = state.provider ?? "default";
+          costByProvider[providerKey] = (costByProvider[providerKey] ?? 0) + invocationCost;
 
           const extracted = extractAndValidateOutput(
             step.llmResponse,
@@ -286,11 +347,12 @@ export const runStateMachine = (
               output: stateOutput as Record<string, unknown>,
               outputValidated: !!state.output_schema,
               status: "completed",
+              costUsd: step.llmResponse.costUsd,
               startedAt: new Date(),
             })).pipe(Effect.ignore);
           }
           yield* Effect.log(`[StateMachine] State ${stateId} completed`);
-          yield* persistStateContext(repository, executionId, stateId, outputs, inputs, implementReviewIterations, verifyIterations);
+          yield* persistStateContext(repository, executionId, stateId, outputs, inputs, transitionCounts, totalCostUsd, costByProvider);
           yield* persistImplementFileMetadata(fileMetadataRepository, stateId, stateOutput, inputs, executionId);
         }
       }
@@ -308,25 +370,17 @@ export const runStateMachine = (
         return yield* fail(`No matching transition from state ${stateId}`);
       }
 
-      // Track implement→review loop iterations
-      if (stateId === "review" && nextState === "implement") {
-        implementReviewIterations++;
-        yield* Effect.log(`[StateMachine] implement→review iteration ${implementReviewIterations}/${maxImplementReviewIterations}`);
-        if (implementReviewIterations > maxImplementReviewIterations) {
-          const errMsg = `Max implement→review iterations (${maxImplementReviewIterations}) reached. Manual intervention required.`;
-          yield* Effect.log(`[StateMachine] ${errMsg}`);
-          return yield* fail(errMsg);
-        }
-      }
-
-      // Track verify→implement retry loop (a verify that keeps failing must not
-      // ricochet up to the global maxIterations cap — each retry is a paid agent
-      // run in the target architecture).
-      if (stateId === "verify" && nextState === "implement") {
-        verifyIterations++;
-        yield* Effect.log(`[StateMachine] verify→implement iteration ${verifyIterations}/${maxVerifyIterations}`);
-        if (verifyIterations > maxVerifyIterations) {
-          const errMsg = `Max verify→implement iterations (${maxVerifyIterations}) reached. Manual intervention required.`;
+      // Generic per-transition retry cap: `max_retries:` declared on the edge in
+      // the skill YAML, counted by the runner keyed by `${from}->${to}`. Replaces
+      // the old hardcoded review→implement (3) and verify→implement (2) counters —
+      // preserved 1:1 by solve-issue.yaml declaring those caps on those edges.
+      const takenTransition = state.transitions?.find((t) => t.to === nextState);
+      if (takenTransition?.max_retries !== undefined) {
+        const edgeKey = `${stateId}->${nextState}`;
+        transitionCounts[edgeKey] = (transitionCounts[edgeKey] ?? 0) + 1;
+        yield* Effect.log(`[StateMachine] transition ${edgeKey} count ${transitionCounts[edgeKey]}/${takenTransition.max_retries}`);
+        if (transitionCounts[edgeKey] > takenTransition.max_retries) {
+          const errMsg = `Max retries (${takenTransition.max_retries}) reached for transition ${edgeKey}. Manual intervention required.`;
           yield* Effect.log(`[StateMachine] ${errMsg}`);
           return yield* fail(errMsg);
         }
@@ -405,6 +459,7 @@ export const buildContext = (
  * `blocked` reason when the commit gate-metadata check fails.
  */
 export const runAutoActions = (
+  state: SkillStateMachineState,
   stateId: string,
   worktreePath: string | undefined,
   outputs: Record<string, unknown>,
@@ -415,7 +470,7 @@ export const runAutoActions = (
   Effect.gen(function* () {
     let autoActionSucceeded = false;
 
-    if (stateId === "commit_and_push" && worktreePath) {
+    if (state.auto_action === "commit_and_push" && worktreePath) {
       // Atomic-gates style: verify file metadata exists before committing
       if (fileMetadataRepository) {
         const implOutput = outputs.implement as { changes?: Array<{ file: string }> } | undefined;
@@ -453,7 +508,7 @@ export const runAutoActions = (
       }
     }
 
-    if (stateId === "create_pr" && AUTO_ACTIONS_ENABLED) {
+    if (state.auto_action === "create_pr" && AUTO_ACTIONS_ENABLED) {
       const branch = (outputs.commit_and_push as { commit?: { branch?: string } } | undefined)?.commit?.branch;
       if (branch) {
         const prHandler = toolRegistry?.getHandler("github_create_pull_request");
@@ -493,6 +548,86 @@ export const runAutoActions = (
     }
 
     return { succeeded: autoActionSucceeded };
+  });
+
+export interface FanoutResult {
+  output: { lentes: Array<Record<string, unknown>>; approved: boolean };
+  costUsd: number;
+  costByProvider: Record<string, number>;
+}
+
+type LensOutcome = { name: string; provider: string; output?: unknown; error?: string; costUsd: number };
+
+/**
+ * Run all lenses of a `type: fanout` state in parallel (Effect.all, unbounded).
+ * Each lens is a single provider call (no tool loop — judge lenses don't write).
+ * A failing lens is captured as `{error}` instead of collapsing the state. The
+ * graph stays sequential; parallelism is internal to this one state. Aggregates
+ * into `{lentes: [...], approved}` — `approved` is true when no lens errored, so
+ * a transition can branch on `output.<state>.approved` without array indexing.
+ */
+export const runFanout = (
+  state: SkillStateMachineState,
+  inputs: Record<string, unknown>,
+  outputs: Record<string, unknown>,
+  templateOutputPath: string,
+  providerRegistry: ProviderRegistry | undefined,
+  defaultProvider: Provider
+): Effect.Effect<FanoutResult, never> =>
+  Effect.gen(function* () {
+    const lenses = state.lenses ?? [];
+    const ctx = buildContext(inputs, outputs, templateOutputPath);
+    const lensEffects: Array<Effect.Effect<LensOutcome, never>> = lenses.map((lens) =>
+      Effect.gen(function* () {
+        const lensProvider = providerRegistry
+          ? providerRegistry.resolve(lens.provider as ProviderName, lens.model)
+          : defaultProvider;
+        const lensPrompt = renderTemplate(lens.agent_prompt, ctx);
+        const res: { ok: true; resp: CompletionResponse } | { ok: false; error: string } = yield* lensProvider
+          .complete({ messages: [{ role: "user", content: lensPrompt }], temperature: 0.2, maxTokens: 4096 })
+          .pipe(
+            Effect.matchEffect({
+              onFailure: (err) => Effect.succeed({ ok: false as const, error: err instanceof Error ? err.message : String(err) }),
+              onSuccess: (resp) => Effect.succeed({ ok: true as const, resp }),
+            })
+          );
+        if (!res.ok) {
+          return { name: lens.name, provider: lens.provider, error: res.error, costUsd: 0 };
+        }
+        const resp = res.resp;
+        const cost = resp.costUsd ?? 0;
+        let lensOutput: unknown;
+        try {
+          lensOutput = extractOutput(resp.content);
+        } catch {
+          lensOutput = resp.content;
+        }
+        if (lens.output_schema) {
+          try {
+            const schema = JSON.parse(readFileSync(lens.output_schema, "utf-8")) as JsonSchema;
+            validate(lensOutput, schema);
+          } catch (err) {
+            return { name: lens.name, provider: lens.provider, error: `schema validation failed: ${err instanceof Error ? err.message : String(err)}`, costUsd: cost };
+          }
+        }
+        return { name: lens.name, provider: lens.provider, output: lensOutput, costUsd: cost };
+      })
+    );
+    const results = yield* Effect.all(lensEffects, { concurrency: "unbounded" });
+    let costUsd = 0;
+    const costByProvider: Record<string, number> = {};
+    for (const r of results) {
+      costUsd += r.costUsd;
+      costByProvider[r.provider] = (costByProvider[r.provider] ?? 0) + r.costUsd;
+    }
+    const lentes = results.map((r) => {
+      const entry: Record<string, unknown> = { name: r.name };
+      if (r.output !== undefined) entry.output = r.output;
+      if (r.error) entry.error = r.error;
+      return entry;
+    });
+    const approved = results.every((r) => !r.error);
+    return { output: { lentes, approved }, costUsd, costByProvider };
   });
 
 /**
@@ -547,6 +682,8 @@ export const executeLLMStep = (
           messages,
           temperature: 0.2,
           maxTokens: 4096,
+          executionId,
+          ...(worktreePath ? { workdir: worktreePath } : {}),
           ...(hasTools
             ? { tools: state.tools!.map((name) => toolRegistry!.getDefinition(name)).filter((t): t is ToolDefinition => t !== undefined) }
             : {}),
@@ -876,8 +1013,9 @@ export const persistStateContext = (
   stateId: string,
   outputs: Record<string, unknown>,
   inputs: Record<string, unknown>,
-  implementReviewIterations: number,
-  verifyIterations: number
+  transitionCounts: Record<string, number>,
+  totalCostUsd: number,
+  costByProvider: Record<string, number>
 ): Effect.Effect<void, never> =>
   Effect.gen(function* () {
     yield* Effect.tryPromise({
@@ -888,7 +1026,7 @@ export const persistStateContext = (
             ...existing,
             metadata: {
               ...(existing.metadata || {}),
-              stateMachineContext: { currentState: stateId, outputs, inputs, implementReviewIterations, verifyIterations },
+              stateMachineContext: { currentState: stateId, outputs, inputs, transitionCounts, totalCostUsd, costByProvider },
             },
           });
         }
