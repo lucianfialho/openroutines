@@ -15,6 +15,10 @@ export interface ExecutionRecord {
   promptTokens?: number;
   completionTokens?: number;
   totalTokens?: number;
+  /** Total USD cost of the execution (sum of per-invocation costUsd). */
+  costUsd?: number;
+  /** Per-provider USD breakdown keyed by provider name (jsonb). */
+  providerBreakdown?: Record<string, number>;
   metadata?: Record<string, unknown>;
   startedAt: Date;
   finishedAt?: Date;
@@ -87,6 +91,8 @@ export interface RunState {
   promptTokens?: number;
   completionTokens?: number;
   totalTokens?: number;
+  /** Real USD cost of this single provider invocation (claude-cli); undefined for providers without cost. */
+  costUsd?: number;
 }
 
 export interface SubRun {
@@ -130,4 +136,21 @@ export interface FileMetadataRepository {
   findByPath: (path: string) => Promise<FileMetadata | undefined>;
   findByExecution: (executionId: string) => Promise<FileMetadata[]>;
   findByIssue: (issueNumber: number) => Promise<FileMetadata[]>;
+}
+
+/** OS process spawned by a coarse-state executor — tracked so timeouts can kill the group and boot can reap zombies (F1). */
+export interface ExecutionProcess {
+  id?: string;
+  executionId: string;
+  pid: number;
+  worktree?: string;
+  startedAt?: Date;
+  finishedAt?: Date;
+}
+
+export interface ExecutionProcessRepository {
+  save: (proc: ExecutionProcess) => Promise<void>;
+  markFinished: (id: string, finishedAt: Date) => Promise<void>;
+  /** Rows with finished_at IS NULL — used by boot zombie cleanup. */
+  findRunning: () => Promise<ExecutionProcess[]>;
 }

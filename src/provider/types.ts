@@ -20,6 +20,14 @@ export interface CompletionRequest {
   temperature?: number;
   maxTokens?: number;
   tools?: ToolDefinition[];
+  /** Worktree path handed to the CLI executor via --add-dir (F1: coarse states). */
+  workdir?: string;
+  /** JSON schema constraining the structured output of a coarse state. */
+  jsonSchema?: Record<string, unknown> | string;
+  /** API-billing ceiling; only the billed claude-api provider honors it (ignored by CLI/subscription providers). */
+  maxBudgetUsd?: number;
+  /** Execution owning this call — used to track spawned processes (F1). */
+  executionId?: string;
 }
 
 export interface CompletionResponse {
@@ -28,6 +36,10 @@ export interface CompletionResponse {
   model: string;
   finishReason: string;
   toolCalls?: ToolCall[];
+  /** Real USD cost reported by the provider (claude-cli via total_cost_usd); undefined when unknown. */
+  costUsd?: number;
+  /** Provider session id for audit trail; never used for --resume (each retry is fresh). */
+  sessionId?: string;
 }
 
 export interface TokenUsage {
