@@ -97,10 +97,12 @@ const runClaudeCli = (config: ClaudeCliConfig, request: CompletionRequest): Prom
   return new Promise<CompletionResponse>((resolve, reject) => {
     const child = spawn(binPath, args, {
       cwd: process.cwd(),
-      // Minimal env: this subprocess needs only its own auth + PATH/HOME,
-      // never the orchestrator's DB/GitHub/webhook secrets.
+      // Minimal env: subscription/OAuth auth + PATH/HOME only. Never the
+      // orchestrator's DB/GitHub/webhook secrets, and deliberately NOT
+      // ANTHROPIC_API_KEY — that would make the CLI bill via the paid API
+      // instead of the subscription (D3/#133); the API key belongs to claude-api.
       env: {
-        ...pickEnv([...BASE_ENV_VARS, "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]),
+        ...pickEnv([...BASE_ENV_VARS, "CLAUDE_CODE_OAUTH_TOKEN"]),
         ...(config.env ?? {}),
       },
       stdio: ["ignore", "pipe", "pipe"],

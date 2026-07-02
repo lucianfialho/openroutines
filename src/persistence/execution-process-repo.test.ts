@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "fs";
 import { Pool } from "pg";
 import { makePostgresExecutionProcessRepository } from "./execution-process-repo.js";
 import type { ExecutionProcess } from "./types.js";
@@ -68,5 +69,15 @@ describe("makePostgresExecutionProcessRepository", () => {
     expect(result).toHaveLength(1);
     expect(result[0].pid).toBe(111);
     expect(result[0].executionId).toBe("exec-1");
+  });
+});
+
+describe("execution_processes migration (006)", () => {
+  it("creates the table with a cascade FK and a running-rows partial index", () => {
+    const sql = readFileSync(new URL("./migrations/006_execution_processes.sql", import.meta.url), "utf-8");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS execution_processes");
+    expect(sql).toContain("REFERENCES executions(id) ON DELETE CASCADE");
+    expect(sql).toContain("idx_execution_processes_running");
+    expect(sql).toContain("finished_at IS NULL");
   });
 });

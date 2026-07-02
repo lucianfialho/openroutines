@@ -10,7 +10,7 @@
  */
 
 import { Effect } from "effect";
-import type { SkillStateMachine, SkillStateMachineState } from "../skill/schema.js";
+import type { SkillStateMachine, SkillStateMachineState, SkillStateMachineTransition } from "../skill/schema.js";
 import type { CompletionRequest, CompletionResponse, Message } from "../provider/types.js";
 import type { ProviderRegistry, ProviderName } from "../provider/registry.js";
 import type { ScriptRegistry } from "../script/registry.js";
@@ -82,6 +82,8 @@ export type LLMStepResult =
       emittedOutput: string | undefined;
       lastStructuredToolResult: unknown;
       usage: TokenTotals;
+      /** Sum of costUsd across every provider call in the tool loop (not just the last). */
+      costUsd: number;
     };
 
 /** Result of executing one batch of tool calls. */
@@ -239,9 +241,18 @@ export const runStateMachine = (
         if (!handler) {
           return yield* fail(`No script handler registered for '${scriptName}' (state ${stateId})`);
         }
+        // A hung handler (e.g. a stuck `npm test`) must not block forever — cap it
+        // with the state's timeout_ms (default 5min).
+        const scriptTimeoutMs = state.timeout_ms ?? 300000;
         const scriptResult: { ok: true; value: Record<string, unknown> | string } | { ok: false; error: string } =
           yield* Effect.tryPromise({
-            try: () => handler({ inputs, outputs, executionId, stateId }),
+            try: () =>
+              Promise.race([
+                handler({ inputs, outputs, executionId, stateId }),
+                new Promise<never>((_, reject) =>
+                  setTimeout(() => reject(new Error(`script '${scriptName}' timed out after ${scriptTimeoutMs}ms`)), scriptTimeoutMs)
+                ),
+              ]),
             catch: (e) => (e instanceof Error ? e.message : String(e)),
           }).pipe(
             Effect.matchEffect({
@@ -260,7 +271,7 @@ export const runStateMachine = (
         yield* persistStateContext(repository, executionId, stateId, outputs, inputs, transitionCounts, totalCostUsd, costByProvider);
       } else if (state.type === "fanout") {
         // N provider calls in parallel inside one state; aggregate into {lentes, approved}.
-        const fanout = yield* runFanout(state, inputs, outputs, templateOutputPath, providerRegistry, provider);
+        const fanout = yield* runFanout(state, inputs, outputs, templateOutputPath, providerRegistry, provider, executionId, worktreePath);
         totalCostUsd += fanout.costUsd;
         for (const [pk, c] of Object.entries(fanout.costByProvider)) {
           costByProvider[pk] = (costByProvider[pk] ?? 0) + c;
@@ -307,9 +318,21 @@ export const runStateMachine = (
           }
 
           // Resolve this state's provider from the registry (falls back to the default).
-          const stateProvider = (state.provider && providerRegistry)
-            ? providerRegistry.resolve(state.provider as ProviderName, state.model)
-            : provider;
+          // resolve() fails fast (throws) on an unknown name / missing credential;
+          // route that through fail() so cost is still persisted, not a raw defect.
+          let stateProvider: Provider;
+          if (state.provider && providerRegistry) {
+            try {
+              stateProvider = providerRegistry.resolve(state.provider as ProviderName, state.model);
+            } catch (err) {
+              return yield* fail(`Provider resolution failed for state ${stateId}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          } else {
+            if (state.provider && !providerRegistry) {
+              yield* Effect.logWarning(`[StateMachine] State ${stateId} declares provider '${state.provider}' but no provider registry is wired; using the default provider`);
+            }
+            stateProvider = provider;
+          }
 
           const step = yield* executeLLMStep(stateProvider, skill.id, state, stateId, prompt, toolRegistry, worktreePath, executionId, config.maxToolIterations);
           if (step.kind === "error") {
@@ -319,8 +342,8 @@ export const runStateMachine = (
             return yield* fail(`No LLM response for state ${stateId}`);
           }
 
-          // Accumulate real USD cost (claude-cli reports it; others leave it undefined → 0).
-          const invocationCost = step.llmResponse.costUsd ?? 0;
+          // Accumulate real USD cost summed across the tool loop (claude-cli reports it; others → 0).
+          const invocationCost = step.costUsd;
           totalCostUsd += invocationCost;
           const providerKey = state.provider ?? "default";
           costByProvider[providerKey] = (costByProvider[providerKey] ?? 0) + invocationCost;
@@ -347,7 +370,7 @@ export const runStateMachine = (
               output: stateOutput as Record<string, unknown>,
               outputValidated: !!state.output_schema,
               status: "completed",
-              costUsd: step.llmResponse.costUsd,
+              costUsd: step.costUsd,
               startedAt: new Date(),
             })).pipe(Effect.ignore);
           }
@@ -363,19 +386,21 @@ export const runStateMachine = (
         return yield* pauseForGate(state, stateId, gate.gateId);
       }
 
-      // Evaluate transitions
-      const nextState = evaluateNextState(state, outputs);
-      if (!nextState) {
+      // Evaluate transitions — keep the ACTUAL matched transition (not the first
+      // edge to that target) so a per-edge `max_retries` reads the right cap when
+      // two edges share a `to`.
+      const takenTransition = evaluateNextTransition(state, outputs);
+      if (!takenTransition) {
         yield* Effect.log(`[StateMachine] No matching transition from state ${stateId}`);
         return yield* fail(`No matching transition from state ${stateId}`);
       }
+      const nextState = takenTransition.to;
 
       // Generic per-transition retry cap: `max_retries:` declared on the edge in
       // the skill YAML, counted by the runner keyed by `${from}->${to}`. Replaces
       // the old hardcoded review→implement (3) and verify→implement (2) counters —
       // preserved 1:1 by solve-issue.yaml declaring those caps on those edges.
-      const takenTransition = state.transitions?.find((t) => t.to === nextState);
-      if (takenTransition?.max_retries !== undefined) {
+      if (takenTransition.max_retries !== undefined) {
         const edgeKey = `${stateId}->${nextState}`;
         transitionCounts[edgeKey] = (transitionCounts[edgeKey] ?? 0) + 1;
         yield* Effect.log(`[StateMachine] transition ${edgeKey} count ${transitionCounts[edgeKey]}/${takenTransition.max_retries}`);
@@ -572,19 +597,35 @@ export const runFanout = (
   outputs: Record<string, unknown>,
   templateOutputPath: string,
   providerRegistry: ProviderRegistry | undefined,
-  defaultProvider: Provider
+  defaultProvider: Provider,
+  executionId: string,
+  worktreePath: string | undefined
 ): Effect.Effect<FanoutResult, never> =>
   Effect.gen(function* () {
     const lenses = state.lenses ?? [];
     const ctx = buildContext(inputs, outputs, templateOutputPath);
     const lensEffects: Array<Effect.Effect<LensOutcome, never>> = lenses.map((lens) =>
       Effect.gen(function* () {
-        const lensProvider = providerRegistry
-          ? providerRegistry.resolve(lens.provider as ProviderName, lens.model)
-          : defaultProvider;
+        // resolve() fails fast (throws) on unknown name / missing credential;
+        // guard it so one bad lens becomes {error}, not a defect that collapses
+        // the whole Effect.all (and the execution).
+        let lensProvider: Provider;
+        try {
+          lensProvider = providerRegistry
+            ? providerRegistry.resolve(lens.provider as ProviderName, lens.model)
+            : defaultProvider;
+        } catch (err) {
+          return { name: lens.name, provider: lens.provider, error: err instanceof Error ? err.message : String(err), costUsd: 0 };
+        }
         const lensPrompt = renderTemplate(lens.agent_prompt, ctx);
         const res: { ok: true; resp: CompletionResponse } | { ok: false; error: string } = yield* lensProvider
-          .complete({ messages: [{ role: "user", content: lensPrompt }], temperature: 0.2, maxTokens: 4096 })
+          .complete({
+            messages: [{ role: "user", content: lensPrompt }],
+            temperature: 0.2,
+            maxTokens: 4096,
+            executionId,
+            ...(worktreePath ? { workdir: worktreePath } : {}),
+          })
           .pipe(
             Effect.matchEffect({
               onFailure: (err) => Effect.succeed({ ok: false as const, error: err instanceof Error ? err.message : String(err) }),
@@ -653,6 +694,7 @@ export const executeLLMStep = (
     let promptTokens = 0;
     let completionTokens = 0;
     let totalTokens = 0;
+    let costUsdAccum = 0;
 
     const messages: Message[] = [
       {
@@ -706,6 +748,7 @@ export const executeLLMStep = (
       promptTokens += llmResponse.usage?.promptTokens ?? 0;
       completionTokens += llmResponse.usage?.completionTokens ?? 0;
       totalTokens += llmResponse.usage?.totalTokens ?? 0;
+      costUsdAccum += llmResponse.costUsd ?? 0;
 
       // If no tool calls, we're done with this state
       if (!llmResponse.toolCalls || llmResponse.toolCalls.length === 0) {
@@ -750,6 +793,7 @@ export const executeLLMStep = (
       emittedOutput,
       lastStructuredToolResult,
       usage: { promptTokens, completionTokens, totalTokens },
+      costUsd: costUsdAccum,
     };
   });
 
@@ -934,18 +978,24 @@ export const applyReviewRejection = (
   return stateOutput;
 };
 
-/** Evaluate transitions and return the next state id, or undefined if none match. */
-export const evaluateNextState = (
+/** Evaluate transitions and return the first matching transition, or undefined. */
+export const evaluateNextTransition = (
   state: SkillStateMachineState,
   outputs: Record<string, unknown>
-): string | undefined => {
+): SkillStateMachineTransition | undefined => {
   for (const transition of state.transitions ?? []) {
     if (!transition.when || evaluateCondition(transition.when, outputs)) {
-      return transition.to;
+      return transition;
     }
   }
   return undefined;
 };
+
+/** Evaluate transitions and return the next state id, or undefined if none match. */
+export const evaluateNextState = (
+  state: SkillStateMachineState,
+  outputs: Record<string, unknown>
+): string | undefined => evaluateNextTransition(state, outputs)?.to;
 
 /** Check the state's gate (if any) via the gate engine. No gate → approved. */
 export const checkGateTransition = (

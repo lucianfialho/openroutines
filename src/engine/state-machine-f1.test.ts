@@ -286,3 +286,45 @@ describe("F1 runner — cost accumulation (#138)", () => {
     expect(repo.get("exec1")!.costUsd).toBeCloseTo(0.03, 6);
   });
 });
+
+describe("F1 runner — per-state provider resolution (#135)", () => {
+  it("resolves an agent state's declared provider via the registry; a bare state uses the default", async () => {
+    const skill: SkillStateMachine = {
+      id: "t",
+      initial_state: "s1",
+      states: {
+        s1: { agent_prompt: "p", provider: "claude-cli", model: "m1", transitions: [{ to: "s2" }] },
+        s2: { agent_prompt: "p", transitions: [{ to: "done" }] },
+        done: { terminal: true },
+      },
+    } as SkillStateMachine;
+    const resolved = { complete: vi.fn(() => Effect.succeed(resp())) };
+    const resolveFn = vi.fn(() => resolved);
+    const providerRegistry = { resolve: resolveFn } as any;
+    const defaultProv = { complete: vi.fn(() => Effect.succeed(resp())) };
+    const r = await run(skill, { provider: defaultProv, providerRegistry, repository: makeRepo().repo });
+    expect(r.success).toBe(true);
+    expect(resolveFn).toHaveBeenCalledWith("claude-cli", "m1");
+    expect(resolved.complete).toHaveBeenCalledOnce(); // s1 via registry
+    expect(defaultProv.complete).toHaveBeenCalledOnce(); // s2 via default
+  });
+
+  it("routes a provider-resolution failure through fail() (persisting cost), not a raw defect", async () => {
+    const skill: SkillStateMachine = {
+      id: "t",
+      initial_state: "s1",
+      states: {
+        s1: { agent_prompt: "p", provider: "claude-api", transitions: [{ to: "done" }] },
+        done: { terminal: true },
+      },
+    } as SkillStateMachine;
+    const providerRegistry = { resolve: () => { throw new Error("no apiKey"); } } as any;
+    const defaultProv = { complete: () => Effect.succeed(resp()) };
+    const repo = makeRepo();
+    const r = await run(skill, { provider: defaultProv, providerRegistry, repository: repo.repo });
+    expect(r.success).toBe(false);
+    expect(r.output).toContain("Provider resolution failed");
+    expect(repo.get("exec1")!.status).toBe("failed");
+    expect(repo.get("exec1")!.providerBreakdown).toBeDefined();
+  });
+});

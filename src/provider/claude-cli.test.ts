@@ -134,16 +134,20 @@ describe("claude-cli provider — env", () => {
     process.env.DATABASE_URL = "postgres://secret";
     process.env.GITHUB_TOKEN = "ghp_x";
     process.env.ANTHROPIC_API_KEY = "sk-ant-x";
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-tok";
     try {
       const provider = makeClaudeCliProvider({});
       await Effect.runPromise(provider.complete({ prompt: "hi" } as any));
       expect(state.lastCall!.options.env.DATABASE_URL).toBeUndefined();
       expect(state.lastCall!.options.env.GITHUB_TOKEN).toBeUndefined();
-      expect(state.lastCall!.options.env.ANTHROPIC_API_KEY).toBe("sk-ant-x");
+      // Subscription provider: OAuth token forwarded, API key never (that is claude-api's, D3/#133).
+      expect(state.lastCall!.options.env.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(state.lastCall!.options.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-tok");
     } finally {
       delete process.env.DATABASE_URL;
       delete process.env.GITHUB_TOKEN;
       delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
     }
   });
 });

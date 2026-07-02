@@ -24,7 +24,7 @@ export interface CompletionRequest {
   workdir?: string;
   /** JSON schema constraining the structured output of a coarse state. */
   jsonSchema?: Record<string, unknown> | string;
-  /** API-billing ceiling; only the billed claude-api provider honors it (ignored by CLI/subscription providers). */
+  /** Reserved API-billing ceiling for the billed claude-api provider; not yet enforced (CLI/subscription providers ignore it). */
   maxBudgetUsd?: number;
   /** Execution owning this call — used to track spawned processes (F1). */
   executionId?: string;
