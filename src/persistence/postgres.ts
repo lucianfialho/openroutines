@@ -42,8 +42,8 @@ export const makePostgresRepository = (
       `INSERT INTO executions (
         id, routine_id, trigger_type, skill_name, status,
         output, error, prompt_tokens, completion_tokens, total_tokens,
-        started_at, finished_at, metadata
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        started_at, finished_at, metadata, cost_usd, provider_breakdown
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
       ON CONFLICT (id) DO UPDATE SET
         status = EXCLUDED.status,
         output = EXCLUDED.output,
@@ -52,7 +52,9 @@ export const makePostgresRepository = (
         completion_tokens = EXCLUDED.completion_tokens,
         total_tokens = EXCLUDED.total_tokens,
         finished_at = EXCLUDED.finished_at,
-        metadata = EXCLUDED.metadata`,
+        metadata = EXCLUDED.metadata,
+        cost_usd = EXCLUDED.cost_usd,
+        provider_breakdown = EXCLUDED.provider_breakdown`,
       [
         record.id,
         record.routineId,
@@ -67,6 +69,8 @@ export const makePostgresRepository = (
         record.startedAt,
         record.finishedAt ?? null,
         record.metadata ? JSON.stringify(record.metadata) : null,
+        record.costUsd ?? null,
+        record.providerBreakdown ? JSON.stringify(record.providerBreakdown) : null,
       ]
     );
   };
@@ -119,6 +123,9 @@ const rowToRecord = (row: Record<string, unknown>): ExecutionRecord => ({
   completionTokens: (row.completion_tokens as number) ?? undefined,
   totalTokens: (row.total_tokens as number) ?? undefined,
   metadata: (row.metadata as Record<string, unknown>) ?? undefined,
+  // NUMERIC columns come back as strings from the pg driver
+  costUsd: row.cost_usd != null ? Number(row.cost_usd) : undefined,
+  providerBreakdown: (row.provider_breakdown as Record<string, number>) ?? undefined,
   startedAt: row.started_at as Date,
   finishedAt: (row.finished_at as Date) ?? undefined,
 });

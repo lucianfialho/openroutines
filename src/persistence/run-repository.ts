@@ -13,8 +13,8 @@ export const makePostgresRunRepository = (pool: Pool): RunStateRepository => {
       `INSERT INTO run_states (
         id, execution_id, state_id, skill_id, agent_prompt, output,
         output_validated, gate_id, status, started_at, finished_at,
-        duration_ms, prompt_tokens, completion_tokens, total_tokens
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        duration_ms, prompt_tokens, completion_tokens, total_tokens, cost_usd
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       ON CONFLICT (id) DO UPDATE SET
         output = EXCLUDED.output,
         output_validated = EXCLUDED.output_validated,
@@ -24,7 +24,8 @@ export const makePostgresRunRepository = (pool: Pool): RunStateRepository => {
         duration_ms = EXCLUDED.duration_ms,
         prompt_tokens = EXCLUDED.prompt_tokens,
         completion_tokens = EXCLUDED.completion_tokens,
-        total_tokens = EXCLUDED.total_tokens`,
+        total_tokens = EXCLUDED.total_tokens,
+        cost_usd = EXCLUDED.cost_usd`,
       [
         state.id ?? crypto.randomUUID(),
         state.executionId,
@@ -41,6 +42,7 @@ export const makePostgresRunRepository = (pool: Pool): RunStateRepository => {
         state.promptTokens ?? null,
         state.completionTokens ?? null,
         state.totalTokens ?? null,
+        state.costUsd ?? null,
       ]
     );
   };
@@ -111,6 +113,8 @@ const rowToRunState = (row: Record<string, unknown>): RunState => ({
   promptTokens: (row.prompt_tokens as number) ?? undefined,
   completionTokens: (row.completion_tokens as number) ?? undefined,
   totalTokens: (row.total_tokens as number) ?? undefined,
+  // NUMERIC columns come back as strings from the pg driver
+  costUsd: row.cost_usd != null ? Number(row.cost_usd) : undefined,
 });
 
 const rowToSubRun = (row: Record<string, unknown>): SubRun => ({

@@ -147,4 +147,57 @@ describe("makePostgresRepository", () => {
     expect(results[0].routineId).toBe("routine-a");
     expect(lastQuery).toContain("routine_id = $1");
   });
+
+  it("should save cost_usd and provider_breakdown", async () => {
+    const repo = makePostgresRepository({
+      connectionString: "postgresql://test:test@localhost/test",
+    });
+    const record: ExecutionRecord = {
+      id: "exec-1",
+      routineId: "routine-a",
+      triggerType: "api",
+      skillName: "echo",
+      status: "completed",
+      costUsd: 0.07,
+      providerBreakdown: { "claude-cli": 0.07 },
+      startedAt: new Date("2024-01-01T00:00:00Z"),
+    };
+
+    await repo.save(record);
+
+    expect(lastQuery).toContain("cost_usd");
+    expect(lastQuery).toContain("provider_breakdown");
+    expect(lastParams).toContain(0.07);
+    expect(lastParams).toContain(JSON.stringify({ "claude-cli": 0.07 }));
+  });
+
+  it("should round-trip cost_usd (numeric-as-string) and provider_breakdown", async () => {
+    mockRows = [
+      {
+        id: "exec-1",
+        routine_id: "routine-a",
+        trigger_type: "api",
+        skill_name: "echo",
+        status: "completed",
+        output: null,
+        error: null,
+        prompt_tokens: null,
+        completion_tokens: null,
+        total_tokens: null,
+        started_at: new Date("2024-01-01"),
+        finished_at: null,
+        cost_usd: "0.07",
+        provider_breakdown: { "claude-cli": 0.07 },
+      },
+    ];
+
+    const repo = makePostgresRepository({
+      connectionString: "postgresql://test:test@localhost/test",
+    });
+    const result = await repo.findById("exec-1");
+
+    expect(result?.costUsd).toBe(0.07);
+    expect(typeof result?.costUsd).toBe("number");
+    expect(result?.providerBreakdown).toEqual({ "claude-cli": 0.07 });
+  });
 });
