@@ -1,6 +1,7 @@
 import { Effect } from "effect";
-import { exec } from "child_process";
+import { spawn } from "child_process";
 import type { CompletionRequest, CompletionResponse } from "./types.js";
+import { pickEnv, BASE_ENV_VARS } from "../util/env.js";
 
 export interface KimiCliConfig {
   model?: string;
@@ -21,21 +22,30 @@ export const makeKimiCliProvider = (config: KimiCliConfig) => {
           })
           .join("\n\n") ?? request.prompt ?? "";
 
-        const promptEscaped = promptText.replace(/'/g, "'\"'\"'");
-        const modelFlag = model && model !== "kimi-latest" ? `--model '${model.replace(/'/g, "'\"'\"'")}'` : "";
-
-        const cmd = `kimi --prompt '${promptEscaped}' --output-format stream-json ${modelFlag} < /dev/null`;
+        // argv, no shell: the prompt carries untrusted issue/PR text — passing
+        // it as a distinct argv element means it can never reach /bin/sh. stdin
+        // is ignored (replaces the old `< /dev/null`).
+        const args = ["--prompt", promptText, "--output-format", "stream-json"];
+        if (model && model !== "kimi-latest") args.push("--model", model);
 
         return new Promise<CompletionResponse>((resolve, reject) => {
-          exec(cmd, {
+          const child = spawn("kimi", args, {
             cwd: process.cwd(),
-            env: { ...process.env, KIMI_SHARE_DIR: process.env.KIMI_SHARE_DIR || "/home/lucian/.kimi-code" },
-            maxBuffer: 10 * 1024 * 1024,
+            // Minimal env: kimi CLI needs only its API key + share dir, never
+            // the orchestrator's GitHub/DB secrets.
+            env: { ...pickEnv([...BASE_ENV_VARS, "KIMI_API_KEY"]), KIMI_SHARE_DIR: process.env.KIMI_SHARE_DIR || "/home/lucian/.kimi-code" },
+            stdio: ["ignore", "pipe", "pipe"],
             timeout: 300_000, // 5 minutes
-          }, (error, stdout, stderr) => {
-            console.log("[KimiCli] exec callback. error:", error ? `${error.message} (code=${error.code})` : "none", "stdout bytes:", stdout.length, "stderr:", stderr.slice(0, 200));
-            if (error) {
-              reject(new Error(`kimi CLI failed: ${error.message}. stderr: ${stderr}`));
+          });
+
+          let stdout = "";
+          let stderr = "";
+          child.stdout?.on("data", (d) => { stdout += String(d); });
+          child.stderr?.on("data", (d) => { stderr += String(d); });
+          child.on("error", (err) => reject(new Error(`kimi CLI failed: ${err.message}`)));
+          child.on("close", (code) => {
+            if (code !== 0) {
+              reject(new Error(`kimi CLI failed (code=${code}). stderr: ${stderr.slice(0, 500)}`));
               return;
             }
 

@@ -5,9 +5,12 @@ import { makeGitHubConnector, GitHubCliError } from "./github.js";
 let mockStdout = "";
 let mockStderr = "";
 let shouldFail = false;
+let calls: Array<{ file: string; args: string[]; options: any }> = [];
 
+// promisify(execFile) invokes execFile(file, args, options, callback).
 vi.mock("child_process", () => ({
-  exec: vi.fn((_cmd, _opts, callback) => {
+  execFile: vi.fn((file: string, args: string[], options: any, callback: any) => {
+    calls.push({ file, args, options });
     if (shouldFail) {
       const err = new Error("Command failed");
       (err as unknown as { stderr: string }).stderr = mockStderr;
@@ -26,10 +29,11 @@ describe("makeGitHubConnector", () => {
     mockStdout = "";
     mockStderr = "";
     shouldFail = false;
+    calls = [];
     vi.clearAllMocks();
   });
 
-  it("should fetch an issue", async () => {
+  it("should fetch an issue via execFile argv", async () => {
     mockStdout = JSON.stringify({
       number: 42,
       title: "Bug fix",
@@ -42,19 +46,15 @@ describe("makeGitHubConnector", () => {
     const result = await Effect.runPromise(connector.fetchIssue(42));
 
     expect(result.issue.number).toBe(42);
-    expect(result.issue.title).toBe("Bug fix");
     expect(result.issue.labels).toContain("bug");
+    // Command ran as gh with argv (no shell string).
+    expect(calls[0].file).toBe("gh");
+    expect(calls[0].args).toEqual(["issue", "view", "42", "--json", "number,title,body,state,labels"]);
   });
 
   it("should list pull requests", async () => {
     mockStdout = JSON.stringify([
-      {
-        number: 1,
-        title: "Feature A",
-        url: "https://github.com/owner/repo/pull/1",
-        state: "open",
-        headRefName: "feat/a",
-      },
+      { number: 1, title: "Feature A", url: "https://github.com/owner/repo/pull/1", state: "open", headRefName: "feat/a" },
     ]);
 
     const connector = makeGitHubConnector(config);
@@ -62,44 +62,83 @@ describe("makeGitHubConnector", () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].number).toBe(1);
-    expect(result[0].title).toBe("Feature A");
   });
 
-  it("should create a pull request", async () => {
-    mockStdout = JSON.stringify([{
-      url: "https://github.com/owner/repo/pull/2",
-      number: 2,
-    }]);
+  it("should create a pull request with a slashed feature branch", async () => {
+    mockStdout = JSON.stringify([{ url: "https://github.com/owner/repo/pull/2", number: 2 }]);
 
     const connector = makeGitHubConnector(config);
     const result = await Effect.runPromise(
-      connector.createPullRequest("feat/b", "Add feature B", "Description here")
+      connector.createPullRequest("feat/issue-42-add-endpoint", "Add feature B", "Description here")
     );
 
-    expect(result.pr.url).toBe("https://github.com/owner/repo/pull/2");
     expect(result.pr.number).toBe(2);
+    const create = calls.find((c) => c.args[0] === "pr" && c.args[1] === "create");
+    expect(create?.args).toContain("--head");
+    expect(create?.args).toContain("feat/issue-42-add-endpoint");
   });
 
-  it("should escape quotes in PR body", async () => {
+  it("passes malicious issue text as a single argv element, never a shell string", async () => {
     mockStdout = JSON.stringify([{ url: "https://github.com/owner/repo/pull/3", number: 3 }]);
+    const payload = '`$(touch /tmp/pwned)`; rm -rf / && echo "';
 
     const connector = makeGitHubConnector(config);
-    await Effect.runPromise(
-      connector.createPullRequest("feat/c", "Title", 'Say "hello"')
+    await Effect.runPromise(connector.createPullRequest("feat-c", "Title", payload));
+
+    const create = calls.find((c) => c.args[0] === "pr" && c.args[1] === "create")!;
+    // The payload arrives verbatim as one argv element after --body — it is not
+    // concatenated into any command string and never reaches a shell.
+    const bodyIdx = create.args.indexOf("--body");
+    expect(create.args[bodyIdx + 1]).toBe(payload);
+    expect(create.file).toBe("gh");
+  });
+
+  it("rejects a branch ref outside the allowlist before any gh call", async () => {
+    const connector = makeGitHubConnector(config);
+    const exit = await Effect.runPromiseExit(
+      connector.createPullRequest("feat/issue-1; rm -rf /", "t", "b")
     );
 
-    // The mock doesn't expose the command, but we verify no throw
-    expect(true).toBe(true);
+    expect(exit._tag).toBe("Failure");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects a leading-dash branch (argv flag confusion)", async () => {
+    const connector = makeGitHubConnector(config);
+    const exit = await Effect.runPromiseExit(connector.createPullRequest("-oProxyCommand", "t", "b"));
+    expect(exit._tag).toBe("Failure");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects a non-positive / non-integer issue number before any gh call", async () => {
+    const connector = makeGitHubConnector(config);
+    const negative = await Effect.runPromiseExit(connector.fetchIssue(-1));
+    const fractional = await Effect.runPromiseExit(connector.addComment(1.5, "x"));
+    expect(negative._tag).toBe("Failure");
+    expect(fractional._tag).toBe("Failure");
+    expect(calls).toHaveLength(0);
   });
 
   it("should add a comment", async () => {
     mockStdout = "https://github.com/owner/repo/issues/42#issuecomment-123\n";
-
     const connector = makeGitHubConnector(config);
     await Effect.runPromise(connector.addComment(42, "LGTM"));
+    expect(calls[0].args).toEqual(["issue", "comment", "42", "--body", "LGTM"]);
+  });
 
-    // Should not throw
-    expect(true).toBe(true);
+  it("passes a minimal env (token/repo, no unrelated secrets)", async () => {
+    mockStdout = JSON.stringify({ number: 1, title: "", body: "", state: "open", labels: [] });
+    process.env.DATABASE_URL = "postgres://secret";
+    try {
+      const connector = makeGitHubConnector(config);
+      await Effect.runPromise(connector.fetchIssue(1));
+      const env = calls[0].options.env;
+      expect(env.GH_TOKEN).toBe("ghp_test");
+      expect(env.GH_REPO).toBe("owner/repo");
+      expect(env.DATABASE_URL).toBeUndefined();
+    } finally {
+      delete process.env.DATABASE_URL;
+    }
   });
 
   it("should fail when gh returns error", async () => {

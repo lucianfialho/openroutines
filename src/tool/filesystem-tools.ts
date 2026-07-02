@@ -10,6 +10,7 @@ import { resolve, relative, dirname } from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
 import type { Tool } from "./types.js";
+import { pickEnv, BASE_ENV_VARS } from "../util/env.js";
 
 const execAsync = promisify(exec);
 
@@ -210,7 +211,9 @@ export const makeFilesystemTools = (): Tool[] => [
           const tscPath = resolve(PROJECT_ROOT, "node_modules", ".bin", "tsc");
           const command = existsSync(tscPath) ? `${tscPath} --noEmit` : "npx tsc --noEmit";
           try {
-            await execAsync(command, { cwd: checkCwd, timeout: 60000 });
+            // Same minimal env as run_shell: a malicious tsconfig transformer
+            // runs during type-check and must never see the orchestrator secrets.
+            await execAsync(command, { cwd: checkCwd, timeout: 60000, env: pickEnv([...BASE_ENV_VARS, "NODE_ENV"]) });
           } catch (err) {
             writeFileSync(filePath, originalContent, "utf-8");
             const stderr = err instanceof Error && "stderr" in err ? String(err.stderr) : String(err);
@@ -260,7 +263,10 @@ export const makeFilesystemTools = (): Tool[] => [
         const { stdout, stderr } = await execAsync(command, {
           cwd,
           timeout,
-          env: process.env,
+          // Minimal env: run_shell executes commands derived from untrusted card
+          // text — never hand it the orchestrator's secrets. PATH/HOME/NODE_ENV
+          // are the calibration knob if a repo's tests need a specific var.
+          env: pickEnv([...BASE_ENV_VARS, "NODE_ENV"]),
         });
         return JSON.stringify({
           command,

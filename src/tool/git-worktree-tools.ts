@@ -5,16 +5,32 @@
  * - The main repo stays clean (no uncommitted changes on main)
  * - Multiple issues can be worked on in parallel
  * - Each execution gets its own branch and working directory
+ *
+ * Every git call runs via execFile with an argv array (never a shell string),
+ * so a branch/commit message derived from untrusted card/issue text can never
+ * break out into a shell. Branches are validated before use.
  */
 
-import { exec } from "child_process";
+import { execFile } from "child_process";
 import { promisify } from "util";
 import { mkdtempSync, rmSync, symlinkSync } from "fs";
 import { tmpdir } from "os";
 import { resolve } from "path";
 import type { Tool } from "./types.js";
+import { pickEnv, BASE_ENV_VARS } from "../util/env.js";
+import { isValidBranch, BRANCH_RE } from "../util/validate.js";
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+// git needs no orchestrator secrets EXCEPT the GitHub token: `git push` over
+// HTTPS authenticates via the gh credential helper, which reads GH_TOKEN from
+// the environment. Everything else (KIMI_API_KEY, DATABASE_URL, webhook secret)
+// stays out. Computed per call so it reflects the env at run time, not import.
+const GIT_ENV_VARS = [...BASE_ENV_VARS, "GH_TOKEN", "GITHUB_TOKEN"];
+
+/** Run `git <args>` with argv (no shell) and the minimal git env. */
+const git = (args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> =>
+  execFileAsync("git", args, { cwd, env: pickEnv(GIT_ENV_VARS) }) as Promise<{ stdout: string; stderr: string }>;
 
 const getProjectRoot = () =>
   process.env.PROJECT_ROOT ? resolve(process.env.PROJECT_ROOT) : resolve(process.cwd());
@@ -45,7 +61,10 @@ export const makeGitWorktreeTools = (): Tool[] => [
       },
     },
     handler: async (args) => {
-      let branch = String(args.branch);
+      const branch = String(args.branch);
+      if (!isValidBranch(branch)) {
+        return JSON.stringify({ error: `Invalid branch ref (must match ${BRANCH_RE}): ${branch}`, success: false });
+      }
       // Use a persistent directory for worktrees so they survive container restarts
       const worktreeBase = process.env.WORKTREE_BASE || tmpdir();
       const worktreePath = mkdtempSync(resolve(worktreeBase, "or-worktree-"));
@@ -54,20 +73,20 @@ export const makeGitWorktreeTools = (): Tool[] => [
         // Clean up existing branch/worktree with same name to avoid conflicts
         try {
           // Check if branch exists and delete it
-          await execAsync(`git branch -D ${branch}`, { cwd: getProjectRoot() });
+          await git(["branch", "-D", branch], getProjectRoot());
         } catch {
           // Branch didn't exist, ignore
         }
         // Also check for any existing worktree with this branch and remove it
         try {
-          const { stdout: worktreeList } = await execAsync("git worktree list --porcelain", { cwd: getProjectRoot() });
+          const { stdout: worktreeList } = await git(["worktree", "list", "--porcelain"], getProjectRoot());
           const lines = worktreeList.split("\n");
           for (let i = 0; i < lines.length; i++) {
             if (lines[i].startsWith("worktree ")) {
               const wtPath = lines[i].replace("worktree ", "");
               const branchLine = lines[i + 2]; // branch <name> or detached
               if (branchLine && branchLine.includes(branch)) {
-                await execAsync(`git worktree remove ${wtPath} --force`, { cwd: getProjectRoot() });
+                await git(["worktree", "remove", wtPath, "--force"], getProjectRoot());
               }
             }
           }
@@ -76,10 +95,7 @@ export const makeGitWorktreeTools = (): Tool[] => [
         }
 
         // Create worktree from current HEAD (has latest local code)
-        await execAsync(
-          `git worktree add -b ${branch} ${worktreePath} HEAD`,
-          { cwd: getProjectRoot() }
-        );
+        await git(["worktree", "add", "-b", branch, worktreePath, "HEAD"], getProjectRoot());
 
         // Symlink node_modules so npm commands work in worktree
         // When PROJECT_ROOT is mounted (e.g. in Docker), node_modules lives
@@ -94,12 +110,8 @@ export const makeGitWorktreeTools = (): Tool[] => [
         }
 
         // Configure git user in worktree (needed for commits)
-        await execAsync('git config user.email "openroutines@bot.local"', {
-          cwd: worktreePath,
-        });
-        await execAsync('git config user.name "OpenRoutines Bot"', {
-          cwd: worktreePath,
-        });
+        await git(["config", "user.email", "openroutines@bot.local"], worktreePath);
+        await git(["config", "user.name", "OpenRoutines Bot"], worktreePath);
 
         // Store for later cleanup
         const executionId = args._executionId as string | undefined;
@@ -150,7 +162,7 @@ export const makeGitWorktreeTools = (): Tool[] => [
 
       try {
         // Pre-commit validation: check for environment artifacts
-        const { stdout: statusStdout } = await execAsync("git status --short", { cwd });
+        const { stdout: statusStdout } = await git(["status", "--short"], cwd);
         const statusLines = statusStdout.trim().split("\n").filter((l) => l.length > 0);
         const forbiddenPatterns = [
           { pattern: /node_modules/, desc: "node_modules" },
@@ -172,17 +184,13 @@ export const makeGitWorktreeTools = (): Tool[] => [
           });
         }
 
-        await execAsync("git add -A", { cwd });
-        await execAsync(`git commit -m "${message.replace(/"/g, '\\"')}"`, {
-          cwd,
-        });
-        await execAsync("git push -u origin HEAD", { cwd });
+        await git(["add", "-A"], cwd);
+        // message passed as a distinct argv element — no shell, no escaping.
+        await git(["commit", "-m", message], cwd);
+        await git(["push", "-u", "origin", "HEAD"], cwd);
 
         // Get branch name
-        const { stdout: branchStdout } = await execAsync(
-          "git rev-parse --abbrev-ref HEAD",
-          { cwd }
-        );
+        const { stdout: branchStdout } = await git(["rev-parse", "--abbrev-ref", "HEAD"], cwd);
 
         return JSON.stringify({
           commit: {
@@ -223,17 +231,16 @@ export const makeGitWorktreeTools = (): Tool[] => [
     handler: async (args) => {
       const cwd = String(args.cwd);
       const branch = String(args.branch);
+      if (!isValidBranch(branch)) {
+        return JSON.stringify({ error: `Invalid branch ref (must match ${BRANCH_RE}): ${branch}` });
+      }
 
       try {
         // Remove worktree from git
-        await execAsync(`git worktree remove ${cwd}`, {
-          cwd: getProjectRoot(),
-        });
+        await git(["worktree", "remove", cwd], getProjectRoot());
 
         // Delete local branch
-        await execAsync(`git branch -D ${branch}`, {
-          cwd: getProjectRoot(),
-        });
+        await git(["branch", "-D", branch], getProjectRoot());
 
         return JSON.stringify({ removed: true, path: cwd, branch });
       } catch (err: any) {
@@ -255,12 +262,8 @@ export const cleanupWorktree = async (executionId: string): Promise<void> => {
   const info = worktrees.get(executionId);
   if (!info) return;
   try {
-    await execAsync(`git worktree remove ${info.path} --force`, {
-      cwd: getProjectRoot(),
-    });
-    await execAsync(`git branch -D ${info.branch}`, {
-      cwd: getProjectRoot(),
-    });
+    await git(["worktree", "remove", info.path, "--force"], getProjectRoot());
+    await git(["branch", "-D", info.branch], getProjectRoot());
   } catch {
     // Best effort cleanup
   }
