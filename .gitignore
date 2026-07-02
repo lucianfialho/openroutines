@@ -8,3 +8,6 @@ coverage/
 .vscode/
 .idea/
 .vercel
+
+# AutoDev local planning docs (never committed)
+.autodev/
