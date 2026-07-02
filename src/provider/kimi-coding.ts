@@ -5,7 +5,7 @@
  * Required because Kimi Code keys are rejected by the OpenAI endpoint.
  */
 
-import { Data, Effect } from "effect";
+import { Data, Effect, Schedule } from "effect";
 import type {
   CompletionRequest,
   CompletionResponse,
@@ -19,6 +19,7 @@ export interface KimiCodingConfig {
   baseURL?: string;
   model?: string;
   timeoutMs?: number;
+  retries?: number;
 }
 
 export class KimiCodingError extends Data.TaggedError("KimiCodingError")<{
@@ -29,6 +30,32 @@ export class KimiCodingError extends Data.TaggedError("KimiCodingError")<{
 
 const DEFAULT_MODEL = "kimi-coding/k2p5";
 const DEFAULT_BASE_URL = "https://api.kimi.com/coding";
+
+/** Convert a thrown fetch/HTTP error into KimiCodingError, preserving status if present. */
+const mapError = (err: unknown): KimiCodingError => {
+  const status =
+    err && typeof err === "object" && typeof (err as { status?: unknown }).status === "number"
+      ? (err as { status: number }).status
+      : undefined;
+  return new KimiCodingError({
+    message: err instanceof Error ? err.message : String(err),
+    status,
+    cause: err,
+  });
+};
+
+/** Only 429 (rate limit) and 529 (overloaded) are transient — safe to retry. */
+const isRetryable = (err: KimiCodingError): boolean =>
+  err.status === 429 || err.status === 529;
+
+/** Exponential backoff with jitter, capped at `retries` attempts after the initial call. */
+const makeRetryOptions = (retries: number) => ({
+  schedule: Schedule.exponential("300 millis").pipe(
+    Schedule.jittered,
+    Schedule.both(Schedule.recurs(retries))
+  ),
+  while: isRetryable,
+});
 
 /** Convert our Message[] to Anthropic message format. */
 const toAnthropicMessages = (
@@ -69,6 +96,7 @@ export const makeKimiCodingProvider = (config: KimiCodingConfig) => {
   const baseURL = config.baseURL ?? DEFAULT_BASE_URL;
   const model = config.model ?? DEFAULT_MODEL;
   const timeoutMs = config.timeoutMs ?? 300_000;
+  const retryOptions = makeRetryOptions(config.retries ?? 3);
 
   const buildMessages = (
     request: CompletionRequest
@@ -131,9 +159,11 @@ export const makeKimiCodingProvider = (config: KimiCodingConfig) => {
             }).then(async (res) => {
               const data = (await res.json()) as Record<string, unknown>;
               if (!res.ok) {
-                throw new Error(
+                const err = new Error(
                   `HTTP ${res.status}: ${(data.error as Record<string, string> | undefined)?.message ?? JSON.stringify(data)}`
-                );
+                ) as Error & { status?: number };
+                err.status = res.status;
+                throw err;
               }
               return data;
             }),
@@ -141,12 +171,8 @@ export const makeKimiCodingProvider = (config: KimiCodingConfig) => {
               setTimeout(() => reject(new Error("Request timeout")), timeoutMs)
             ),
           ]),
-        catch: (err) =>
-          new KimiCodingError({
-            message: err instanceof Error ? err.message : String(err),
-            cause: err,
-          }),
-      })) as Record<string, unknown>;
+        catch: mapError,
+      }).pipe(Effect.retry(retryOptions))) as Record<string, unknown>;
 
       const content = (response.content ?? []) as Array<{ type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }>;
       const textParts = content
