@@ -52,11 +52,19 @@ export const evaluateCondition = (expression: string, outputs: Record<string, un
 };
 
 const resolvePath = (path: string, outputs: Record<string, unknown>): unknown => {
-  if (!path.startsWith("output.")) {
-    throw new ConditionError(`Condition must start with 'output.': ${path}`);
+  // Accept both `output.` (canonical) and `outputs.` (common authoring typo).
+  // Defense in depth: a wrong prefix used to throw a raw ConditionError that
+  // escaped as an Effect defect and left executions stuck — see runStateMachine.
+  let rest: string;
+  if (path.startsWith("output.")) {
+    rest = path.slice("output.".length);
+  } else if (path.startsWith("outputs.")) {
+    rest = path.slice("outputs.".length);
+  } else {
+    throw new ConditionError(`Condition must start with 'output.' or 'outputs.': ${path}`);
   }
 
-  const parts = path.slice("output.".length).split(".");
+  const parts = rest.split(".");
   let current: unknown = outputs;
 
   for (const part of parts) {

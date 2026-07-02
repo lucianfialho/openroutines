@@ -590,3 +590,143 @@ describe("OpenRoutines E2E Pipeline", () => {
     }
   }, 60000);
 });
+
+// ── F0: engine hardening (#128 defect net, #132 retry caps / noResponse) ─────
+
+describe("runStateMachine — F0 hardening", () => {
+  let prevDisableAuto: string | undefined;
+  beforeAll(() => {
+    prevDisableAuto = process.env.OPENROUTINES_DISABLE_AUTO_ACTIONS;
+    process.env.OPENROUTINES_DISABLE_AUTO_ACTIONS = "1";
+  });
+  afterAll(() => {
+    process.env.OPENROUTINES_DISABLE_AUTO_ACTIONS = prevDisableAuto;
+  });
+
+  const baseTools = makeFilesystemTools();
+  const toolRegistry = {
+    getHandler: (name: string) => baseTools.find((t) => t.definition.name === name)?.handler,
+    getDefinition: (name: string) => baseTools.find((t) => t.definition.name === name)?.definition,
+    listDefinitions: () => baseTools.map((t) => t.definition),
+  };
+
+  // Provider that always answers with a single emit_output carrying the JSON the
+  // picker returns for the given (rendered) prompt.
+  const emitProvider = (pick: (prompt: string) => string) => ({
+    complete: (req: CompletionRequest) => {
+      const prompt = req.messages?.filter((m) => m.role === "user").pop()?.content || "";
+      return Effect.succeed({
+        content: "mock",
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        toolCalls: [{ id: "c1", name: "emit_output", arguments: { content: pick(prompt) } }],
+      });
+    },
+  });
+
+  const routine: Routine = { id: "f0-routine", triggers: [{ type: "api" }], pipeline: { skill: "x" } };
+  const event: TriggerEvent = { type: "api", payload: {} };
+
+  it("#128 — a bad condition prefix is caught as a defect and persisted as failed (never wedged)", async () => {
+    const skill: SkillStateMachine = {
+      id: "bad-prefix",
+      initial_state: "s1",
+      states: {
+        s1: { agent_prompt: "go", tools: ["emit_output"], transitions: [{ to: "done", when: "badprefix.foo == true" }] },
+        done: { terminal: true },
+      },
+    };
+    const persistence = createMockExecutionRepository();
+    const sm = runStateMachine({ provider: emitProvider(() => "{}") as any, repository: persistence as any, toolRegistry: toolRegistry as any });
+    const result = await Effect.runPromise(sm(skill, routine, event, "defect-1"));
+
+    expect(result.success).toBe(false);
+    const rec = persistence.getExecutions().get("defect-1");
+    expect(rec?.status).toBe("failed");
+    expect(String(rec?.error)).toContain("defect");
+  });
+
+  it("#128 — the `outputs.` prefix now resolves (defense-in-depth normalization)", async () => {
+    const skill: SkillStateMachine = {
+      id: "outputs-prefix",
+      initial_state: "s1",
+      states: {
+        s1: { agent_prompt: "go", tools: ["emit_output"], transitions: [{ to: "done", when: "outputs.s1.flag == true" }] },
+        done: { terminal: true },
+      },
+    };
+    const persistence = createMockExecutionRepository();
+    const sm = runStateMachine({ provider: emitProvider(() => JSON.stringify({ flag: true })) as any, repository: persistence as any, toolRegistry: toolRegistry as any });
+    const result = await Effect.runPromise(sm(skill, routine, event, "prefix-1"));
+
+    expect(result.success).toBe(true);
+    expect(persistence.getExecutions().get("prefix-1")?.status).toBe("completed");
+  });
+
+  it("#132 — a verify that never passes fails at the verify→implement cap, not the global cap", async () => {
+    const skill: SkillStateMachine = {
+      id: "verify-loop",
+      initial_state: "implement",
+      states: {
+        implement: { agent_prompt: "IMPLEMENT step", tools: ["emit_output"], transitions: [{ to: "verify" }] },
+        verify: {
+          agent_prompt: "VERIFY step",
+          tools: ["emit_output"],
+          transitions: [
+            { to: "implement", when: "output.verify.verification.tests_passed == false" },
+            { to: "done" },
+          ],
+        },
+        done: { terminal: true },
+      },
+    };
+    const persistence = createMockExecutionRepository();
+    const provider = emitProvider((p) =>
+      p.includes("VERIFY") ? JSON.stringify({ verification: { tests_passed: false, typecheck_passed: true } }) : "{}"
+    );
+    const sm = runStateMachine({ provider: provider as any, repository: persistence as any, toolRegistry: toolRegistry as any });
+    const result = await Effect.runPromise(sm(skill, routine, event, "verifycap-1"));
+
+    expect(result.success).toBe(false);
+    const rec = persistence.getExecutions().get("verifycap-1");
+    expect(rec?.status).toBe("failed");
+    expect(String(rec?.error)).toContain("verify→implement");
+  });
+
+  it("#132 — a noResponse step persists status:failed instead of wedging the execution", async () => {
+    const skill: SkillStateMachine = {
+      id: "no-response",
+      initial_state: "s1",
+      states: {
+        s1: { agent_prompt: "go", tools: ["emit_output"], transitions: [{ to: "done" }] },
+        done: { terminal: true },
+      },
+    };
+    const persistence = createMockExecutionRepository();
+    // maxToolIterations:0 forces the ReAct loop to exit with no llmResponse.
+    const sm = runStateMachine({ provider: emitProvider(() => "{}") as any, repository: persistence as any, toolRegistry: toolRegistry as any, maxToolIterations: 0 });
+    const result = await Effect.runPromise(sm(skill, routine, event, "noresp-1"));
+
+    expect(result.success).toBe(false);
+    expect(persistence.getExecutions().get("noresp-1")?.status).toBe("failed");
+  });
+
+  it("#132 — verifyIterations is serialized into the resume context on a gate pause", async () => {
+    const skill: SkillStateMachine = {
+      id: "gate-ctx",
+      initial_state: "work",
+      states: {
+        work: { agent_prompt: "work", tools: ["emit_output"], transitions: [{ to: "gate" }] },
+        gate: { gate: "manual_approval", transitions: [{ to: "done" }] },
+        done: { terminal: true },
+      },
+    };
+    const persistence = createMockExecutionRepository();
+    const gateEngine = makeGateEngine({ repository: makeInMemoryGateRepository() });
+    const sm = runStateMachine({ provider: emitProvider(() => "{}") as any, repository: persistence as any, toolRegistry: toolRegistry as any, gateEngine });
+    const result = await Effect.runPromise(sm(skill, routine, event, "gatectx-1"));
+
+    expect(result.paused).toBe(true);
+    const ctx = persistence.getExecutions().get("gatectx-1")?.metadata?.stateMachineContext;
+    expect(ctx).toHaveProperty("verifyIterations");
+  });
+});

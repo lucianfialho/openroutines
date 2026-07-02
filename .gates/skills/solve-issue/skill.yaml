@@ -200,9 +200,9 @@ states:
       - read_file
     transitions:
       - to: implement
-        when: outputs.verify.verification.tests_passed == false
+        when: output.verify.verification.tests_passed == false
       - to: implement
-        when: outputs.verify.verification.typecheck_passed == false
+        when: output.verify.verification.typecheck_passed == false
       - to: pr_gate
 
   pr_gate:

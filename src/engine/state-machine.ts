@@ -40,6 +40,8 @@ export interface StateMachineConfig {
   fileMetadataRepository?: FileMetadataRepository;
   gateEngine?: GateEngine;
   toolRegistry?: ToolRegistry;
+  /** Overrides the ReAct tool-loop cap per state. Defaults to DEFAULT_MAX_TOOL_ITERATIONS. */
+  maxToolIterations?: number;
 }
 
 export interface StateMachineContext {
@@ -47,6 +49,7 @@ export interface StateMachineContext {
   outputs: Record<string, unknown>;
   inputs?: Record<string, unknown>;
   implementReviewIterations?: number;
+  verifyIterations?: number;
 }
 
 type Provider = StateMachineConfig["provider"];
@@ -80,7 +83,7 @@ export interface ToolBatchResult {
 
 type OutputResult = { ok: true; output: unknown } | { ok: false; error: string };
 
-const maxToolIterations = 10;
+const DEFAULT_MAX_TOOL_ITERATIONS = 10;
 
 export const runStateMachine = (
   config: StateMachineConfig
@@ -90,10 +93,10 @@ export const runStateMachine = (
   event: TriggerEvent,
   executionId: string,
   context?: StateMachineContext
-): Effect.Effect<ExecutionResult, never> =>
-  Effect.gen(function* () {
+): Effect.Effect<ExecutionResult, never> => {
+  const startedAt = new Date();
+  const program = Effect.gen(function* () {
     const { provider, repository, runStateRepository, fileMetadataRepository, gateEngine, toolRegistry } = config;
-    const startedAt = new Date();
     const outputs: Record<string, unknown> = {};
 
     // Build inputs from event payload, or restore from resumed context
@@ -108,6 +111,8 @@ export const runStateMachine = (
     }
     let implementReviewIterations = context?.implementReviewIterations ?? 0;
     const maxImplementReviewIterations = 3;
+    let verifyIterations = context?.verifyIterations ?? 0;
+    const maxVerifyIterations = 2;
     let iterations = 0;
     const maxIterations = 50;
 
@@ -167,7 +172,7 @@ export const runStateMachine = (
           output: `Waiting for gate approval: ${state.gate} at state ${stateId}`,
           startedAt,
           metadata: {
-            stateMachineContext: { currentState: stateId, outputs, inputs, implementReviewIterations },
+            stateMachineContext: { currentState: stateId, outputs, inputs, implementReviewIterations, verifyIterations },
             gateId,
             gateType: state.gate,
             gateStatus: "pending",
@@ -201,7 +206,7 @@ export const runStateMachine = (
       yield* Effect.log(`[StateMachine] State: ${stateId}`);
 
       // Persist context at the START of each state so resume begins from the correct state
-      yield* persistStateContext(repository, executionId, stateId, outputs, inputs, implementReviewIterations);
+      yield* persistStateContext(repository, executionId, stateId, outputs, inputs, implementReviewIterations, verifyIterations);
 
       // Terminal state
       if (state.terminal) {
@@ -251,19 +256,12 @@ export const runStateMachine = (
             })).pipe(Effect.ignore);
           }
 
-          const step = yield* executeLLMStep(provider, skill.id, state, stateId, prompt, toolRegistry, worktreePath, executionId);
+          const step = yield* executeLLMStep(provider, skill.id, state, stateId, prompt, toolRegistry, worktreePath, executionId, config.maxToolIterations);
           if (step.kind === "error") {
             return yield* fail(step.error);
           }
           if (step.kind === "noResponse") {
-            return {
-              executionId,
-              success: false,
-              output: `No LLM response for state ${stateId}`,
-              logs: [`No LLM response for state ${stateId}`],
-              startedAt,
-              finishedAt: new Date(),
-            };
+            return yield* fail(`No LLM response for state ${stateId}`);
           }
 
           const extracted = extractAndValidateOutput(
@@ -292,7 +290,7 @@ export const runStateMachine = (
             })).pipe(Effect.ignore);
           }
           yield* Effect.log(`[StateMachine] State ${stateId} completed`);
-          yield* persistStateContext(repository, executionId, stateId, outputs, inputs, implementReviewIterations);
+          yield* persistStateContext(repository, executionId, stateId, outputs, inputs, implementReviewIterations, verifyIterations);
           yield* persistImplementFileMetadata(fileMetadataRepository, stateId, stateOutput, inputs, executionId);
         }
       }
@@ -321,12 +319,57 @@ export const runStateMachine = (
         }
       }
 
+      // Track verify→implement retry loop (a verify that keeps failing must not
+      // ricochet up to the global maxIterations cap — each retry is a paid agent
+      // run in the target architecture).
+      if (stateId === "verify" && nextState === "implement") {
+        verifyIterations++;
+        yield* Effect.log(`[StateMachine] verify→implement iteration ${verifyIterations}/${maxVerifyIterations}`);
+        if (verifyIterations > maxVerifyIterations) {
+          const errMsg = `Max verify→implement iterations (${maxVerifyIterations}) reached. Manual intervention required.`;
+          yield* Effect.log(`[StateMachine] ${errMsg}`);
+          return yield* fail(errMsg);
+        }
+      }
+
       stateId = nextState;
     }
 
     // Should not reach here
     return yield* fail("State machine exited without reaching terminal state");
   });
+
+  // Any synchronous throw inside the generator (e.g. a raw ConditionError from
+  // an authoring typo in a `when:` expression) surfaces as an Effect defect,
+  // which bypasses the typed error channel and the `fail()` helper — leaving the
+  // execution stuck in its last persisted status. Catch defects here and persist
+  // `status:"failed"` so a broken skill can never wedge an execution.
+  return Effect.catchDefect(program, (defect: unknown) =>
+    Effect.gen(function* () {
+      const message = defect instanceof Error ? defect.message : String(defect);
+        yield* Effect.logError(`[StateMachine] Uncaught defect: ${message}`);
+        const finishedAt = new Date();
+        yield* persistExecution(config.repository, {
+          id: executionId,
+          routineId: routine.id,
+          triggerType: event.type,
+          skillName: skill.id,
+          status: "failed",
+          error: `Uncaught defect: ${message}`,
+          startedAt,
+          finishedAt,
+        });
+        return {
+          executionId,
+          success: false,
+          output: `Uncaught defect: ${message}`,
+          logs: [message],
+          startedAt,
+          finishedAt,
+        } as ExecutionResult;
+      })
+  );
+};
 
 /**
  * Resolve the disk output path and the (possibly worktree-relative) template
@@ -464,7 +507,8 @@ export const executeLLMStep = (
   prompt: string,
   toolRegistry: ToolRegistry | undefined,
   worktreePath: string | undefined,
-  executionId: string
+  executionId: string,
+  maxToolIterations: number = DEFAULT_MAX_TOOL_ITERATIONS
 ): Effect.Effect<LLMStepResult, never> =>
   Effect.gen(function* () {
     const hasTools = state.tools && state.tools.length > 0 && toolRegistry;
@@ -546,7 +590,8 @@ export const executeLLMStep = (
         worktreePath,
         executionId,
         messages,
-        toolCallCounts
+        toolCallCounts,
+        state.tools ?? []
       );
       if (batch.lastStructuredToolResult !== undefined) {
         lastStructuredToolResult = batch.lastStructuredToolResult;
@@ -582,14 +627,30 @@ export const applyToolCalls = (
   worktreePath: string | undefined,
   executionId: string,
   messages: Message[],
-  toolCallCounts: Map<string, number>
+  toolCallCounts: Map<string, number>,
+  allowedTools?: string[]
 ): Effect.Effect<ToolBatchResult, never> =>
   Effect.gen(function* () {
     let emitOutputCalled = false;
     let emittedOutput: string | undefined = undefined;
     let lastStructuredToolResult: unknown = undefined;
 
+    // Enforce the per-state tool allowlist. `state.tools` only decided which
+    // definitions were OFFERED to the LLM — a hallucinated or prompt-injected
+    // call to a globally-registered tool this state never declared used to run
+    // anyway. When an allowlist is provided, reject anything outside it.
+    const allowed = allowedTools !== undefined ? new Set(allowedTools) : undefined;
+
     for (const toolCall of toolCalls) {
+      if (allowed && !allowed.has(toolCall.name)) {
+        yield* Effect.log(`[StateMachine] Tool '${toolCall.name}' not allowed in state ${stateId}`);
+        messages.push({
+          role: "tool",
+          content: JSON.stringify({ error: `Tool '${toolCall.name}' not allowed in state ${stateId}` }),
+          toolCallId: toolCall.id,
+        });
+        continue;
+      }
       const handler = toolRegistry?.getHandler(toolCall.name);
       if (!handler) {
         yield* Effect.log(`[StateMachine] Tool '${toolCall.name}' not found`);
@@ -815,7 +876,8 @@ export const persistStateContext = (
   stateId: string,
   outputs: Record<string, unknown>,
   inputs: Record<string, unknown>,
-  implementReviewIterations: number
+  implementReviewIterations: number,
+  verifyIterations: number
 ): Effect.Effect<void, never> =>
   Effect.gen(function* () {
     yield* Effect.tryPromise({
@@ -826,7 +888,7 @@ export const persistStateContext = (
             ...existing,
             metadata: {
               ...(existing.metadata || {}),
-              stateMachineContext: { currentState: stateId, outputs, inputs, implementReviewIterations },
+              stateMachineContext: { currentState: stateId, outputs, inputs, implementReviewIterations, verifyIterations },
             },
           });
         }

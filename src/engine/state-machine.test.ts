@@ -19,6 +19,7 @@ import {
 import type { SkillStateMachineState } from "../skill/schema.js";
 import type { CompletionResponse, Message } from "../provider/types.js";
 import type { ToolCall } from "../tool/types.js";
+import { loadSkill } from "../skill/loader.js";
 
 const state = (s: Partial<SkillStateMachineState>): SkillStateMachineState => s as SkillStateMachineState;
 
@@ -82,6 +83,22 @@ describe("evaluateNextState", () => {
 
   it("returns undefined with no transitions", () => {
     expect(evaluateNextState(state({}), {})).toBeUndefined();
+  });
+
+  // #128 exit criterion: the REAL solve-issue skill.yaml must cross `verify`
+  // without a defect. Loads the actual artifact so a future `outputs.`/typo
+  // regression in a condition (e.g. via POST /skills/:name) fails CI, not prod.
+  it("routes the real solve-issue verify state without throwing", () => {
+    const skill = loadSkill(".gates/skills", "solve-issue");
+    expect(skill.format).toBe("state-machine");
+    const verify = (skill as { stateMachine: { states: Record<string, SkillStateMachineState> } }).stateMachine.states.verify;
+    expect(verify).toBeDefined();
+
+    // tests fail → back to implement; tests pass → forward (pr_gate). Neither throws.
+    const failed = evaluateNextState(verify, { verify: { verification: { tests_passed: false, typecheck_passed: true } } });
+    expect(failed).toBe("implement");
+    const passed = evaluateNextState(verify, { verify: { verification: { tests_passed: true, typecheck_passed: true } } });
+    expect(passed).toBe("pr_gate");
   });
 });
 
@@ -198,6 +215,27 @@ describe("applyToolCalls", () => {
     );
     expect(r.emitOutputCalled).toBe(false);
     expect(String(messages[0].content)).toContain("not found");
+  });
+
+  it("rejects a tool outside the state allowlist even when globally registered", async () => {
+    const messages: Message[] = [];
+    let ran = false;
+    const registry = registryOf({ run_shell: async () => { ran = true; return JSON.stringify({ ran: true }); } });
+    const r = await Effect.runPromise(
+      applyToolCalls([call("run_shell", { command: "id" })], registry, "verify", undefined, "exec1", messages, new Map(), ["read_file"])
+    );
+    expect(ran).toBe(false);
+    expect(r.lastStructuredToolResult).toBeUndefined();
+    expect(String(messages[0].content)).toContain("not allowed");
+  });
+
+  it("allows a tool that is in the state allowlist", async () => {
+    const messages: Message[] = [];
+    const registry = registryOf({ read_file: async () => JSON.stringify({ data: 1 }) });
+    const r = await Effect.runPromise(
+      applyToolCalls([call("read_file")], registry, "verify", undefined, "exec1", messages, new Map(), ["read_file"])
+    );
+    expect(r.lastStructuredToolResult).toEqual({ data: 1 });
   });
 });
 
