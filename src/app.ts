@@ -8,7 +8,9 @@
 
 import { readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
-import express from "express";
+import { timingSafeEqual } from "crypto";
+import express, { type RequestHandler } from "express";
+import { Redis } from "ioredis";
 import { Effect } from "effect";
 import { parseRoutine } from "./routine/parser.js";
 import { loadSkill } from "./skill/loader.js";
@@ -58,6 +60,73 @@ export interface AppConfig {
   databaseUrl?: string;
   redisUrl?: string;
 }
+
+/**
+ * Auth guard for mutating orchestrator routes. Single-tenant, self-hosted: no
+ * user accounts. Accepts either a shared bearer token (constant-time compare)
+ * or a Tailscale-injected identity header. The Tailscale path is only safe
+ * because the server binds to loopback behind `tailscale serve` (see main.ts).
+ * With no token configured and no Tailscale header, every mutating route fails
+ * closed with 401.
+ */
+export const makeRequireAuth = (token: string | undefined): RequestHandler => (req, res, next) => {
+  const tsUser = req.header("Tailscale-User-Login");
+  if (tsUser && tsUser.trim() !== "") {
+    next();
+    return;
+  }
+
+  const header = req.header("Authorization") ?? "";
+  const prefix = "Bearer ";
+  if (token && header.startsWith(prefix)) {
+    const provided = Buffer.from(header.slice(prefix.length));
+    const expected = Buffer.from(token);
+    if (provided.length === expected.length && timingSafeEqual(provided, expected)) {
+      next();
+      return;
+    }
+  }
+
+  res.status(401).json({ error: "Unauthorized" });
+};
+
+/** One-shot Redis reachability probe using a short-lived dedicated client. */
+export const pingRedis = async (redisUrl: string): Promise<void> => {
+  const client = new Redis(redisUrl, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    enableOfflineQueue: false,
+    connectTimeout: 2000,
+  });
+  try {
+    await client.connect();
+    await client.ping();
+  } finally {
+    client.disconnect();
+  }
+};
+
+/**
+ * Run the active-dependency health checks in parallel. Each probe is optional
+ * (absent → reported as "in-memory"); a rejected probe is "error". Injectable
+ * probes keep this unit-testable without a live Postgres/Redis.
+ */
+export const checkHealth = async (deps: {
+  pg?: () => Promise<unknown>;
+  redis?: () => Promise<unknown>;
+  cronOk: boolean;
+}): Promise<{ checks: Record<string, string>; healthy: boolean }> => {
+  const [pg, redis] = await Promise.allSettled([
+    deps.pg ? deps.pg() : Promise.resolve(undefined),
+    deps.redis ? deps.redis() : Promise.resolve(undefined),
+  ]);
+  const checks: Record<string, string> = {
+    postgres: deps.pg ? (pg.status === "fulfilled" ? "ok" : "error") : "in-memory",
+    redis: deps.redis ? (redis.status === "fulfilled" ? "ok" : "error") : "in-memory",
+    cron: deps.cronOk ? "ok" : "error",
+  };
+  return { checks, healthy: !Object.values(checks).includes("error") };
+};
 
 export const createApp = async (config: AppConfig) => {
   // 1. Load routines from filesystem
@@ -143,15 +212,18 @@ export const createApp = async (config: AppConfig) => {
     console.log(`[App] Registered ${githubTools.length} GitHub tools`);
   }
 
-  // Filesystem tools (always available for self-improvement)
-  const fsTools = makeFilesystemTools();
-  toolRegistry.registerMany(fsTools);
-  console.log(`[App] Registered ${fsTools.length} filesystem tools`);
-
-  // Git worktree tools (always available for isolated development)
-  const gitWorktreeTools = makeGitWorktreeTools();
-  toolRegistry.registerMany(gitWorktreeTools);
-  console.log(`[App] Registered ${gitWorktreeTools.length} git worktree tools`);
+  // Legacy ReAct micro-tools (filesystem + git worktree) — the execution
+  // primitives of the pre-F1 solve-issue loop, including run_shell (arbitrary
+  // shell). Disabled by default so they are never implicitly reachable via
+  // /trigger; the operator opts in with OPENROUTINES_LEGACY_TOOLS=1 until skills
+  // migrate to the Claude Code CLI executor (F1).
+  if (process.env.OPENROUTINES_LEGACY_TOOLS === "1") {
+    const legacyTools = [...makeFilesystemTools(), ...makeGitWorktreeTools()];
+    toolRegistry.registerMany(legacyTools);
+    console.log(`[App] Registered ${legacyTools.length} legacy micro-tools (OPENROUTINES_LEGACY_TOOLS=1)`);
+  } else {
+    console.log("[App] Legacy micro-tools disabled (set OPENROUTINES_LEGACY_TOOLS=1 for pre-F1 solve-issue)");
+  }
 
   // 5. Setup engine
   const engine = makeEngine({
@@ -225,6 +297,8 @@ export const createApp = async (config: AppConfig) => {
 
   // 8. Setup Express app
   const app = express();
+  const requireAuth = makeRequireAuth(process.env.OPENROUTINES_API_TOKEN);
+  const expectedCronTasks = routines.filter((r) => r.triggers.some((t) => t.type === "schedule")).length;
 
   if (config.githubWebhookSecret) {
     setupGitHubWebhook(app, {
@@ -235,7 +309,7 @@ export const createApp = async (config: AppConfig) => {
   }
 
   // Manual trigger endpoint
-  app.post("/trigger/:routineId", express.json(), async (req, res) => {
+  app.post("/trigger/:routineId", requireAuth, express.json(), async (req, res) => {
     const routine = routines.find((r) => r.id === req.params.routineId);
     if (!routine) {
       res.status(404).json({ error: "Routine not found" });
@@ -301,7 +375,7 @@ export const createApp = async (config: AppConfig) => {
     }
   });
 
-  app.post("/gates/:executionId/approve", express.json(), async (req, res) => {
+  app.post("/gates/:executionId/approve", requireAuth, express.json(), async (req, res) => {
     try {
       const gate = await gateRepository.findByExecution(req.params.executionId);
       if (!gate) {
@@ -334,7 +408,7 @@ export const createApp = async (config: AppConfig) => {
     }
   });
 
-  app.post("/gates/:executionId/reject", express.json(), async (req, res) => {
+  app.post("/gates/:executionId/reject", requireAuth, express.json(), async (req, res) => {
     try {
       const gate = await gateRepository.findByExecution(req.params.executionId);
       if (!gate) {
@@ -350,7 +424,7 @@ export const createApp = async (config: AppConfig) => {
   });
 
   // Resume paused execution manually
-  app.post("/executions/:id/resume", async (req, res) => {
+  app.post("/executions/:id/resume", requireAuth, async (req, res) => {
     try {
       const execution = await persistence.findById(req.params.id);
       if (!execution) {
@@ -404,7 +478,7 @@ export const createApp = async (config: AppConfig) => {
     }
   });
 
-  app.post("/executions/:id/feedback", express.json(), async (req, res) => {
+  app.post("/executions/:id/feedback", requireAuth, express.json(), async (req, res) => {
     try {
       await feedbackRepository.save({
         executionId: req.params.id,
@@ -539,7 +613,7 @@ export const createApp = async (config: AppConfig) => {
   });
 
   // Save skill YAML
-  app.post("/skills/:name", express.json(), (req, res) => {
+  app.post("/skills/:name", requireAuth, express.json(), (req, res) => {
     try {
       const name = req.params.name;
       const { content } = req.body;
@@ -628,7 +702,7 @@ export const createApp = async (config: AppConfig) => {
     }
   });
 
-  app.post("/metrics/improvements/:id/apply", async (req, res) => {
+  app.post("/metrics/improvements/:id/apply", requireAuth, async (req, res) => {
     try {
       const imp = applyImprovement(req.params.id);
       if (!imp) {
@@ -644,7 +718,7 @@ export const createApp = async (config: AppConfig) => {
     }
   });
 
-  app.post("/metrics/improvements/:id/dismiss", async (req, res) => {
+  app.post("/metrics/improvements/:id/dismiss", requireAuth, async (req, res) => {
     try {
       const imp = dismissImprovement(req.params.id);
       if (!imp) {
@@ -666,28 +740,31 @@ export const createApp = async (config: AppConfig) => {
     res.sendFile(join(projectRoot, "public", "index.html"));
   });
 
-  // Health check
-  app.get("/health", (_req, res) => {
-    res.json({
-      status: "ok",
-      routines: routines.length,
-      provider: config.kimiApiKey ? "kimi" : "stub",
-      persistence: config.databaseUrl ? "postgresql" : "in-memory",
-      queue: config.redisUrl ? "bullmq" : "in-memory",
-      tools: toolRegistry.listDefinitions().length,
-      gates: "migrate" in gateRepository ? "postgresql" : "in-memory",
-    });
+  const providerName = config.kimiApiKey ? "kimi-coding-api" : "kimi-cli";
+  const baseHealth = () => ({
+    routines: routines.length,
+    provider: providerName,
+    persistence: config.databaseUrl ? "postgresql" : "in-memory",
+    queue: config.redisUrl ? "bullmq" : "in-memory",
+    tools: toolRegistry.listDefinitions().length,
+    gates: "migrate" in gateRepository ? "postgresql" : "in-memory",
   });
 
-  app.get("/health/detailed", (_req, res) => {
-    res.json({
-      status: "ok",
-      routines: routines.length,
-      provider: config.kimiApiKey ? "kimi" : "stub",
-      persistence: config.databaseUrl ? "postgresql" : "in-memory",
-      queue: config.redisUrl ? "bullmq" : "in-memory",
-      tools: toolRegistry.listDefinitions().length,
-      gates: "migrate" in gateRepository ? "postgresql" : "in-memory",
+  // Health check
+  app.get("/health", (_req, res) => {
+    res.json({ status: "ok", ...baseHealth() });
+  });
+
+  app.get("/health/detailed", async (_req, res) => {
+    const { checks, healthy } = await checkHealth({
+      pg: pgPool ? () => pgPool.query("SELECT 1") : undefined,
+      redis: config.redisUrl ? () => pingRedis(config.redisUrl!) : undefined,
+      cronOk: cronScheduler.runningTasks >= expectedCronTasks,
+    });
+    res.status(healthy ? 200 : 503).json({
+      status: healthy ? "ok" : "degraded",
+      ...baseHealth(),
+      checks,
       memory: process.memoryUsage(),
     });
   });

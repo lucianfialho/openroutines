@@ -75,6 +75,9 @@ export const setupGitHubWebhook = (
   app: Express,
   config: WebhookConfig
 ): void => {
-  app.use(express.json());
-  app.post("/webhooks/github", createGitHubWebhookHandler(config));
+  // Scope the JSON parser to this route only. A global app.use(express.json())
+  // would run before the per-route requireAuth on every mutating route, so an
+  // unauthenticated malformed body would hit the default error handler (400 +
+  // stack trace) instead of requireAuth's 401.
+  app.post("/webhooks/github", express.json(), createGitHubWebhookHandler(config));
 };

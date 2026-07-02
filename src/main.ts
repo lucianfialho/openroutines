@@ -8,6 +8,7 @@ import "dotenv/config";
  */
 
 import { createApp } from "./app.js";
+import { timezoneWarning } from "./util/timezone.js";
 
 const config = {
   routinesDir: process.env.ROUTINES_DIR ?? "./routines",
@@ -25,13 +26,20 @@ const config = {
 async function main() {
   console.log("OpenRoutines starting...\n");
 
+  const tzWarn = timezoneWarning(process.env.TZ);
+  if (tzWarn) console.warn(`[Boot] WARNING: ${tzWarn}`);
+
   const { app, cronScheduler, queue } = await createApp(config);
 
-  const server = app.listen(config.port, () => {
-    console.log(`\nOpenRoutines ready on http://localhost:${config.port}`);
-    console.log(`Health check: http://localhost:${config.port}/health`);
+  // Bind to loopback by default: the Tailscale auth path is only safe when the
+  // Express port is not directly reachable off-host (behind `tailscale serve`).
+  // Override with HOST=0.0.0.0 only when direct LAN/public exposure is intended.
+  const host = process.env.HOST ?? "127.0.0.1";
+  const server = app.listen(config.port, host, () => {
+    console.log(`\nOpenRoutines ready on http://${host}:${config.port}`);
+    console.log(`Health check: http://${host}:${config.port}/health`);
     if (config.githubWebhookSecret) {
-      console.log(`Webhook: http://localhost:${config.port}/webhooks/github`);
+      console.log(`Webhook: http://${host}:${config.port}/webhooks/github`);
     }
   });
 
