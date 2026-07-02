@@ -19,7 +19,7 @@ import { makeFilesystemTools } from "../tool/filesystem-tools.js";
 import { makeGitWorktreeTools } from "../tool/git-worktree-tools.js";
 import type { SkillStateMachine } from "../skill/schema.js";
 import type { Routine, TriggerEvent } from "../routine/types.js";
-import type { CompletionRequest, CompletionResponse } from "../provider/types.js";
+import type { CompletionRequest } from "../provider/types.js";
 
 // ── Test Environment ───────────────────────────────────────────────────────
 

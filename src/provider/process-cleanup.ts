@@ -15,7 +15,7 @@ export const isProcessAlive = (pid: number): boolean => {
     process.kill(pid, 0);
     return true;
   } catch (err) {
-    return (err as NodeJS.ErrnoException).code !== "ESRCH";
+    return (err as { code?: string }).code !== "ESRCH";
   }
 };
 
