@@ -19,7 +19,11 @@ export const makeBullMqQueue = (config: BullMqConfig): JobQueue & { close: () =>
   const queue = new Queue(queueName, {
     connection: { url: config.redisUrl },
     defaultJobOptions: {
-      attempts: 3,
+      // attempts: 1 — a per-phase retry is the orchestrator's decision (via the
+      // action_ledger + boot reconciliation), NEVER BullMQ re-running the job from
+      // the start, which would re-invoke `preparacao` and could create a second
+      // worktree/PR for the same card (F3 #149).
+      attempts: 1,
       backoff: {
         type: "exponential",
         delay: 1000,

@@ -22,6 +22,7 @@ import { makeProviderRegistry } from "./provider/registry.js";
 import { makeScriptRegistry } from "./script/registry.js";
 import { makePostgresExecutionProcessRepository } from "./persistence/execution-process-repo.js";
 import { cleanupZombieProcesses } from "./provider/process-cleanup.js";
+import { reconcileOrphanedExecutions } from "./execution/boot-reconciliation.js";
 
 import { makeInMemoryRepository } from "./persistence/in-memory.js";
 import { makePostgresRepository } from "./persistence/postgres.js";
@@ -332,6 +333,27 @@ export const createApp = async (config: AppConfig) => {
   const queue = config.redisUrl
     ? makeBullMqQueue({ redisUrl: config.redisUrl, handler: queueHandler })
     : makeInMemoryQueue(queueHandler);
+
+  // 6b. Boot reconciliation (F3 #149): recover executions left `running` by a
+  // crashed run — reset their worktree, re-enqueue from the persisted phase
+  // frontier. Runs after the queue/worker exist (so resumed jobs are picked up)
+  // and before main.ts calls app.listen (so /trigger cannot re-claim a card
+  // mid-reconciliation). action_ledger prevents any external effect duplicating.
+  try {
+    const recon = await reconcileOrphanedExecutions({
+      executionRepo: persistence,
+      queue,
+      executionProcessRepo: executionProcessRepository,
+      worktreeBase: process.env.WORKTREE_BASE,
+    });
+    if (recon.resumed.length || recon.failed.length) {
+      console.log(
+        `[App] Boot reconciliation: resumed ${recon.resumed.length}, failed ${recon.failed.length}`
+      );
+    }
+  } catch (err) {
+    console.error("[App] Boot reconciliation failed:", err);
+  }
 
   // 7. Setup cron scheduler
   const cronScheduler = new CronScheduler({

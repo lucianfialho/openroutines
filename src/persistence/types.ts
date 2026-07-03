@@ -61,6 +61,27 @@ export interface ActionLedgerRepository {
   fail: (executionId: string, actionKey: string, error: string) => Promise<void>;
 }
 
+/** card ↔ PR linkage, keyed to tasks by (sourceId, taskId) — F2 composite (F3 #146). */
+export interface PrLink {
+  id?: string;
+  sourceId: string;
+  taskId: string;
+  repo: string;
+  prNumber?: number;
+  branch: string;
+  status: string; // 'open' | 'merged' | 'closed' ...
+  reviewState?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface PrLinkRepository {
+  create: (link: PrLink) => Promise<void>;
+  findByTask: (sourceId: string, taskId: string) => Promise<PrLink[]>;
+  /** Open PRs of a night, via executions(source_id, task_id, night_id) — the global PR-cap count (F3 #147). */
+  countOpenForNight: (nightId: string) => Promise<number>;
+}
+
 /** Task snapshot persistence, keyed by composite (sourceId, taskId) — reuses Task from task-source (F2 #144). */
 export interface TaskRepository {
   /** Upsert by (task.sourceId, task.id). */

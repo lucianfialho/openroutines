@@ -19,25 +19,50 @@ export const isProcessAlive = (pid: number): boolean => {
   }
 };
 
+/**
+ * Kill a live process group by pid. Guard pid > 1: never signal group 0 (whole
+ * session) or init. A stored pid from a dead run can also be recycled onto an
+ * unrelated process — a full fix needs a start-time/boot-id identity check
+ * (tracked for F6 hardening); until then this bounds the worst case. Returns
+ * true if a signal was actually sent.
+ */
+const killGroupIfAlive = (pid: number): boolean => {
+  if (pid > 1 && isProcessAlive(pid)) {
+    try {
+      process.kill(-pid, "SIGKILL"); // negative pid == whole process group
+      return true;
+    } catch {
+      // already gone between the liveness check and the kill — fine (ESRCH)
+    }
+  }
+  return false;
+};
+
 export const cleanupZombieProcesses = async (
   repo: ExecutionProcessRepository
 ): Promise<{ checked: number; killed: number; cleaned: number }> => {
   const running = await repo.findRunning();
   let killed = 0;
   for (const proc of running) {
-    // Guard pid > 1: never signal group 0 (whole session) or init. A stored pid
-    // from a dead run can also be recycled onto an unrelated process — a full fix
-    // needs a start-time/boot-id identity check (tracked for F6 hardening); until
-    // then this bounds the worst case.
-    if (proc.pid > 1 && isProcessAlive(proc.pid)) {
-      try {
-        process.kill(-proc.pid, "SIGKILL"); // negative pid == whole process group
-        killed++;
-      } catch {
-        // already gone between the liveness check and the kill — fine
-      }
-    }
+    if (killGroupIfAlive(proc.pid)) killed++;
     await repo.markFinished(proc.id!, new Date());
   }
   return { checked: running.length, killed, cleaned: running.length };
+};
+
+/**
+ * Kill the process group(s) of ONE execution and mark their rows finished.
+ * Used by boot reconciliation (F3 #149) and the night-run hard stop (F3 #147),
+ * where the target is a specific orphaned/timed-out execution, not a global sweep.
+ * Swallows ESRCH (process already gone).
+ */
+export const killExecutionProcessGroup = async (
+  executionId: string,
+  repo: ExecutionProcessRepository
+): Promise<void> => {
+  const procs = (await repo.findRunning()).filter((p) => p.executionId === executionId);
+  for (const proc of procs) {
+    killGroupIfAlive(proc.pid);
+    await repo.markFinished(proc.id!, new Date());
+  }
 };
