@@ -51,6 +51,30 @@ describe("makeClaudeProvider", () => {
     }
   });
 
+  it("hoists a role:'system' message into the top-level `system` field (the shape executeLLMStep emits)", async () => {
+    // The runner builds messages as [{role:'system',...},{role:'user',...}] and
+    // never sets request.system. Anthropic /v1/messages rejects role:'system' in
+    // the messages array, so the adapter must hoist it. Without this, any
+    // agent-type state declaring provider: claude-api would 400 on its first call.
+    const mockFetch = vi.fn().mockResolvedValueOnce(fakeResponse(200, successBody("claude-opus-4-8")));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const provider = makeClaudeProvider(config);
+    await Effect.runPromise(
+      provider.complete({
+        messages: [
+          { role: "system", content: "You are executing the 'x' skill." },
+          { role: "user", content: "do the thing" },
+        ],
+      })
+    );
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
+    expect(body.system).toBe("You are executing the 'x' skill.");
+    expect(body.messages).toEqual([{ role: "user", content: "do the thing" }]);
+    expect(body.messages.some((m: { role: string }) => m.role === "system")).toBe(false);
+  });
+
   it("retries on 429 and succeeds once the API recovers", async () => {
     const mockFetch = vi
       .fn()

@@ -104,11 +104,24 @@ export const makeClaudeProvider = (config: ClaudeConfig) => {
 
   const buildMessages = (
     request: CompletionRequest
-  ): Array<{ role: string; content: string }> => {
+  ): { system?: string; messages: Array<{ role: string; content: string }> } => {
     if (request.messages && request.messages.length > 0) {
-      return toAnthropicMessages(request.messages);
+      // Hoist any role:"system" message into the native top-level `system` field.
+      // The runner (executeLLMStep) emits the system prompt AS a message, but the
+      // Anthropic /v1/messages API rejects role:"system" inside the messages array
+      // (it must be the top-level `system` field) — forwarding it would be a 400.
+      const systemFromMessages = request.messages
+        .filter((m) => m.role === "system")
+        .map((m) => m.content)
+        .filter((c) => c && c.length > 0)
+        .join("\n\n");
+      const messages = toAnthropicMessages(request.messages.filter((m) => m.role !== "system"));
+      return {
+        system: systemFromMessages.length > 0 ? systemFromMessages : undefined,
+        messages: messages.length > 0 ? messages : [{ role: "user", content: request.prompt ?? "" }],
+      };
     }
-    return [{ role: "user", content: request.prompt ?? "" }];
+    return { messages: [{ role: "user", content: request.prompt ?? "" }] };
   };
 
   const toAnthropicTools = (
@@ -130,7 +143,7 @@ export const makeClaudeProvider = (config: ClaudeConfig) => {
         : `${request.messages?.length ?? 0} messages`;
       yield* Effect.log(`[Claude] Anthropic completion (${inputDesc})`);
 
-      const messages = buildMessages(request);
+      const { system: systemFromMessages, messages } = buildMessages(request);
       const hasTools = request.tools && request.tools.length > 0;
 
       const body: Record<string, unknown> = {
@@ -141,9 +154,12 @@ export const makeClaudeProvider = (config: ClaudeConfig) => {
       };
 
       // `system` is native on the Messages API — top-level field, not a
-      // synthesized user message (unlike kimi-coding's buildMessages).
-      if (request.system) {
-        body.system = request.system;
+      // synthesized user message (unlike kimi-coding's buildMessages). Accept it
+      // from either the explicit request.system field or a hoisted role:"system"
+      // message (the shape the runner's executeLLMStep emits).
+      const systemField = [request.system, systemFromMessages].filter((s) => s && s.length > 0).join("\n\n");
+      if (systemField.length > 0) {
+        body.system = systemField;
       }
 
       if (hasTools) {

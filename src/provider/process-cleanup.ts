@@ -25,7 +25,11 @@ export const cleanupZombieProcesses = async (
   const running = await repo.findRunning();
   let killed = 0;
   for (const proc of running) {
-    if (isProcessAlive(proc.pid)) {
+    // Guard pid > 1: never signal group 0 (whole session) or init. A stored pid
+    // from a dead run can also be recycled onto an unrelated process — a full fix
+    // needs a start-time/boot-id identity check (tracked for F6 hardening); until
+    // then this bounds the worst case.
+    if (proc.pid > 1 && isProcessAlive(proc.pid)) {
       try {
         process.kill(-proc.pid, "SIGKILL"); // negative pid == whole process group
         killed++;
