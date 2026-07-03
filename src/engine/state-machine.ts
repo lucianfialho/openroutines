@@ -48,6 +48,16 @@ export interface StateMachineConfig {
   toolRegistry?: ToolRegistry;
   /** Overrides the ReAct tool-loop cap per state. Defaults to DEFAULT_MAX_TOOL_ITERATIONS. */
   maxToolIterations?: number;
+  /**
+   * Money/rate-limit gate (F3 #147): called right before every real LLM
+   * invocation (agent_prompt states only — never for type:script or an
+   * auto_action that already succeeded). Absent → no gating (manual/non-night
+   * runs). `tier` is the state's `model` (falling back to `provider`, then
+   * "default") so the caller can weigh Opus/Fable calls heavier than Kimi/Sonnet.
+   */
+  budgetGate?: (ctx: { phase: string; tier: string; executionId: string }) => Promise<{ granted: boolean; reservationId?: string }>;
+  /** Settles a granted reservation with the invocation's actual cost. Best-effort. */
+  budgetSettle?: (reservationId: string, actualUsd: number) => Promise<void>;
 }
 
 export interface StateMachineContext {
@@ -127,10 +137,19 @@ export const runStateMachine = (
     let iterations = 0;
     const maxIterations = 50;
 
-    const fail = (error: string): Effect.Effect<ExecutionResult, never> =>
+    const fail = (error: string, blockReason?: string): Effect.Effect<ExecutionResult, never> =>
       Effect.gen(function* () {
         yield* Effect.log(`[StateMachine] Execution failed: ${error}`);
         const finishedAt = new Date();
+        // blockReason (e.g. a denied budget reservation) is merged into whatever
+        // metadata is already persisted (never clobbering stateMachineContext) —
+        // read-then-merge, exactly like persistStateContext does below. Callers
+        // without a blockReason keep the pre-existing behavior (metadata absent).
+        let metadata: Record<string, unknown> | undefined;
+        if (blockReason) {
+          const existing = yield* Effect.promise(() => repository.findById(executionId).catch(() => undefined));
+          metadata = { ...(existing?.metadata ?? {}), blockReason };
+        }
         yield* persistExecution(repository, {
           id: executionId,
           routineId: routine.id,
@@ -142,6 +161,7 @@ export const runStateMachine = (
           providerBreakdown: costByProvider,
           startedAt,
           finishedAt,
+          ...(metadata !== undefined ? { metadata } : {}),
         });
         return { executionId, success: false, output: error, logs: [error], startedAt, finishedAt };
       });
@@ -334,6 +354,19 @@ export const runStateMachine = (
             stateProvider = provider;
           }
 
+          // Money/rate-limit gate (F3 #147): only the real LLM invocation below
+          // is gated — script states and an already-succeeded auto_action never
+          // reach this branch at all.
+          const tier = state.model ?? state.provider ?? "default";
+          let budgetReservationId: string | undefined;
+          if (config.budgetGate) {
+            const gate = yield* Effect.promise(() => config.budgetGate!({ phase: stateId, tier, executionId }));
+            if (!gate.granted) {
+              return yield* fail(`orcamento: budget reservation denied for state ${stateId}`, "orcamento");
+            }
+            budgetReservationId = gate.reservationId;
+          }
+
           const step = yield* executeLLMStep(stateProvider, skill.id, state, stateId, prompt, toolRegistry, worktreePath, executionId, config.maxToolIterations);
           if (step.kind === "error") {
             return yield* fail(step.error);
@@ -347,6 +380,9 @@ export const runStateMachine = (
           totalCostUsd += invocationCost;
           const providerKey = state.provider ?? "default";
           costByProvider[providerKey] = (costByProvider[providerKey] ?? 0) + invocationCost;
+          if (config.budgetSettle && budgetReservationId) {
+            yield* Effect.promise(() => config.budgetSettle!(budgetReservationId!, invocationCost)).pipe(Effect.ignore);
+          }
 
           const extracted = extractAndValidateOutput(
             step.llmResponse,

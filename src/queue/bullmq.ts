@@ -11,6 +11,8 @@ export interface BullMqConfig {
   redisUrl: string;
   queueName?: string;
   handler: (job: Job) => void | Promise<void>;
+  /** Worker concurrency (default 5). Night-run wiring sets this to NIGHT_PARALLELISM. */
+  concurrency?: number;
 }
 
 export const makeBullMqQueue = (config: BullMqConfig): JobQueue & { close: () => Promise<void> } => {
@@ -41,7 +43,7 @@ export const makeBullMqQueue = (config: BullMqConfig): JobQueue & { close: () =>
     },
     {
       connection: { url: config.redisUrl },
-      concurrency: 5,
+      concurrency: config.concurrency ?? 5,
     }
   );
 

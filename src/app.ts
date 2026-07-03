@@ -62,6 +62,11 @@ import { makeTrelloTaskSource } from "./connector/trello.js";
 import { makeRestTaskSource } from "./task-source/rest-executor.js";
 import type { TaskSource } from "./task-source/types.js";
 import { registerCardToPrHandlers } from "./pipeline/card-to-pr/index.js";
+import { runStateMachine, type StateMachineConfig, type StateMachineContext } from "./engine/state-machine.js";
+import type { SkillStateMachine } from "./skill/schema.js";
+import type { TriggerEvent } from "./routine/matcher.js";
+import { reserveBudget, settleBudget, BUDGET_UNIT_WEIGHTS, type BudgetTier } from "./night-coordinator/budget.js";
+import { runNightCycle, type RunNightCycleDeps } from "./night-coordinator/run.js";
 
 /**
  * Build a TaskSource from one loaded task-sources.yaml entry (F2 #144 left
@@ -185,6 +190,15 @@ export const createApp = async (config: AppConfig) => {
 
   console.log(`[App] Loaded ${routines.length} routines`);
 
+  // 1b. Night coordinator config (F3 #147) — read once, reused by the BullMQ
+  // worker concurrency below and by the night-coordinator deps further down.
+  const nightWindowStart = process.env.NIGHT_WINDOW_START ?? "01:00";
+  const nightWindowEnd = process.env.NIGHT_WINDOW_END ?? "06:30";
+  const nightBudgetUsd = Number(process.env.NIGHT_BUDGET_USD ?? "30") || 30;
+  const nightPrCap = parseInt(process.env.NIGHT_PR_CAP ?? "6", 10) || 6;
+  const nightParallelism = Math.max(1, Math.min(3, parseInt(process.env.NIGHT_PARALLELISM ?? "2", 10) || 2));
+  const nightTz = process.env.TZ ?? "America/Sao_Paulo";
+
   // 2. Setup persistence
   const persistence = config.databaseUrl
     ? makePostgresRepository({ connectionString: config.databaseUrl })
@@ -242,6 +256,10 @@ export const createApp = async (config: AppConfig) => {
     }
   }
 
+  // card <-> PR linkage (F3 #146/#147) — one instance shared by the card-to-pr
+  // script handlers and the night-coordinator's PR-cap check below.
+  const prLinks = pgPool ? makePostgresPrLinkRepository(pgPool) : makeInMemoryPrLinkRepository();
+
   // 3. Setup provider(s)
   // Default provider — used by markdown/ReAct skills and by state-machine states
   // that do not declare `provider:`. State-machine states can override per state
@@ -298,10 +316,40 @@ export const createApp = async (config: AppConfig) => {
     console.log("[App] Legacy micro-tools disabled (set OPENROUTINES_LEGACY_TOOLS=1 for pre-F1 solve-issue)");
   }
 
+  // Money/rate-limit gate (F3 #147), wired into the state-machine runner for
+  // card-execution jobs only (see cardToPrStateMachineConfig below). `phase` is
+  // the state id; `tier` is the state's declared model (falling back to
+  // provider). No pgPool (in-memory/dev mode) -> undefined -> no gating at all.
+  const budgetGate = pgPool
+    ? async ({ phase, tier, executionId }: { phase: string; tier: string; executionId: string }) => {
+        const { rows } = await pgPool.query("SELECT night_id FROM executions WHERE id = $1", [executionId]);
+        const nightId = rows[0]?.night_id as string | undefined;
+        if (!nightId) return { granted: true }; // no night = manual run, no cap
+        const resolvedTier = (tier in BUDGET_UNIT_WEIGHTS ? tier : "claude-sonnet-5") as BudgetTier;
+        return reserveBudget(pgPool, {
+          nightId,
+          executionId,
+          phase,
+          tier: resolvedTier,
+          estimatedUnits: BUDGET_UNIT_WEIGHTS[resolvedTier],
+        });
+      }
+    : undefined;
+  const budgetSettle = pgPool
+    ? (reservationId: string, actualUsd: number) => settleBudget(pgPool, reservationId, actualUsd)
+    : undefined;
+
   // 4b. Setup card-to-pr script handlers (F3 #146) — the deterministic states
   // of the card-to-pr pilot skill. Gated on a GitHub token (the pilot can't
   // push/open a PR without one); repos.yaml/task-sources.yaml are optional in
   // dev, so a missing/invalid one is logged and skipped rather than crashing boot.
+  // repoRegistry/cardToPrSkill/cardToPrStateMachineConfig are hoisted (not
+  // block-scoped) because the night-coordinator wiring and the card-execution
+  // queue dispatch below both need them.
+  let repoRegistry: import("./repo-registry/schema.js").RepoRegistry | undefined;
+  let cardToPrSkill: SkillStateMachine | undefined;
+  let cardToPrStateMachineConfig: StateMachineConfig | undefined;
+
   if (config.githubToken) {
     // git_commit is commit-only (no push — D13, the orchestrator owns the
     // remote), so it is safe to promote to the always-on toolset. The rest of
@@ -317,7 +365,6 @@ export const createApp = async (config: AppConfig) => {
       console.log("[App] Registered git_commit tool (commit-only, no push)");
     }
 
-    let repoRegistry: import("./repo-registry/schema.js").RepoRegistry | undefined;
     try {
       repoRegistry = loadRepoRegistry();
     } catch (err) {
@@ -350,10 +397,39 @@ export const createApp = async (config: AppConfig) => {
         githubToken: config.githubToken,
         worktreeBase: process.env.WORKTREE_BASE ?? "/tmp/or-worktrees",
         ledger: pgPool ? makePostgresActionLedgerRepository(pgPool) : makeInMemoryActionLedgerRepository(),
-        prLinks: pgPool ? makePostgresPrLinkRepository(pgPool) : makeInMemoryPrLinkRepository(),
+        prLinks,
         taskSourceFor: (sourceId) => taskSources.get(sourceId),
       });
       console.log("[App] Registered card-to-pr script handlers");
+
+      // The night-run coordinator dispatches card-execution jobs by calling
+      // runStateMachine directly (queueHandler §6) rather than engine.execute():
+      // a card-execution trigger matches no routine (night-run.yaml's own
+      // trigger is `schedule`), so the generic routine resolution would fail.
+      // Build the skill + runner config once here, reused per card-execution job.
+      try {
+        const loaded = loadSkill(config.skillsDir, "card-to-pr");
+        if (loaded.format === "state-machine") {
+          cardToPrSkill = loaded.stateMachine;
+          cardToPrStateMachineConfig = {
+            provider: provider as Parameters<typeof makeEngine>[0]["provider"],
+            providerRegistry,
+            scriptRegistry,
+            repository: persistence,
+            runStateRepository,
+            fileMetadataRepository,
+            gateEngine,
+            toolRegistry,
+            budgetGate,
+            budgetSettle,
+          };
+        }
+      } catch (err) {
+        console.warn(
+          "[App] card-to-pr skill.yaml not loaded, night-run card dispatch disabled:",
+          err instanceof Error ? err.message : err
+        );
+      }
     }
   } else {
     console.log("[App] No GITHUB_TOKEN configured, card-to-pr script handlers not registered");
@@ -374,17 +450,67 @@ export const createApp = async (config: AppConfig) => {
     fileMetadataRepository,
   });
 
+  // Night-coordinator deps (F3 #147): assigned below, right after `queue` is
+  // built (runNightCycle enqueues onto it) — declared here so the closures in
+  // queueHandler and the /trigger/night-run route (defined later) see the
+  // final value; both only read it once actually invoked, well after createApp
+  // has finished assigning it.
+  let nightCoordinatorDeps: RunNightCycleDeps | undefined;
+
   // 6. Setup queue (connects to engine)
   const queueHandler = async (job: { id?: string; routineId?: string; trigger: { type: string; payload: unknown; executionId?: string } }) => {
+    // Night-run cron tick: run the coordinator cycle itself, not a generic
+    // skill dispatch (night-run.yaml's pipeline.skill is only a placeholder —
+    // it is never loaded/executed by engine.execute() for this trigger).
+    if (job.routineId === "night-run" && job.trigger.type === "schedule") {
+      if (!nightCoordinatorDeps) {
+        console.warn("[Queue] night-run cron fired but the night coordinator is not wired (need DATABASE_URL + GITHUB_TOKEN + repos.yaml)");
+        return;
+      }
+      const summary = await runNightCycle(nightCoordinatorDeps);
+      console.log(`[Queue] Night cycle: ${JSON.stringify(summary)}`);
+      return;
+    }
+
     // Load state machine context for resumed executions
-    let stateMachineContext: import("./engine/state-machine.js").StateMachineContext | undefined;
+    let stateMachineContext: StateMachineContext | undefined;
     if (job.trigger.executionId) {
       const existing = await persistence.findById(job.trigger.executionId);
-      const ctx = existing?.metadata?.stateMachineContext as import("./engine/state-machine.js").StateMachineContext | undefined;
+      const ctx = existing?.metadata?.stateMachineContext as StateMachineContext | undefined;
       if (ctx) {
         stateMachineContext = ctx;
         console.log(`[Queue] Resuming execution ${job.trigger.executionId} at state ${ctx.currentState}`);
       }
+    }
+
+    // A card-execution job (enqueued by the night coordinator) runs the
+    // card-to-pr skill directly — it has no matching Routine trigger, so it
+    // bypasses engine.execute()'s routine resolution entirely.
+    if (job.trigger.type === "card-execution") {
+      if (!cardToPrStateMachineConfig || !cardToPrSkill) {
+        console.error("[Queue] card-execution job received but card-to-pr is not registered (need GITHUB_TOKEN + repos.yaml)");
+        return;
+      }
+      const executionId = job.trigger.executionId;
+      if (!executionId) {
+        console.error("[Queue] card-execution job missing executionId, dropping");
+        return;
+      }
+      // runStateMachine never itself transitions executions.status to 'running'
+      // (only fail/succeed/pause) — mark it here (fresh start or resume alike)
+      // so enforceHardStop's `WHERE status='running'` query (and boot
+      // reconciliation) can actually find this execution while in flight.
+      // save() never touches night_id/repo (not on ExecutionRecord), so they
+      // survive untouched.
+      const pending = await persistence.findById(executionId);
+      if (pending) await persistence.save({ ...pending, status: "running" });
+      const event: TriggerEvent = { type: "card-execution", payload: job.trigger.payload, executionId };
+      const syntheticRoutine: Routine = { id: "night-run", triggers: [{ type: "schedule", cron: "0 1 * * *" }], pipeline: { skill: "card-to-pr" } };
+      const result = await Effect.runPromise(
+        runStateMachine(cardToPrStateMachineConfig)(cardToPrSkill, syntheticRoutine, event, executionId, stateMachineContext)
+      );
+      console.log(`[Queue] card-execution job completed: success=${result.success}`);
+      return;
     }
 
     const result = await Effect.runPromise(
@@ -421,8 +547,37 @@ export const createApp = async (config: AppConfig) => {
   };
 
   const queue = config.redisUrl
-    ? makeBullMqQueue({ redisUrl: config.redisUrl, handler: queueHandler })
+    ? makeBullMqQueue({ redisUrl: config.redisUrl, handler: queueHandler, concurrency: nightParallelism })
     : makeInMemoryQueue(queueHandler);
+
+  // Night-coordinator deps (F3 #147): only meaningful with a real Postgres
+  // (the lock/claim/budget primitives need real transactions) and a resolved
+  // repos.yaml + GitHub token (same gating as the card-to-pr handlers above).
+  // Assigned AFTER `queue` exists (runNightCycle enqueues onto it) — read by
+  // queueHandler and /trigger/night-run above/below via closure, both of which
+  // only fire well after createApp has returned.
+  if (pgPool && repoRegistry && config.githubToken) {
+    nightCoordinatorDeps = {
+      pool: pgPool,
+      registry: repoRegistry,
+      queue,
+      executionRepo: persistence,
+      // Guaranteed defined: executionProcessRepository is built from this same
+      // pgPool check above (step 2c).
+      executionProcessRepo: executionProcessRepository!,
+      prLinks,
+      githubToken: config.githubToken,
+      nightWindowStart,
+      nightWindowEnd,
+      nightBudgetUsd,
+      nightPrCap,
+      nightParallelism,
+      tz: nightTz,
+    };
+    console.log("[App] Night coordinator wired (POST /trigger/night-run, cron 0 1 * * *)");
+  } else {
+    console.log("[App] Night coordinator not wired (need DATABASE_URL + GITHUB_TOKEN + repos.yaml)");
+  }
 
   // 6b. Boot reconciliation (F3 #149): recover executions left `running` by a
   // crashed run — reset their worktree, re-enqueue from the persisted phase
@@ -464,6 +619,23 @@ export const createApp = async (config: AppConfig) => {
     });
     console.log("[App] GitHub webhook endpoint: POST /webhooks/github");
   }
+
+  // Night coordinator trigger (F3 #147) — registered BEFORE /trigger/:routineId
+  // so this literal path always wins the match; night-run is not a single
+  // skill/execution, so it gets its own route rather than /trigger/:routineId.
+  app.post("/trigger/night-run", requireAuth, async (_req, res) => {
+    if (!nightCoordinatorDeps) {
+      res.status(503).json({ error: "Night coordinator not configured (need DATABASE_URL + GITHUB_TOKEN + repos.yaml)" });
+      return;
+    }
+    try {
+      const summary = await runNightCycle(nightCoordinatorDeps);
+      res.status(summary.started ? 200 : 409).json(summary);
+    } catch (err) {
+      console.error("[Trigger] Night cycle failed:", err);
+      res.status(500).json({ error: "Night cycle failed", details: String(err) });
+    }
+  });
 
   // Manual trigger endpoint
   app.post("/trigger/:routineId", requireAuth, express.json(), async (req, res) => {
@@ -541,7 +713,12 @@ export const createApp = async (config: AppConfig) => {
       }
       await gateEngine.approve(gate.id, req.body.reason);
 
-      // Retomar execução pausada
+      // Retomar execução pausada. Use the execution's OWN triggerType (set once
+      // at creation from the real event.type — same field boot-reconciliation
+      // re-enqueues with), never a routine-derived guess: night-run's routine
+      // trigger is `schedule`, but a card-execution job it spawned (e.g. paused
+      // at card-to-pr's pr_gate) must resume as `card-execution`, not restart
+      // the whole night cycle (F3 #147).
       const execution = await persistence.findById(req.params.executionId);
       if (execution && execution.status === "paused") {
         const routine = routines.find((r) => r.id === execution.routineId);
@@ -550,7 +727,7 @@ export const createApp = async (config: AppConfig) => {
             id: execution.id,
             routineId: routine.id,
             trigger: {
-              type: routine.triggers[0]?.type ?? "api",
+              type: execution.triggerType,
               payload: {},
               executionId: execution.id,
             },
@@ -597,11 +774,13 @@ export const createApp = async (config: AppConfig) => {
         res.status(404).json({ error: "Routine not found" });
         return;
       }
+      // execution.triggerType (not routine.triggers[0]) — see the same fix's
+      // rationale on /gates/:executionId/approve above.
       await queue.enqueue({
         id: execution.id,
         routineId: routine.id,
         trigger: {
-          type: routine.triggers[0]?.type ?? "api",
+          type: execution.triggerType,
           payload: {},
           executionId: execution.id,
         },
