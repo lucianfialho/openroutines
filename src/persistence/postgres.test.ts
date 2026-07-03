@@ -200,4 +200,80 @@ describe("makePostgresRepository", () => {
     expect(typeof result?.costUsd).toBe("number");
     expect(result?.providerBreakdown).toEqual({ "claude-cli": 0.07 });
   });
+
+  it("should persist sourceId/taskId on save", async () => {
+    const repo = makePostgresRepository({
+      connectionString: "postgresql://test:test@localhost/test",
+    });
+    const record: ExecutionRecord = {
+      id: "exec-1",
+      routineId: "routine-a",
+      triggerType: "task_source",
+      skillName: "solve-issue",
+      status: "completed",
+      sourceId: "trello-main",
+      taskId: "card-123",
+      startedAt: new Date("2024-01-01T00:00:00Z"),
+    };
+
+    await repo.save(record);
+
+    expect(lastQuery).toContain("source_id");
+    expect(lastQuery).toContain("task_id");
+    expect(lastParams).toContain("trello-main");
+    expect(lastParams).toContain("card-123");
+  });
+
+  it("should find by task (source_id, task_id) and round-trip the keys", async () => {
+    mockRows = [
+      {
+        id: "exec-1",
+        routine_id: "routine-a",
+        trigger_type: "task_source",
+        skill_name: "solve-issue",
+        status: "completed",
+        output: null,
+        error: null,
+        prompt_tokens: null,
+        completion_tokens: null,
+        total_tokens: null,
+        started_at: new Date("2024-01-01"),
+        finished_at: null,
+        source_id: "trello-main",
+        task_id: "card-123",
+      },
+    ];
+
+    const repo = makePostgresRepository({
+      connectionString: "postgresql://test:test@localhost/test",
+    });
+    const results = await repo.findByTask("trello-main", "card-123");
+
+    expect(results).toHaveLength(1);
+    expect(results[0].sourceId).toBe("trello-main");
+    expect(results[0].taskId).toBe("card-123");
+    expect(lastQuery).toContain("source_id = $1");
+    expect(lastQuery).toContain("task_id = $2");
+    expect(lastParams).toEqual(["trello-main", "card-123"]);
+  });
+
+  it("keeps executions without sourceId/taskId working (NULL columns)", async () => {
+    const repo = makePostgresRepository({
+      connectionString: "postgresql://test:test@localhost/test",
+    });
+    const record: ExecutionRecord = {
+      id: "exec-legacy",
+      routineId: "routine-a",
+      triggerType: "github",
+      skillName: "review",
+      status: "completed",
+      startedAt: new Date("2024-01-01T00:00:00Z"),
+    };
+
+    await repo.save(record);
+
+    // sourceId/taskId absent -> persisted as null, no throw.
+    expect(lastParams).toContain(null);
+    expect(lastParams[0]).toBe("exec-legacy");
+  });
 });

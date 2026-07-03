@@ -76,13 +76,22 @@ export const makeNeonRepository = (
     return rows.map(rowToRecord);
   };
 
+  // ponytail: save() here doesn't persist source_id/task_id yet (same gap as
+  // cost_usd/provider_breakdown on this serverless path) — add when the Neon
+  // path needs task-linked executions; the columns exist on `executions` regardless.
+  const findByTask = async (sourceId: string, taskId: string): Promise<ExecutionRecord[]> => {
+    const rows =
+      await sql`SELECT * FROM executions WHERE source_id = ${sourceId} AND task_id = ${taskId} ORDER BY started_at DESC`;
+    return rows.map(rowToRecord);
+  };
+
   const findAll = async (opts?: { limit?: number; offset?: number }): Promise<ExecutionRecord[]> => {
     const rows =
       await sql`SELECT * FROM executions ORDER BY started_at DESC LIMIT ${opts?.limit ?? 100} OFFSET ${opts?.offset ?? 0}`;
     return rows.map(rowToRecord);
   };
 
-  return { save, findById, findByRoutine, findAll, migrate };
+  return { save, findById, findByRoutine, findByTask, findAll, migrate };
 };
 
 const rowToRecord = (row: Record<string, unknown>): ExecutionRecord => ({
