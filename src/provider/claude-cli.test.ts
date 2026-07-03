@@ -152,6 +152,26 @@ describe("claude-cli provider — env", () => {
   });
 });
 
+describe("claude-cli provider — cwd", () => {
+  it("spawns with cwd === request.workdir when set", async () => {
+    state.spawnImpl = () => fakeChild({ stdout: successJson() });
+    const provider = makeClaudeCliProvider({});
+
+    await Effect.runPromise(provider.complete({ prompt: "x", workdir: "/tmp/worktree-1" } as any));
+
+    expect(state.lastCall!.options.cwd).toBe("/tmp/worktree-1");
+  });
+
+  it("spawns with cwd === process.cwd() when request.workdir is absent", async () => {
+    state.spawnImpl = () => fakeChild({ stdout: successJson() });
+    const provider = makeClaudeCliProvider({});
+
+    await Effect.runPromise(provider.complete({ prompt: "x" } as any));
+
+    expect(state.lastCall!.options.cwd).toBe(process.cwd());
+  });
+});
+
 describe("claude-cli provider — response parsing", () => {
   it("maps a successful single-JSON response to content/costUsd/sessionId", async () => {
     state.spawnImpl = () => fakeChild({ stdout: successJson({ result: "the answer", total_cost_usd: 0.017, session_id: "sess-abc" }) });
