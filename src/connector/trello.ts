@@ -80,6 +80,14 @@ export const makeTrelloTaskSource = (config: TrelloConfig): TaskSource => {
   const baseUrl = config.manifest.baseUrl ?? "https://api.trello.com/1";
   const nameCache = createNameCache();
 
+  // System flag label (e.g. "OpenRoutines"). On the 4 shared columns
+  // (Backlog/Blocked/Review/Done) a Trello list holds both team and system
+  // cards; the flag is what distinguishes ours (.openroutines/02-FLUXO-TRELLO.md).
+  // The #139 contract: listQueue/watchNew must only surface flagged cards.
+  const flagName =
+    config.manifest.container?.flag?.kind === "label" ? config.manifest.container.flag.name : undefined;
+  const carriesFlag = (labelNames: string[]): boolean => !flagName || labelNames.includes(flagName);
+
   const authQuery = (): Params => ({ key: config.apiKey, token: config.apiToken });
 
   const toQueryString = (params: Params): string => {
@@ -253,7 +261,9 @@ export const makeTrelloTaskSource = (config: TrelloConfig): TaskSource => {
         filter: "open",
         fields: "id,name,desc,shortUrl,labels,idMembers,dateLastActivity",
       })) as TrelloCard[];
-      return raw.map((card) => ({ ...baseFields(card), state }));
+      return raw
+        .filter((card) => carriesFlag(card.labels.map((l) => l.name)))
+        .map((card) => ({ ...baseFields(card), state }));
     });
 
   const getTask = (id: string): Effect.Effect<Task, TaskSourceError> =>
@@ -405,7 +415,10 @@ export const makeTrelloTaskSource = (config: TrelloConfig): TaskSource => {
 
       const tasks: Task[] = [];
       for (const cardId of cardIds) {
-        tasks.push(yield* getTask(cardId));
+        const task = yield* getTask(cardId);
+        // A card may have entered the queued list without the system flag
+        // (e.g. a team card moved by hand) — only surface flagged ones.
+        if (carriesFlag(task.labels)) tasks.push(task);
       }
 
       // Trello returns board actions newest-first by default.

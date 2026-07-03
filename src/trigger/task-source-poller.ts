@@ -88,8 +88,9 @@ export class TaskSourcePoller {
       if (result === null) return;
 
       for (const task of result.tasks) {
-        if (await pollState.hasSeen(sourceId, task.id)) continue;
-        await pollState.markSeen(sourceId, task.id);
+        // Atomic claim: only the tick that wins the claim enqueues, so
+        // overlapping ticks of the same source can't double-enqueue a task.
+        if (!(await pollState.claimUnseen(sourceId, task.id))) continue;
         await queue.enqueue({
           id: generateId(),
           trigger: { type: "task_source", payload: { sourceId, task } },

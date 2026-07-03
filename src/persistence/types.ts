@@ -173,6 +173,12 @@ export interface ExecutionProcessRepository {
 export interface PollStateRepository {
   getCursor: (sourceId: string) => Promise<string | undefined>;
   setCursor: (sourceId: string, cursor: string) => Promise<void>;
-  hasSeen: (sourceId: string, taskId: string) => Promise<boolean>;
-  markSeen: (sourceId: string, taskId: string) => Promise<void>;
+  /**
+   * Atomically claims a (sourceId, taskId) as seen. Returns `true` if this
+   * call is the one that recorded it (caller should enqueue), `false` if it
+   * was already seen (caller skips). Single atomic operation — replaces a
+   * check-then-act hasSeen/markSeen pair so overlapping poll ticks of the same
+   * source can never both claim the same task and double-enqueue it.
+   */
+  claimUnseen: (sourceId: string, taskId: string) => Promise<boolean>;
 }

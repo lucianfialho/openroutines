@@ -16,9 +16,13 @@ export const makeInMemoryPollStateRepository = (): PollStateRepository => {
     setCursor: async (sourceId, cursor) => {
       cursors.set(sourceId, cursor);
     },
-    hasSeen: async (sourceId, taskId) => seen.has(seenKey(sourceId, taskId)),
-    markSeen: async (sourceId, taskId) => {
-      seen.add(seenKey(sourceId, taskId));
+    claimUnseen: async (sourceId, taskId) => {
+      // check-and-add is atomic under Node's single-threaded model (no await
+      // between has() and add()), mirroring the Postgres atomic claim.
+      const key = seenKey(sourceId, taskId);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
     },
   };
 };

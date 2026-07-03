@@ -150,7 +150,7 @@ describe("TaskSourcePoller", () => {
     expect(source.watchNewCalls).toEqual([null]); // first call: no cursor persisted yet
   });
 
-  it("should NOT re-enqueue a task the source resends (dedupe via hasSeen)", async () => {
+  it("should NOT re-enqueue a task the source resends (dedupe via claimUnseen)", async () => {
     const task = makeTask({ id: "card-1" });
     const source = makeFakeTaskSource([
       { tasks: [task], cursor: "cursor-1" },

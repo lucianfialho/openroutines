@@ -278,6 +278,44 @@ operations:
     expect(tasks[1]).toMatchObject({ id: "2", title: "Second", state: "queued" });
   });
 
+  it("listQueue: drops items missing the manifest's label flag (#139 contract)", async () => {
+    process.env.ACME_TOKEN = "t";
+    const manifest = parseConnectorManifest(`
+name: acme
+transport: rest
+baseUrl: https://api.acme.test
+auth:
+  scheme: bearer
+container:
+  kind: list
+  flag: { kind: label, name: OpenRoutines }
+fields:
+  title: name
+  id: cardId
+  labels: labels
+operations:
+  listQueue: { method: GET, path: "/lists/{containerId}/cards" }
+`);
+    const source = makeRestTaskSource({
+      manifest,
+      sourceId: "acme-main",
+      containers: { queued: "list-123" },
+      authEnv: { token: "ACME_TOKEN" },
+    });
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, [
+        { cardId: "1", name: "Ours", labels: ["OpenRoutines"] },
+        { cardId: "2", name: "Theirs", labels: ["Bug"] },
+      ])
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const tasks = await Effect.runPromise(source.listQueue("queued"));
+
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].id).toBe("1");
+  });
+
   it("comment: renders {body} into the operation's JSON body and sends Content-Type: application/json", async () => {
     process.env.ACME_TOKEN = "t";
     const manifest = parseConnectorManifest(`

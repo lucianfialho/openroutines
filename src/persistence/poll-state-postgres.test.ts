@@ -3,7 +3,7 @@ import { Pool } from "pg";
 import { makePostgresPollStateRepository } from "./poll-state-postgres.js";
 
 // Stateful fake tables (not just a canned mockRows swap) so setCursor→getCursor
-// and markSeen→hasSeen genuinely round-trip through the repository's own SQL.
+// and claimUnseen genuinely round-trip through the repository's own SQL.
 let cursors: Map<string, string> = new Map();
 let seen: Set<string> = new Set();
 let lastQuery = "";
@@ -26,13 +26,13 @@ vi.mock("pg", () => ({
         return { rows: cursor !== undefined ? [{ cursor }] : [] };
       }
       if (sql.includes("INSERT INTO task_source_seen")) {
+        // Mirror ON CONFLICT DO NOTHING RETURNING: a row comes back only on a
+        // real insert; a duplicate claim returns no rows.
         const [sourceId, taskId] = params as [string, string];
-        seen.add(`${sourceId}|${taskId}`);
-        return { rows: [] };
-      }
-      if (sql.includes("SELECT 1 FROM task_source_seen")) {
-        const [sourceId, taskId] = params as [string, string];
-        return { rows: seen.has(`${sourceId}|${taskId}`) ? [{ "?column?": 1 }] : [] };
+        const key = `${sourceId}|${taskId}`;
+        if (seen.has(key)) return { rows: [] };
+        seen.add(key);
+        return { rows: [{ "?column?": 1 }] };
       }
       throw new Error(`Unexpected query in test: ${sql}`);
     }),
@@ -67,17 +67,16 @@ describe("makePostgresPollStateRepository", () => {
     expect(await repo.getCursor("trello-main")).toBe("cursor-2");
   });
 
-  it("should round-trip markSeen/hasSeen via ON CONFLICT DO NOTHING", async () => {
+  it("claimUnseen inserts atomically and returns true only on the first claim", async () => {
     const repo = makePostgresPollStateRepository(new Pool());
 
-    expect(await repo.hasSeen("trello-main", "card-1")).toBe(false);
-
-    await repo.markSeen("trello-main", "card-1");
+    expect(await repo.claimUnseen("trello-main", "card-1")).toBe(true);
     expect(lastQuery).toContain("INSERT INTO task_source_seen");
     expect(lastQuery).toContain("ON CONFLICT (source_id, task_id) DO NOTHING");
+    expect(lastQuery).toContain("RETURNING");
 
-    expect(await repo.hasSeen("trello-main", "card-1")).toBe(true);
-    expect(await repo.hasSeen("trello-main", "card-2")).toBe(false);
+    expect(await repo.claimUnseen("trello-main", "card-1")).toBe(false);
+    expect(await repo.claimUnseen("trello-main", "card-2")).toBe(true);
   });
 
   it("should keep cursors isolated per sourceId", async () => {

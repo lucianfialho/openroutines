@@ -8,6 +8,7 @@
  * (sourceId only needed when more than one "trello" entry is configured)
  */
 
+import "dotenv/config";
 import { fileURLToPath } from "url";
 import { loadTaskSources } from "../src/task-source/loader.js";
 import type { TaskSourceEntry } from "../src/task-source/schema.js";

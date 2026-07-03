@@ -16,23 +16,22 @@ describe("makeInMemoryPollStateRepository", () => {
     expect(await repo.getCursor("trello-main")).toBe("cursor-2");
   });
 
-  it("should round-trip markSeen/hasSeen", async () => {
+  it("claimUnseen returns true only for the first claim of a task", async () => {
     const repo = makeInMemoryPollStateRepository();
-    expect(await repo.hasSeen("trello-main", "card-1")).toBe(false);
-
-    await repo.markSeen("trello-main", "card-1");
-    expect(await repo.hasSeen("trello-main", "card-1")).toBe(true);
-    expect(await repo.hasSeen("trello-main", "card-2")).toBe(false);
+    expect(await repo.claimUnseen("trello-main", "card-1")).toBe(true);
+    expect(await repo.claimUnseen("trello-main", "card-1")).toBe(false);
+    expect(await repo.claimUnseen("trello-main", "card-2")).toBe(true);
   });
 
   it("should keep cursors and seen state isolated per sourceId", async () => {
     const repo = makeInMemoryPollStateRepository();
     await repo.setCursor("trello-main", "cursor-a");
     await repo.setCursor("github-main", "cursor-b");
-    await repo.markSeen("trello-main", "card-1");
+    await repo.claimUnseen("trello-main", "card-1");
 
     expect(await repo.getCursor("trello-main")).toBe("cursor-a");
     expect(await repo.getCursor("github-main")).toBe("cursor-b");
-    expect(await repo.hasSeen("github-main", "card-1")).toBe(false);
+    // same taskId under a different source is a distinct claim
+    expect(await repo.claimUnseen("github-main", "card-1")).toBe(true);
   });
 });

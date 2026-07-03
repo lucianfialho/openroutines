@@ -25,20 +25,19 @@ export const makePostgresPollStateRepository = (pool: Pool): PollStateRepository
         [sourceId, cursor]
       );
     },
-    hasSeen: async (sourceId, taskId) => {
+    claimUnseen: async (sourceId, taskId) => {
+      // Single atomic claim: the row is inserted iff it wasn't there. RETURNING
+      // yields a row only on a real insert (ON CONFLICT DO NOTHING returns none
+      // on a duplicate), so rows.length distinguishes "we claimed it" from
+      // "already seen" without a separate SELECT — no TOCTOU window.
       const { rows } = await pool.query(
-        "SELECT 1 FROM task_source_seen WHERE source_id = $1 AND task_id = $2",
+        `INSERT INTO task_source_seen (source_id, task_id, seen_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (source_id, task_id) DO NOTHING
+         RETURNING 1`,
         [sourceId, taskId]
       );
       return rows.length > 0;
-    },
-    markSeen: async (sourceId, taskId) => {
-      await pool.query(
-        `INSERT INTO task_source_seen (source_id, task_id, seen_at)
-         VALUES ($1, $2, NOW())
-         ON CONFLICT (source_id, task_id) DO NOTHING`,
-        [sourceId, taskId]
-      );
     },
   };
 };

@@ -94,6 +94,22 @@ describe("makeTrelloTaskSource — listQueue", () => {
     expect(second).toHaveLength(1);
     expect(first[0]).toMatchObject({ id: rawCard.id, title: "Fix bug", state: "queued", type: "implementation" });
   });
+
+  it("filters out cards without the OpenRoutines flag label (shared columns)", async () => {
+    const flagged = { ...rawCard, id: "card-ours", labels: [{ name: "OpenRoutines" }] };
+    const teamCard = { ...rawCard, id: "card-theirs", labels: [{ name: "Bug" }] };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, [{ id: "list-blocked", name: "Blocked" }]))
+      .mockResolvedValueOnce(jsonResponse(200, [flagged, teamCard]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const source = makeTrelloTaskSource(config);
+    const cards = await Effect.runPromise(source.listQueue("blocked"));
+
+    expect(cards).toHaveLength(1);
+    expect(cards[0].id).toBe("card-ours");
+  });
 });
 
 describe("makeTrelloTaskSource — getTask", () => {
@@ -321,7 +337,7 @@ describe("makeTrelloTaskSource — watchNew", () => {
       name: "C",
       desc: "",
       shortUrl: "https://trello.com/c/c",
-      labels: [],
+      labels: [{ name: "OpenRoutines" }],
       idMembers: [],
       idList: "list-fila",
       dateLastActivity: "2026-06-20T00:00:00.000Z",

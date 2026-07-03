@@ -215,12 +215,19 @@ export const makeRestTaskSource = (config: RestTaskSourceConfig): TaskSource => 
     };
   };
 
+  // System flag label declared by the manifest (e.g. "OpenRoutines"); the #139
+  // contract requires listQueue to only surface flagged tasks. Only enforced
+  // for label-kind flags — a manifest that declares one must map fields.labels.
+  const flag = config.manifest.container?.flag;
+  const flagLabel = flag?.kind === "label" ? flag.name : undefined;
+
   const listQueue = (state: TaskState): Effect.Effect<Task[], TaskSourceError> =>
     Effect.gen(function* () {
       const containerId = config.containers[state] ?? "";
       const raw = yield* request("listQueue", { containerId, state });
       const items = Array.isArray(raw) ? raw : [];
-      return items.map((item) => toTask(item, { state }));
+      const tasks = items.map((item) => toTask(item, { state }));
+      return flagLabel ? tasks.filter((t) => t.labels.includes(flagLabel)) : tasks;
     });
 
   const getTask = (id: string): Effect.Effect<Task, TaskSourceError> =>
