@@ -114,4 +114,31 @@ describe("makePostgresTaskRepository", () => {
     expect(lastQuery).toContain("WHERE source_id = $1");
     expect(lastParams).toEqual(["trello-main"]);
   });
+
+  it("should map a NULL url to an empty string, not the string 'null'", async () => {
+    mockRows = [
+      {
+        source_id: "trello-main",
+        task_id: "card-1",
+        title: "Do the thing",
+        body: "details",
+        url: null,
+        state: "backlog",
+        type: "implementation",
+        complexity: null,
+        priority: null,
+        labels: [],
+        assignees: [],
+        raw: null,
+        created_at: new Date("2024-01-01"),
+        updated_at: new Date("2024-01-02"),
+      },
+    ];
+
+    const repo = makePostgresTaskRepository(new Pool());
+    const found = await repo.findByKey("trello-main", "card-1");
+
+    expect(found?.url).toBe("");
+    expect(found?.url).not.toBe("null");
+  });
 });

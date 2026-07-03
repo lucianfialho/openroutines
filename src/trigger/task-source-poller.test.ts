@@ -242,4 +242,29 @@ describe("TaskSourcePoller", () => {
 
     expect(queue.jobs[0].id).toBe("fixed-id-123");
   });
+
+  it("should not run overlapping ticks for the same source", async () => {
+    let watchNewCalls = 0;
+    const source: TaskSource & { watchNewCalls: number } = {
+      ...makeFakeTaskSource([{ tasks: [makeTask()], cursor: "cursor-1" }]),
+      watchNew: (cursor) => {
+        watchNewCalls++;
+        return Effect.succeed({ tasks: [makeTask()], cursor: "cursor-1" });
+      },
+    };
+    const queue = makeQueue();
+    const poller = new TaskSourcePoller({
+      sources: [{ sourceId: "trello-main", taskSource: source, pollIntervalMinutes: 5 }],
+      queue,
+      pollState: makeInMemoryPollStateRepository(),
+    });
+
+    poller.start();
+    const p1 = capturedIntervals[0].fn();
+    const p2 = capturedIntervals[0].fn();
+    await Promise.all([p1, p2]);
+
+    expect(watchNewCalls).toBe(1);
+    expect(queue.jobs).toHaveLength(1);
+  });
 });

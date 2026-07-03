@@ -163,6 +163,27 @@ describe("makeRestTaskSource — auth schemes (getTask)", () => {
     expect(err.operation).toBe("auth");
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("allows an empty env var value and sends it as the auth token", async () => {
+    process.env.ACME_TOKEN = "";
+    const manifest = parseConnectorManifest(manifestYaml("  scheme: bearer"));
+    const source = makeRestTaskSource({
+      manifest,
+      sourceId: "acme-main",
+      containers: {},
+      authEnv: { token: "ACME_TOKEN" },
+    });
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, rawCard));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await Effect.runPromise(source.getTask("123"));
+
+    expect(fetchMock).toHaveBeenCalledWith("https://api.acme.test/cards/123", {
+      method: "GET",
+      headers: { Authorization: "Bearer " },
+      body: undefined,
+    });
+  });
 });
 
 describe("makeRestTaskSource — operation contract", () => {

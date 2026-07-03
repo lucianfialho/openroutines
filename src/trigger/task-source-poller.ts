@@ -59,6 +59,9 @@ export class TaskSourcePoller {
     }
     this.intervals = [];
     this.started = false;
+    // Reset reentrancy guard: any in-flight tick from the old intervals is
+    // abandoned, so new intervals after a restart must not be blocked by it.
+    this.runningTicks.clear();
   }
 
   get runningPolls(): number {
