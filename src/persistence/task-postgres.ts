@@ -64,7 +64,7 @@ const rowToTask = (row: Record<string, unknown>): Task => ({
   id: String(row.task_id),
   title: String(row.title),
   body: String(row.body),
-  url: String(row.url),
+  url: row.url ? String(row.url) : "",
   state: row.state as Task["state"],
   type: row.type as Task["type"],
   complexity: row.complexity ? (row.complexity as Task["complexity"]) : undefined,

@@ -32,6 +32,8 @@ export interface TaskSourcePollerConfig {
 export class TaskSourcePoller {
   private intervals: Array<ReturnType<typeof setInterval>> = [];
   private started = false;
+  /** Guards against re-entrant ticks for the same source (e.g. a slow network call). */
+  private runningTicks = new Set<string>();
 
   constructor(private config: TaskSourcePollerConfig) {}
 
@@ -68,6 +70,9 @@ export class TaskSourcePoller {
     const { queue, pollState, generateId = randomUUID } = this.config;
     const { sourceId, taskSource } = source;
 
+    if (this.runningTicks.has(sourceId)) return;
+    this.runningTicks.add(sourceId);
+
     try {
       const cursor = (await pollState.getCursor(sourceId)) ?? null;
 
@@ -100,6 +105,8 @@ export class TaskSourcePoller {
       await pollState.setCursor(sourceId, result.cursor);
     } catch (err) {
       console.error(`[TaskSourcePoller] Poll tick failed for source '${sourceId}':`, err);
+    } finally {
+      this.runningTicks.delete(sourceId);
     }
   }
 }

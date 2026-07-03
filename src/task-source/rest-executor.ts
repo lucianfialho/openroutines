@@ -46,7 +46,7 @@ const getNestedValue = (obj: Record<string, unknown>, path: string): unknown => 
 };
 
 const renderString = (value: string, params: Params): string =>
-  value.replace(/\{(\w+)\}/g, (match, key: string) => (key in params ? params[key] : match));
+  value.replace(/\{([\w.]+)\}/g, (match, key: string) => (key in params ? params[key] : match));
 
 const renderQuery = (query: Record<string, unknown> | undefined, params: Params): Params => {
   const out: Params = {};
@@ -88,7 +88,7 @@ export const makeRestTaskSource = (config: RestTaskSourceConfig): TaskSource => 
       return Effect.fail(new TaskSourceError(`Missing authEnv entry for "${paramKey}"`, "auth"));
     }
     const value = process.env[envVarName];
-    if (!value) {
+    if (value === undefined) {
       return Effect.fail(new TaskSourceError(`Missing env var "${envVarName}" (authEnv.${paramKey})`, "auth"));
     }
     return Effect.succeed(value);
