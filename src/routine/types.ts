@@ -4,6 +4,8 @@
  * A routine is a declared configuration: triggers + pipeline + environment.
  */
 
+import type { TaskState } from "../task-source/types.js";
+
 export interface Routine {
   id: string;
   triggers: Array<TriggerDef>;
@@ -19,9 +21,15 @@ export interface Routine {
 }
 
 export interface TriggerDef {
-  type: "schedule" | "github" | "api";
+  type: "schedule" | "github" | "api" | "task_source";
   cron?: string;
   events?: string[];
+  /** task_source: configured source instance id (task-sources.yaml). Required for that type. */
+  sourceId?: string;
+  /** task_source: state filter. Default "queued" is applied by TriggerSchema, not read by the matcher. */
+  state?: TaskState;
+  /** task_source: task must carry all of these labels to match. */
+  labels?: string[];
 }
 
 export interface Pipeline {

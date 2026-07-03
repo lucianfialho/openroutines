@@ -42,8 +42,9 @@ export const makePostgresRepository = (
       `INSERT INTO executions (
         id, routine_id, trigger_type, skill_name, status,
         output, error, prompt_tokens, completion_tokens, total_tokens,
-        started_at, finished_at, metadata, cost_usd, provider_breakdown
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        started_at, finished_at, metadata, cost_usd, provider_breakdown,
+        source_id, task_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
       ON CONFLICT (id) DO UPDATE SET
         status = EXCLUDED.status,
         output = EXCLUDED.output,
@@ -54,7 +55,9 @@ export const makePostgresRepository = (
         finished_at = EXCLUDED.finished_at,
         metadata = EXCLUDED.metadata,
         cost_usd = EXCLUDED.cost_usd,
-        provider_breakdown = EXCLUDED.provider_breakdown`,
+        provider_breakdown = EXCLUDED.provider_breakdown,
+        source_id = EXCLUDED.source_id,
+        task_id = EXCLUDED.task_id`,
       [
         record.id,
         record.routineId,
@@ -71,6 +74,8 @@ export const makePostgresRepository = (
         record.metadata ? JSON.stringify(record.metadata) : null,
         record.costUsd ?? null,
         record.providerBreakdown ? JSON.stringify(record.providerBreakdown) : null,
+        record.sourceId ?? null,
+        record.taskId ?? null,
       ]
     );
   };
@@ -96,6 +101,17 @@ export const makePostgresRepository = (
     return result.rows.map(rowToRecord);
   };
 
+  const findByTask = async (
+    sourceId: string,
+    taskId: string
+  ): Promise<ExecutionRecord[]> => {
+    const result = await pool.query(
+      `SELECT * FROM executions WHERE source_id = $1 AND task_id = $2 ORDER BY started_at DESC`,
+      [sourceId, taskId]
+    );
+    return result.rows.map(rowToRecord);
+  };
+
   const findAll = async (
     opts?: { limit?: number; offset?: number }
   ): Promise<ExecutionRecord[]> => {
@@ -108,7 +124,7 @@ export const makePostgresRepository = (
     return result.rows.map(rowToRecord);
   };
 
-  return { save, findById, findByRoutine, findAll, migrate, pool };
+  return { save, findById, findByRoutine, findByTask, findAll, migrate, pool };
 };
 
 const rowToRecord = (row: Record<string, unknown>): ExecutionRecord => ({
@@ -126,6 +142,8 @@ const rowToRecord = (row: Record<string, unknown>): ExecutionRecord => ({
   // NUMERIC columns come back as strings from the pg driver
   costUsd: row.cost_usd != null ? Number(row.cost_usd) : undefined,
   providerBreakdown: (row.provider_breakdown as Record<string, number>) ?? undefined,
+  sourceId: (row.source_id as string) ?? undefined,
+  taskId: (row.task_id as string) ?? undefined,
   startedAt: row.started_at as Date,
   finishedAt: (row.finished_at as Date) ?? undefined,
 });

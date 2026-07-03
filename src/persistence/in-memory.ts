@@ -16,6 +16,8 @@ export const makeInMemoryRepository = (): ExecutionRepository => {
     findById: async (id) => store.get(id),
     findByRoutine: async (routineId) =>
       Array.from(store.values()).filter((r) => r.routineId === routineId),
+    findByTask: async (sourceId, taskId) =>
+      Array.from(store.values()).filter((r) => r.sourceId === sourceId && r.taskId === taskId),
     findAll: async (opts) => {
       const all = Array.from(store.values()).sort(
         (a, b) => b.startedAt.getTime() - a.startedAt.getTime()

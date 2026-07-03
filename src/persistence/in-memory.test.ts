@@ -61,4 +61,50 @@ describe("makeInMemoryRepository", () => {
     const found = await repo.findById("nope");
     expect(found).toBeUndefined();
   });
+
+  it("should find by task (sourceId, taskId) and round-trip the keys", async () => {
+    const repo = makeInMemoryRepository();
+    const tracked: ExecutionRecord = {
+      id: "exec-1",
+      routineId: "routine-a",
+      triggerType: "task_source",
+      skillName: "solve-issue",
+      status: "completed",
+      sourceId: "trello-main",
+      taskId: "card-123",
+      startedAt: new Date(),
+    };
+    const other: ExecutionRecord = {
+      id: "exec-2",
+      routineId: "routine-a",
+      triggerType: "task_source",
+      skillName: "solve-issue",
+      status: "completed",
+      sourceId: "trello-main",
+      taskId: "card-999",
+      startedAt: new Date(),
+    };
+    const legacy: ExecutionRecord = {
+      id: "exec-3",
+      routineId: "routine-b",
+      triggerType: "github",
+      skillName: "review",
+      status: "completed",
+      startedAt: new Date(),
+    };
+
+    await repo.save(tracked);
+    await repo.save(other);
+    await repo.save(legacy);
+
+    const found = await repo.findByTask("trello-main", "card-123");
+    expect(found).toHaveLength(1);
+    expect(found[0].id).toBe("exec-1");
+    expect(found[0].sourceId).toBe("trello-main");
+    expect(found[0].taskId).toBe("card-123");
+
+    // Execution without sourceId/taskId is simply not matched, not a crash.
+    expect(await repo.findByTask("trello-main", "missing")).toHaveLength(0);
+    expect(await repo.findById("exec-3")).toEqual(legacy);
+  });
 });

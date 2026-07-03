@@ -1,0 +1,24 @@
+# Task source instances registered with this OpenRoutines installation.
+#
+# Copy this file to task-sources.yaml (gitignored — the real file may hold
+# installation-specific ids you don't want to publish, even though secrets
+# never live here: `auth` below holds env var NAMES, not values; the actual
+# secret values go in your local .env, read via TASK_SOURCES_FILE).
+#
+# Each entry's `type` names a directory under .gates/connectors/<type>/ that
+# must contain a connector.yaml describing that source's shape (auth scheme,
+# state mapping, etc). Override that default with `manifest:`.
+
+sources:
+  - id: trello-main # local id — becomes Task.sourceId
+    type: trello # .gates/connectors/trello/connector.yaml
+    # manifest: .gates/connectors/trello/connector.yaml   # optional, this is the default
+    pollIntervalMinutes: 30
+    containers:
+      # Dev reference board (.openroutines/02-FLUXO-TRELLO.md): TREE.IA -
+      # Desenvolvimento = 6a4308b89057059398fbd438. Not a default — put your
+      # own board id below.
+      board: "REPLACE_WITH_YOUR_TRELLO_BOARD_ID"
+    auth:
+      key: TRELLO_API_KEY # name of the env var holding the value, not the value itself
+      token: TRELLO_API_TOKEN

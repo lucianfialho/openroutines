@@ -45,6 +45,51 @@ describe("matchesTrigger", () => {
       )
     ).toBe(false);
   });
+
+  it("should match task_source trigger with same sourceId", () => {
+    expect(
+      matchesTrigger(
+        { type: "task_source", sourceId: "trello-main" },
+        { type: "task_source", payload: { sourceId: "trello-main", task: { labels: [] } } }
+      )
+    ).toBe(true);
+  });
+
+  it("should not match task_source trigger with different sourceId", () => {
+    expect(
+      matchesTrigger(
+        { type: "task_source", sourceId: "trello-main" },
+        { type: "task_source", payload: { sourceId: "trello-other", task: { labels: [] } } }
+      )
+    ).toBe(false);
+  });
+
+  it("should match task_source trigger only when task has ALL required labels", () => {
+    const trigger = { type: "task_source" as const, sourceId: "trello-main", labels: ["bug", "urgent"] };
+
+    expect(
+      matchesTrigger(trigger, {
+        type: "task_source",
+        payload: { sourceId: "trello-main", task: { labels: ["bug", "urgent", "extra"] } },
+      })
+    ).toBe(true);
+
+    expect(
+      matchesTrigger(trigger, {
+        type: "task_source",
+        payload: { sourceId: "trello-main", task: { labels: ["bug"] } },
+      })
+    ).toBe(false);
+  });
+
+  it("should match task_source trigger without labels regardless of task labels", () => {
+    expect(
+      matchesTrigger(
+        { type: "task_source", sourceId: "trello-main" },
+        { type: "task_source", payload: { sourceId: "trello-main", task: { labels: ["whatever"] } } }
+      )
+    ).toBe(true);
+  });
 });
 
 describe("findMatchingRoutines", () => {

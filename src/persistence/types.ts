@@ -4,6 +4,8 @@
  * Abstraction for execution state storage.
  */
 
+import type { Task } from "../task-source/types.js";
+
 export interface ExecutionRecord {
   id: string;
   routineId: string;
@@ -20,6 +22,9 @@ export interface ExecutionRecord {
   /** Per-provider USD breakdown keyed by provider name (jsonb). */
   providerBreakdown?: Record<string, number>;
   metadata?: Record<string, unknown>;
+  /** Originating task, composite key (never a bare card id) — undefined for schedule/github triggers (F2 #144). */
+  sourceId?: string;
+  taskId?: string;
   startedAt: Date;
   finishedAt?: Date;
 }
@@ -28,7 +33,16 @@ export interface ExecutionRepository {
   save: (record: ExecutionRecord) => Promise<void>;
   findById: (id: string) => Promise<ExecutionRecord | undefined>;
   findByRoutine: (routineId: string) => Promise<ExecutionRecord[]>;
+  findByTask: (sourceId: string, taskId: string) => Promise<ExecutionRecord[]>;
   findAll: (opts?: { limit?: number; offset?: number }) => Promise<ExecutionRecord[]>;
+}
+
+/** Task snapshot persistence, keyed by composite (sourceId, taskId) — reuses Task from task-source (F2 #144). */
+export interface TaskRepository {
+  /** Upsert by (task.sourceId, task.id). */
+  save: (task: Task) => Promise<void>;
+  findByKey: (sourceId: string, taskId: string) => Promise<Task | undefined>;
+  findBySource: (sourceId: string) => Promise<Task[]>;
 }
 
 export type SpanType = "llm_call" | "tool_call" | "gate_check" | "prompt_build" | "execution_start" | "execution_end";
@@ -153,4 +167,18 @@ export interface ExecutionProcessRepository {
   markFinished: (id: string, finishedAt: Date) => Promise<void>;
   /** Rows with finished_at IS NULL — used by boot zombie cleanup. */
   findRunning: () => Promise<ExecutionProcess[]>;
+}
+
+/** Cursor + dedupe state for TaskSourcePoller, keyed per source (F2 #143). */
+export interface PollStateRepository {
+  getCursor: (sourceId: string) => Promise<string | undefined>;
+  setCursor: (sourceId: string, cursor: string) => Promise<void>;
+  /**
+   * Atomically claims a (sourceId, taskId) as seen. Returns `true` if this
+   * call is the one that recorded it (caller should enqueue), `false` if it
+   * was already seen (caller skips). Single atomic operation — replaces a
+   * check-then-act hasSeen/markSeen pair so overlapping poll ticks of the same
+   * source can never both claim the same task and double-enqueue it.
+   */
+  claimUnseen: (sourceId: string, taskId: string) => Promise<boolean>;
 }
