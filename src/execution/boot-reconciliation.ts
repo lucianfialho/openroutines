@@ -36,9 +36,12 @@ export const resetWorktreeHard = async (
   worktreePath: string,
   worktreeBase?: string
 ): Promise<void> => {
-  if (worktreeBase && !isUnderBase(worktreePath, worktreeBase)) {
+  // Fail CLOSED: with no base configured the fence cannot be evaluated, so we
+  // refuse rather than run reset --hard unfenced (a missing WORKTREE_BASE in the
+  // env must never silently disable the one guard protecting real clones).
+  if (!worktreeBase || !isUnderBase(worktreePath, worktreeBase)) {
     throw new Error(
-      `refuse to reset ${worktreePath}: outside worktree base ${worktreeBase}`
+      `refuse to reset ${worktreePath}: not inside worktree base ${worktreeBase ?? "(unset)"}`
     );
   }
   await execFileAsync("git", ["-C", worktreePath, "reset", "--hard", "HEAD"]);

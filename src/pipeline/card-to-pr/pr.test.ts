@@ -37,14 +37,10 @@ describe("makePr", () => {
         return { pr: CREATED_PR };
       })
     );
-    const listPullRequests = vi.fn(() =>
-      Effect.sync(() =>
-        prCreated
-          ? [{ number: 42, title: "t", url: CREATED_PR.url, state: "open", headRefName: "openroutines/card-t1" }]
-          : []
-      )
+    const getOpenPrByBranch = vi.fn(() =>
+      Effect.sync(() => (prCreated ? { url: CREATED_PR.url, number: 42 } : undefined))
     );
-    const makeGithub = vi.fn(() => ({ listPullRequests, createPullRequest })) as unknown as CardToPrDeps["makeGithub"];
+    const makeGithub = vi.fn(() => ({ getOpenPrByBranch, createPullRequest })) as unknown as CardToPrDeps["makeGithub"];
 
     const moveTo = vi.fn(() => Effect.succeed(undefined));
     const comment = vi.fn(() => Effect.succeed(undefined));
@@ -76,7 +72,8 @@ describe("makePr", () => {
     expect(runGit).toHaveBeenCalledTimes(1);
     expect(runGit).toHaveBeenCalledWith(["push", "-u", "origin", "openroutines/card-t1"], "/tmp/or-pr-test-wt");
     expect(createPullRequest).toHaveBeenCalledTimes(1);
-    expect(listPullRequests).toHaveBeenCalledTimes(1);
+    expect(getOpenPrByBranch).toHaveBeenCalledTimes(1);
+    expect(getOpenPrByBranch).toHaveBeenCalledWith("openroutines/card-t1");
     expect(moveTo).toHaveBeenCalledTimes(1);
     expect(moveTo).toHaveBeenCalledWith("card1", "review");
     expect(comment).toHaveBeenCalledTimes(1);
@@ -107,10 +104,8 @@ describe("makePr", () => {
     });
 
     const createPullRequest = vi.fn();
-    const listPullRequests = vi.fn(() =>
-      Effect.sync(() => [{ number: 42, title: "t", url: CREATED_PR.url, state: "open", headRefName: "openroutines/card-t1" }])
-    );
-    const makeGithub = vi.fn(() => ({ listPullRequests, createPullRequest })) as unknown as CardToPrDeps["makeGithub"];
+    const getOpenPrByBranch = vi.fn(() => Effect.sync(() => ({ url: CREATED_PR.url, number: 42 })));
+    const makeGithub = vi.fn(() => ({ getOpenPrByBranch, createPullRequest })) as unknown as CardToPrDeps["makeGithub"];
     const moveTo = vi.fn(() => Effect.succeed(undefined));
     const comment = vi.fn(() => Effect.succeed(undefined));
     const taskSource = { moveTo, comment } as unknown as TaskSource;

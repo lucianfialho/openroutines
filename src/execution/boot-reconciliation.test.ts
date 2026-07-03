@@ -89,6 +89,10 @@ describe("resetWorktreeHard safety fence", () => {
   it("refuses to reset a path outside the worktree base — never touches a real clone", async () => {
     await expect(
       resetWorktreeHard("/home/openroutines/repos/openroutines", "/tmp/or-worktrees")
-    ).rejects.toThrow(/outside worktree base/);
+    ).rejects.toThrow(/not inside worktree base/);
+  });
+
+  it("fails CLOSED: refuses to reset when no worktree base is configured (never runs unfenced)", async () => {
+    await expect(resetWorktreeHard("/tmp/or-worktrees/card-x", undefined)).rejects.toThrow(/not inside worktree base/);
   });
 });

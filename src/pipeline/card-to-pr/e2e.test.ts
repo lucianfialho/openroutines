@@ -106,7 +106,7 @@ describe("card-to-pr E2E (#146)", () => {
 
     const createdPr = { url: "https://github.com/acme/widgets/pull/7", number: 7, branch: "openroutines/card-card1" };
     const makeGithub = (() => ({
-      listPullRequests: () => Effect.succeed([]),
+      getOpenPrByBranch: () => Effect.succeed(undefined),
       createPullRequest: () => Effect.succeed({ pr: createdPr }),
     })) as unknown as CardToPrDeps["makeGithub"];
 

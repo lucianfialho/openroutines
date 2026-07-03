@@ -86,8 +86,9 @@ export const makePr = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
     deps.ledger,
     { executionId: ctx.executionId, stateId: "pr", actionKey: "pr:create" },
     async () => {
-      const open = await Effect.runPromise(github.listPullRequests());
-      const existing = open.find((p) => p.headRefName === branch && p.state.toLowerCase() === "open");
+      // Branch-scoped (server-side --head filter) so a busy repo's 30+ open PRs
+      // can't hide this branch's PR and cause a duplicate create that gh rejects.
+      const existing = await Effect.runPromise(github.getOpenPrByBranch(branch));
       const pr = existing ?? (await Effect.runPromise(github.createPullRequest(branch, title, prBody, repo.baseBranch))).pr;
       if (!(await alreadyLinked(deps, sourceId, taskId, branch))) {
         await deps.prLinks.create({ sourceId, taskId, repo: repo.slug, prNumber: pr.number, branch, status: "open" });

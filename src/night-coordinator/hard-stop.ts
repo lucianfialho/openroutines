@@ -54,6 +54,44 @@ export interface HardStopDeps {
   nightId: string;
 }
 
+/** "YYYY-MM-DD" of `now`'s wall-clock date in `tz` — the night_runs.date key. */
+const dateInTz = (now: Date, tz: string): string =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+
+export interface NightHardStopDeps {
+  pool: Pool;
+  executionRepo: ExecutionRepository;
+  executionProcessRepo: ExecutionProcessRepository;
+  tz: string;
+  now?: () => Date;
+}
+
+/**
+ * Cron entrypoint at NIGHT_WINDOW_END (F3 #147): find today's still-open night,
+ * hard-stop whatever is left running, and mark the night finished. This is what
+ * actually delivers the 06:30 hard stop — runNightCycle drains-and-returns at
+ * 01:00 and never lives long enough to enforce it itself.
+ */
+export const runNightHardStop = async (
+  deps: NightHardStopDeps
+): Promise<{ stopped: boolean; nightId?: string }> => {
+  const now = deps.now ?? (() => new Date());
+  const { rows } = await deps.pool.query(
+    `SELECT id FROM night_runs WHERE date = $1 AND finished_at IS NULL`,
+    [dateInTz(now(), deps.tz)]
+  );
+  const nightId = rows[0]?.id as string | undefined;
+  if (!nightId) return { stopped: false };
+  await enforceHardStop({
+    executionRepo: deps.executionRepo,
+    executionProcessRepo: deps.executionProcessRepo,
+    pool: deps.pool,
+    nightId,
+  });
+  await deps.pool.query(`UPDATE night_runs SET finished_at = NOW() WHERE id = $1`, [nightId]);
+  return { stopped: true, nightId };
+};
+
 export const enforceHardStop = async (deps: HardStopDeps): Promise<void> => {
   const { rows } = await deps.pool.query(
     `SELECT id FROM executions WHERE status = 'running' AND night_id = $1`,

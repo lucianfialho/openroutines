@@ -1,0 +1,11 @@
+# Night hard stop (F3 #147). Fires at NIGHT_WINDOW_END (default 06:30, TZ from
+# the process env). runNightCycle drains-and-returns at 01:00, so this separate
+# tick is what actually kills anything still running past the window and closes
+# the night. pipeline.skill is a placeholder — the queue handler special-cases
+# this routine (like night-run) and calls runNightHardStop, not a skill.
+id: night-hard-stop
+triggers:
+  - type: schedule
+    cron: "30 6 * * *"
+pipeline:
+  skill: card-to-pr

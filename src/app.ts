@@ -65,8 +65,9 @@ import { registerCardToPrHandlers } from "./pipeline/card-to-pr/index.js";
 import { runStateMachine, type StateMachineConfig, type StateMachineContext } from "./engine/state-machine.js";
 import type { SkillStateMachine } from "./skill/schema.js";
 import type { TriggerEvent } from "./routine/matcher.js";
-import { reserveBudget, settleBudget, BUDGET_UNIT_WEIGHTS, type BudgetTier } from "./night-coordinator/budget.js";
+import { reserveBudget, BUDGET_UNIT_WEIGHTS, type BudgetTier } from "./night-coordinator/budget.js";
 import { runNightCycle, type RunNightCycleDeps } from "./night-coordinator/run.js";
+import { runNightHardStop } from "./night-coordinator/hard-stop.js";
 
 /**
  * Build a TaskSource from one loaded task-sources.yaml entry (F2 #144 left
@@ -335,9 +336,12 @@ export const createApp = async (config: AppConfig) => {
         });
       }
     : undefined;
-  const budgetSettle = pgPool
-    ? (reservationId: string, actualUsd: number) => settleBudget(pgPool, reservationId, actualUsd)
-    : undefined;
+  // NO budgetSettle in F3: the budget is counted in per-tier EFFORT UNITS (D3
+  // subscription login — there is no per-token billing), so a reservation IS the
+  // permanent charge. Settling with the invocation's real USD cost (which is 0
+  // under the subscription) would collapse the running total and let the night
+  // cap be overrun without bound. settleBudget stays a Wave A primitive for a
+  // future token-billing tier; the effort model reconciles nothing.
 
   // 4b. Setup card-to-pr script handlers (F3 #146) — the deterministic states
   // of the card-to-pr pilot skill. Gated on a GitHub token (the pilot can't
@@ -421,7 +425,7 @@ export const createApp = async (config: AppConfig) => {
             gateEngine,
             toolRegistry,
             budgetGate,
-            budgetSettle,
+            // budgetSettle intentionally omitted — see the effort-unit note above.
           };
         }
       } catch (err) {
@@ -469,6 +473,24 @@ export const createApp = async (config: AppConfig) => {
       }
       const summary = await runNightCycle(nightCoordinatorDeps);
       console.log(`[Queue] Night cycle: ${JSON.stringify(summary)}`);
+      return;
+    }
+
+    // Night hard-stop cron tick (F3 #147): kill anything still running past the
+    // window and close the night. runNightCycle can't do this itself (it drains
+    // and returns at 01:00), so it lives in its own scheduled tick.
+    if (job.routineId === "night-hard-stop" && job.trigger.type === "schedule") {
+      if (!nightCoordinatorDeps) {
+        console.warn("[Queue] night-hard-stop cron fired but the night coordinator is not wired");
+        return;
+      }
+      const result = await runNightHardStop({
+        pool: nightCoordinatorDeps.pool,
+        executionRepo: nightCoordinatorDeps.executionRepo,
+        executionProcessRepo: nightCoordinatorDeps.executionProcessRepo,
+        tz: nightCoordinatorDeps.tz,
+      });
+      console.log(`[Queue] Night hard-stop: ${JSON.stringify(result)}`);
       return;
     }
 
@@ -589,7 +611,9 @@ export const createApp = async (config: AppConfig) => {
       executionRepo: persistence,
       queue,
       executionProcessRepo: executionProcessRepository,
-      worktreeBase: process.env.WORKTREE_BASE,
+      // Same default as worktree CREATION (the card-to-pr handlers) — the reset
+      // fence and the worktrees it guards must resolve to the identical base.
+      worktreeBase: process.env.WORKTREE_BASE ?? "/tmp/or-worktrees",
     });
     if (recon.resumed.length || recon.failed.length) {
       console.log(

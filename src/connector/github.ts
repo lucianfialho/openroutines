@@ -106,6 +106,21 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
       return parsed;
     });
 
+  // Branch-scoped lookup for idempotent PR creation: --head filters server-side
+  // so the 30-item / open-only default of `pr list` can never hide THIS branch's
+  // open PR (which would otherwise cause a duplicate create that gh rejects).
+  const getOpenPrByBranch = (
+    branch: string
+  ): Effect.Effect<{ url: string; number: number } | undefined, GitHubCliError> =>
+    Effect.gen(function* () {
+      yield* ensureBranch(branch);
+      const output = yield* execGh([
+        "pr", "list", "--head", branch, "--state", "open", "--json", "number,url",
+      ]);
+      const parsed = JSON.parse(output) as Array<{ url: string; number: number }>;
+      return parsed[0];
+    });
+
   const getPullRequest = (
     number: number
   ): Effect.Effect<{ number: number; title: string; body: string; headRefName: string; files: string[] }, GitHubCliError> =>
@@ -188,6 +203,7 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
     fetchIssue,
     listIssues,
     listPullRequests,
+    getOpenPrByBranch,
     getPullRequest,
     createPullRequest,
     addComment,

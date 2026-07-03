@@ -120,6 +120,19 @@ describe("makeVerify", () => {
     });
   });
 
+  it("forbids a .env at ANY depth (monorepo secrets), not just at the repo root", async () => {
+    const runGit = vi.fn(async () => ({ stdout: "apps/api/.env\nsrc/index.ts\npackages/x/.env.local\n", stderr: "" }));
+    const runVerify = vi.fn(async () => passingResults);
+    const handler = makeVerify(baseDeps({ runGit, runVerify }));
+
+    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+
+    expect(r).toMatchObject({
+      passed: false,
+      forbiddenPathsTouched: ["apps/api/.env", "packages/x/.env.local"],
+    });
+  });
+
   it("passes when verify commands pass and no forbidden path was touched", async () => {
     const runGit = vi.fn(async () => ({ stdout: "src/index.ts\n", stderr: "" }));
     const runVerify = vi.fn(async () => passingResults);

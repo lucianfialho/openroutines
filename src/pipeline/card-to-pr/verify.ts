@@ -26,10 +26,14 @@ export interface VerifyOutput {
   blockReason?: string;
 }
 
-// A change under .git/, a GitHub Actions workflow, or a root-level dotfile
-// (no further "/") is never something the model should be touching.
+// A change under .git/, a GitHub Actions workflow, a root-level dotfile, or a
+// .env at ANY depth (apps/api/.env in a monorepo — secrets) is never something
+// the model should be touching.
 const isForbiddenPath = (p: string): boolean =>
-  p.startsWith(".git/") || p.startsWith(".github/workflows/") || /^\.[^/]+$/.test(p);
+  p.startsWith(".git/") ||
+  p.startsWith(".github/workflows/") ||
+  /^\.[^/]+$/.test(p) ||
+  p.split("/").some((seg) => seg.startsWith(".env"));
 
 export const makeVerify = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
   const preparacao = ctx.outputs.preparacao as PreparacaoOutput;

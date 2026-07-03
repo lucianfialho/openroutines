@@ -92,8 +92,13 @@ export const resolveRepoForClaim = (registry: RepoRegistry) => (task: ClaimCandi
 };
 
 const getBusyRepos = async (pool: Pool, nightId: string): Promise<Set<string>> => {
+  // Any NON-TERMINAL execution occupies its repo (same-repo-in-series). A card
+  // just claimed+enqueued this cycle is 'pending' until a worker starts it, so
+  // excluding only 'running' would let the very next loop iteration claim a
+  // SECOND card of the same repo and run both in parallel.
   const { rows } = await pool.query(
-    `SELECT DISTINCT repo FROM executions WHERE status = 'running' AND night_id = $1 AND repo IS NOT NULL`,
+    `SELECT DISTINCT repo FROM executions
+     WHERE status IN ('pending', 'running', 'paused') AND night_id = $1 AND repo IS NOT NULL`,
     [nightId]
   );
   return new Set(rows.map((r) => r.repo as string));
@@ -163,6 +168,11 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
   let cardsClaimed = 0;
   let cardsEnqueued = 0;
   let windowEnded = false;
+  // Repos denied by per-repo backpressure this cycle. Excluded from further
+  // claims so an unclaimed-on-denial card can't be re-claimed → denied → loop
+  // forever (a livelock): once a repo is blocked, its cards stay unclaimed and
+  // the drain terminates when nothing claimable remains.
+  const blockedRepos = new Set<string>();
 
   // 5. Drain the currently-claimable backlog. Bounded and fast by design (see
   // module docstring) — NOT a poll across the whole window.
@@ -176,6 +186,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
     if (openCount >= deps.nightPrCap) break; // global cap reached — nothing more to claim tonight
 
     const busyRepos = await getBusyRepos(deps.pool, nightId);
+    for (const r of blockedRepos) busyRepos.add(r);
     const claimed = await claimReadyCards(deps.pool, nightId, deps.nightParallelism, {
       resolveRepo: resolveRepoForClaim(deps.registry),
       busyRepos,
@@ -195,11 +206,17 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
         { nightId, repo: card.repo }
       );
       if (!ok) {
-        // Known Wave-D limitation: the card stays claimed_by_night_id for this
-        // night (Wave A's claim has no unclaim path) but never gets enqueued.
-        // Bounded by nightParallelism per batch; see openDecisions.
+        // Release the claim so a FUTURE night can pick this card up — without
+        // this, a card denied by the PR cap/backpressure would keep
+        // claimed_by_night_id set forever and never be processed again. Mark the
+        // repo blocked-this-cycle so it isn't re-claimed into a livelock.
+        blockedRepos.add(card.repo);
+        await deps.pool.query(
+          `UPDATE tasks SET claimed_by_night_id = NULL WHERE source_id = $1 AND task_id = $2 AND claimed_by_night_id = $3`,
+          [card.sourceId, card.taskId, nightId]
+        );
         console.log(
-          `[NightCoordinator] card ${card.sourceId}/${card.taskId} claimed but not enqueued this cycle (PR cap/backpressure on '${card.repo}')`
+          `[NightCoordinator] card ${card.sourceId}/${card.taskId} unclaimed (PR cap/backpressure on '${card.repo}') — retry next night`
         );
         continue;
       }

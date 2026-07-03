@@ -72,6 +72,12 @@ export const reserveBudget = async (
   }
 };
 
+/**
+ * Reconcile a reservation with real consumption. UNUSED in F3: under the D3
+ * subscription/effort-unit model a reservation is the permanent charge and there
+ * is nothing to reconcile (settling with the ~0 real USD would defeat the cap).
+ * Kept for a future per-token-billing tier where reserved != actual.
+ */
 export const settleBudget = async (
   pool: Pool,
   reservationId: string,

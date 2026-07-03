@@ -112,7 +112,14 @@ def check_git(tokens):
         return len(tokens) == 2  # bare `git status`, no extra args
 
     if sub in ("diff", "log"):
-        return True  # `diff*` / `log*` -- read-only, any extra args allowed
+        # Read-only ONLY if it stays read-only: `git diff --no-index --output=X`
+        # (and --output-indicator/-O) turn diff into an arbitrary file WRITE, and
+        # --no-index reads any two paths outside the repo — a full read/write
+        # primitive that bypasses the Read/Edit-Write denies. Reject those flags.
+        GIT_DIFF_LOG_FORBIDDEN = ("--output", "-O", "--no-index")
+        return not any(
+            t == f or t.startswith(f + "=") for t in tokens[2:] for f in GIT_DIFF_LOG_FORBIDDEN
+        )
 
     return False
 
@@ -134,10 +141,22 @@ def check_npm_like(tokens, cwd):
     sub = tokens[1]
 
     if sub in ("ci", "install"):
-        # Only flags after `install`/`ci` -- a bare positional token is a
-        # package name being added outside package.json (the exact
-        # supply-chain hole Camada 5 names: `npm install left-pad`).
-        return all(t.startswith("-") for t in tokens[2:])
+        # No bare positional token (a package name added outside package.json --
+        # the `npm install left-pad` hole) AND only known-safe flags: a denylist
+        # would miss the real danger, --registry=<attacker-host>, which redirects
+        # package resolution to an attacker-controlled registry. Allowlist the
+        # flag heads instead.
+        SAFE_INSTALL_FLAGS = {
+            "--production", "--omit", "--include", "--no-audit", "--no-fund",
+            "--prefer-offline", "--offline", "--ignore-scripts", "--frozen-lockfile",
+            "--no-save", "--save-exact",
+        }
+        for t in tokens[2:]:
+            if not t.startswith("-"):
+                return False  # positional = package name
+            if t.split("=", 1)[0] not in SAFE_INSTALL_FLAGS:
+                return False  # unknown flag (e.g. --registry) -> reject
+        return True
 
     scripts = load_package_scripts(cwd)
 

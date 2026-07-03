@@ -5,7 +5,7 @@
       "Bash(git reset --hard*)", "Bash(git clean*)",
       "Bash(aws *)", "Bash(gcloud *)", "Bash(az *)",
       "Bash(gh pr merge*)", "Bash(gh repo *)",
-      "Read(./.env)", "Read(**/.env.production*)",
+      "Read(./.env)", "Read(**/.env)", "Read(**/.env.*)", "Read(**/.env.production*)",
       "Bash(printenv*)", "Bash(env)", "Bash(env *)",
       "Bash(curl * | *sh*)", "Bash(wget * | *sh*)"
     ]
