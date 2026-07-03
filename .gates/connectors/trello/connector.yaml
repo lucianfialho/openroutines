@@ -1,0 +1,66 @@
+# Trello connector manifest (issue #142).
+#
+# Consumed by src/connector/trello.ts, which is bespoke (not driven by
+# src/task-source/rest-executor.ts) because writing Complexidade/Prioridade
+# is a two-step flow the generic one-request-per-method executor can't model.
+# `operations` is intentionally absent — the bespoke adapter hardcodes every
+# Trello endpoint itself instead of reading it from this manifest. `fields`,
+# `state` and `classification` below are still read (or, for `fields`, kept
+# as documentation of the fixed Trello field names the adapter maps).
+name: trello
+transport: rest
+baseUrl: https://api.trello.com/1
+
+# key+token as query params on every call (no auth header) — get yours at
+# https://trello.com/power-ups/admin
+auth:
+  scheme: query
+  params:
+    key: key
+    token: token
+
+# The container that holds cards is a Trello List. Cards belonging to
+# OpenRoutines (including ones sitting in shared columns like Backlog/Review)
+# carry the `OpenRoutines` label as a flag.
+container:
+  kind: list
+  flag:
+    kind: label
+    name: OpenRoutines
+
+# Trello's raw card field names, for reference — see src/connector/trello.ts
+# for the actual (hardcoded, not manifest-driven) mapping.
+fields:
+  id: id
+  title: name
+  body: desc
+  url: shortUrl
+  labels: labels
+  assignees: idMembers
+
+# Canonical TaskState -> Trello List name (.openroutines/02-FLUXO-TRELLO.md,
+# "Colunas"). Backlog/Blocked/Review/Done are reused board columns; the two
+# OpenRoutines — * columns are dedicated to this system.
+state:
+  backlog: Backlog
+  queued: "OpenRoutines — Fila"
+  working: "OpenRoutines — Working"
+  blocked: Blocked
+  review: Review
+  done: Done
+
+# Tipos de card (.openroutines/02-FLUXO-TRELLO.md, "Tipos de card"):
+# implementation has no label (its absence IS the value); the other three do.
+classification:
+  type:
+    research: "OpenRoutines: Pesquisa"
+    mapping: "OpenRoutines: Mapeamento"
+    update: "OpenRoutines: Update"
+  complexity:
+    field: Complexidade
+  priority:
+    field: Prioridade
+
+capabilities:
+  - customFields
+  - twoStepClassification
