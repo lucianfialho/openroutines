@@ -12,7 +12,8 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "vercel:dev": "vercel dev",
     "vercel:build": "vercel build",
-    "vercel:generate": "tsx scripts/generate-vercel-json.ts"
+    "vercel:generate": "tsx scripts/generate-vercel-json.ts",
+    "setup:trello-board": "tsx scripts/setup-trello-board.ts"
   },
   "dependencies": {
     "@hugeicons/react": "^1.1.6",
