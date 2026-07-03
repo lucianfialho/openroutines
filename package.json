@@ -4,7 +4,7 @@
   "description": "Open-source, self-hosted automation platform for engineering workflows. Bring your own model.",
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && mkdir -p dist/persistence/migrations dist/gate/migrations && cp src/persistence/migrations/*.sql dist/persistence/migrations/ && cp src/gate/migrations/*.sql dist/gate/migrations/",
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
     "test": "vitest",
