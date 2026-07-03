@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git push*--force*)", "Bash(git push*-f *)",
+      "Bash(git reset --hard*)", "Bash(git clean*)",
+      "Bash(aws *)", "Bash(gcloud *)", "Bash(az *)",
+      "Bash(gh pr merge*)", "Bash(gh repo *)",
+      "Read(./.env)", "Read(**/.env)", "Read(**/.env.*)", "Read(**/.env.production*)",
+      "Bash(printenv*)", "Bash(env)", "Bash(env *)",
+      "Bash(curl * | *sh*)", "Bash(wget * | *sh*)"
+    ]
+  },
+  "disableBypassPermissionsMode": "disable",
+  "allowManagedPermissionRulesOnly": true,
+  "sandbox": {
+    "enabled": true,
+    "filesystem": {
+      "denyRead": ["~/.ssh", "/etc/openroutines/env"]
+    },
+    "credentials": {
+      "envVars": [
+        {"name": "GITHUB_TOKEN", "mode": "deny"},
+        {"name": "GH_TOKEN", "mode": "deny"},
+        {"name": "ANTHROPIC_API_KEY", "mode": "deny"},
+        {"name": "MOONSHOT_API_KEY", "mode": "deny"},
+        {"name": "TRELLO_API_KEY", "mode": "deny"},
+        {"name": "TRELLO_TOKEN", "mode": "deny"},
+        {"name": "RAIZES_DOCS_KEY", "mode": "deny"},
+        {"name": "DATABASE_URL", "mode": "deny"}
+      ]
+    },
+    "network": {
+      "allowedDomains": [
+        "api.anthropic.com", "registry.npmjs.org",
+        "github.com", "api.github.com", "codeload.github.com",
+        "api.moonshot.cn", "api.trello.com",
+        "<host-do-raizes-docs>"
+      ]
+    }
+  }
+}

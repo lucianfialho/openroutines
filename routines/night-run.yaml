@@ -1,0 +1,6 @@
+id: night-run
+triggers:
+  - type: schedule
+    cron: "0 1 * * *"
+pipeline:
+  skill: card-to-pr

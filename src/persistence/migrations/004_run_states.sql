@@ -7,7 +7,11 @@ CREATE TABLE IF NOT EXISTS run_states (
   agent_prompt TEXT,
   output JSONB,
   output_validated BOOLEAN DEFAULT FALSE,
-  gate_id UUID REFERENCES gates(id),
+  -- gate_id is NOT a FK to gates: the gate table is created by a SEPARATE
+  -- migration runner (gate/migrations) that runs AFTER persistence migrations,
+  -- so an FK here would fail on a fresh DB. Keep it a plain UUID (the runner
+  -- sets it; a dangling ref is harmless) to keep the two runners order-independent.
+  gate_id UUID,
   status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed', 'paused')),
   started_at TIMESTAMPTZ NOT NULL,
   finished_at TIMESTAMPTZ,

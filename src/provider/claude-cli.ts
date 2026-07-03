@@ -96,7 +96,11 @@ const runClaudeCli = (config: ClaudeCliConfig, request: CompletionRequest): Prom
 
   return new Promise<CompletionResponse>((resolve, reject) => {
     const child = spawn(binPath, args, {
-      cwd: process.cwd(),
+      // Run INSIDE the card's worktree when one is set (card-to-pr's plano/
+      // implementacao) so the agent explores/edits/git-operates on the card's
+      // checkout, not the orchestrator's repo. --add-dir already whitelists it;
+      // without this the cwd was the orchestrator dir (wrong repo).
+      cwd: request.workdir ?? process.cwd(),
       // Minimal env: subscription/OAuth auth + PATH/HOME only. Never the
       // orchestrator's DB/GitHub/webhook secrets, and deliberately NOT
       // ANTHROPIC_API_KEY — that would make the CLI bill via the paid API

@@ -85,9 +85,14 @@ export const makeNeonRepository = (
     return rows.map(rowToRecord);
   };
 
-  const findAll = async (opts?: { limit?: number; offset?: number }): Promise<ExecutionRecord[]> => {
-    const rows =
-      await sql`SELECT * FROM executions ORDER BY started_at DESC LIMIT ${opts?.limit ?? 100} OFFSET ${opts?.offset ?? 0}`;
+  const findAll = async (opts?: {
+    limit?: number;
+    offset?: number;
+    status?: ExecutionRecord["status"];
+  }): Promise<ExecutionRecord[]> => {
+    const rows = opts?.status
+      ? await sql`SELECT * FROM executions WHERE status = ${opts.status} ORDER BY started_at DESC LIMIT ${opts?.limit ?? 100} OFFSET ${opts?.offset ?? 0}`
+      : await sql`SELECT * FROM executions ORDER BY started_at DESC LIMIT ${opts?.limit ?? 100} OFFSET ${opts?.offset ?? 0}`;
     return rows.map(rowToRecord);
   };
 

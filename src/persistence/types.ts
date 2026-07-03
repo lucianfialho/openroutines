@@ -34,7 +34,52 @@ export interface ExecutionRepository {
   findById: (id: string) => Promise<ExecutionRecord | undefined>;
   findByRoutine: (routineId: string) => Promise<ExecutionRecord[]>;
   findByTask: (sourceId: string, taskId: string) => Promise<ExecutionRecord[]>;
-  findAll: (opts?: { limit?: number; offset?: number }) => Promise<ExecutionRecord[]>;
+  /** `status` filter is additive — boot reconciliation uses it to find orphaned `running` executions (F3 #149). */
+  findAll: (opts?: {
+    limit?: number;
+    offset?: number;
+    status?: ExecutionRecord["status"];
+  }) => Promise<ExecutionRecord[]>;
+}
+
+/** One logical external side effect of an execution, keyed by (executionId, actionKey) — the idempotency unit (F3 #149). */
+export interface ActionLedgerEntry {
+  id?: string;
+  executionId: string;
+  stateId: string;
+  actionKey: string;
+  status: "pending" | "done" | "failed";
+  externalRef?: string;
+  createdAt?: Date;
+  completedAt?: Date;
+}
+
+export interface ActionLedgerRepository {
+  findByKey: (executionId: string, actionKey: string) => Promise<ActionLedgerEntry | undefined>;
+  recordPending: (executionId: string, stateId: string, actionKey: string) => Promise<void>;
+  complete: (executionId: string, actionKey: string, externalRef?: string) => Promise<void>;
+  fail: (executionId: string, actionKey: string, error: string) => Promise<void>;
+}
+
+/** card ↔ PR linkage, keyed to tasks by (sourceId, taskId) — F2 composite (F3 #146). */
+export interface PrLink {
+  id?: string;
+  sourceId: string;
+  taskId: string;
+  repo: string;
+  prNumber?: number;
+  branch: string;
+  status: string; // 'open' | 'merged' | 'closed' ...
+  reviewState?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface PrLinkRepository {
+  create: (link: PrLink) => Promise<void>;
+  findByTask: (sourceId: string, taskId: string) => Promise<PrLink[]>;
+  /** Open PRs of a night, via executions(source_id, task_id, night_id) — the global PR-cap count (F3 #147). */
+  countOpenForNight: (nightId: string) => Promise<number>;
 }
 
 /** Task snapshot persistence, keyed by composite (sourceId, taskId) — reuses Task from task-source (F2 #144). */

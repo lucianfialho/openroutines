@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "card-to-pr implementacao output",
+  "type": "object",
+  "required": ["filesTouched", "commits"],
+  "properties": {
+    "filesTouched": { "type": "array", "items": { "type": "string" } },
+    "commits": { "type": "array", "items": { "type": "string" } },
+    "notes": { "type": "string" },
+    "openDecisions": { "type": "array", "items": { "type": "string" } }
+  }
+}

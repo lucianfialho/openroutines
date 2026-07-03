@@ -106,6 +106,21 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
       return parsed;
     });
 
+  // Branch-scoped lookup for idempotent PR creation: --head filters server-side
+  // so the 30-item / open-only default of `pr list` can never hide THIS branch's
+  // open PR (which would otherwise cause a duplicate create that gh rejects).
+  const getOpenPrByBranch = (
+    branch: string
+  ): Effect.Effect<{ url: string; number: number } | undefined, GitHubCliError> =>
+    Effect.gen(function* () {
+      yield* ensureBranch(branch);
+      const output = yield* execGh([
+        "pr", "list", "--head", branch, "--state", "open", "--json", "number,url",
+      ]);
+      const parsed = JSON.parse(output) as Array<{ url: string; number: number }>;
+      return parsed[0];
+    });
+
   const getPullRequest = (
     number: number
   ): Effect.Effect<{ number: number; title: string; body: string; headRefName: string; files: string[] }, GitHubCliError> =>
@@ -127,16 +142,22 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
   const createPullRequest = (
     branch: string,
     title: string,
-    body: string
+    body: string,
+    base?: string
   ): Effect.Effect<{ pr: { url: string; number: number; branch: string } }, GitHubCliError> =>
     Effect.gen(function* () {
       yield* ensureBranch(branch);
-      yield* Effect.log(`[GitHub] Creating PR: ${title}`);
+      // When a base is given it is validated as a branch ref too, and passed as
+      // --base so the PR targets an integration branch (development), NEVER the
+      // repo's default (which may be main — the invariant "no transition touches
+      // main"). Omitted → gh's default base (kept for solve-issue's dogfooding).
+      if (base !== undefined) yield* ensureBranch(base);
+      yield* Effect.log(`[GitHub] Creating PR: ${title}${base ? ` -> ${base}` : ""}`);
       // gh pr create does not support --json; create then list to get details.
       // title/body are passed as distinct argv elements — no shell, no escaping.
-      yield* execGh([
-        "pr", "create", "--head", branch, "--title", title, "--body", body,
-      ]);
+      const createArgs = ["pr", "create", "--head", branch, "--title", title, "--body", body];
+      if (base) createArgs.push("--base", base);
+      yield* execGh(createArgs);
       const output = yield* execGh([
         "pr", "list", "--head", branch, "--state", "open", "--json", "number,url",
       ]);
@@ -182,6 +203,7 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
     fetchIssue,
     listIssues,
     listPullRequests,
+    getOpenPrByBranch,
     getPullRequest,
     createPullRequest,
     addComment,

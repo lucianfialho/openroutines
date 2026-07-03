@@ -11,6 +11,8 @@ export interface BullMqConfig {
   redisUrl: string;
   queueName?: string;
   handler: (job: Job) => void | Promise<void>;
+  /** Worker concurrency (default 5). Night-run wiring sets this to NIGHT_PARALLELISM. */
+  concurrency?: number;
 }
 
 export const makeBullMqQueue = (config: BullMqConfig): JobQueue & { close: () => Promise<void> } => {
@@ -19,7 +21,11 @@ export const makeBullMqQueue = (config: BullMqConfig): JobQueue & { close: () =>
   const queue = new Queue(queueName, {
     connection: { url: config.redisUrl },
     defaultJobOptions: {
-      attempts: 3,
+      // attempts: 1 — a per-phase retry is the orchestrator's decision (via the
+      // action_ledger + boot reconciliation), NEVER BullMQ re-running the job from
+      // the start, which would re-invoke `preparacao` and could create a second
+      // worktree/PR for the same card (F3 #149).
+      attempts: 1,
       backoff: {
         type: "exponential",
         delay: 1000,
@@ -37,7 +43,7 @@ export const makeBullMqQueue = (config: BullMqConfig): JobQueue & { close: () =>
     },
     {
       connection: { url: config.redisUrl },
-      concurrency: 5,
+      concurrency: config.concurrency ?? 5,
     }
   );
 

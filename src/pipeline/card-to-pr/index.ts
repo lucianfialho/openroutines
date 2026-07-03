@@ -1,0 +1,68 @@
+/**
+ * card-to-pr script handlers (F3 #146).
+ *
+ * Wires the 4 deterministic (`type: script`) states of
+ * `.gates/skills/card-to-pr/skill.yaml` into a ScriptRegistry. Dependencies
+ * are injected as closures (ScriptContext carries no DI container), with an
+ * injectable seam per external effect so tests never need a real repo,
+ * GitHub, or task source.
+ */
+import { execFile } from "child_process";
+import { promisify } from "util";
+import type { Pool } from "pg";
+import type { ScriptRegistry } from "../../script/registry.js";
+import type { RepoRegistry } from "../../repo-registry/schema.js";
+import type { ActionLedgerRepository, PrLinkRepository } from "../../persistence/types.js";
+import type { TaskSource } from "../../task-source/types.js";
+import { makeGitHubConnector } from "../../connector/github.js";
+import { checkBranchProtection } from "../../preflight/branch-protection.js";
+import { runVerifyCommands } from "../../verify/run-commands.js";
+import { getOrCreateBaseline } from "../../verify/baseline.js";
+import { pickEnv, BASE_ENV_VARS } from "../../util/env.js";
+import { makePreparacao } from "./preparacao.js";
+import { makeVerify } from "./verify.js";
+import { makePr } from "./pr.js";
+import { makeBloqueado } from "./bloqueado.js";
+
+const execFileAsync = promisify(execFile);
+
+export interface CardToPrDeps {
+  pool?: Pool; // for baseline; undefined in no-DB mode
+  registry: RepoRegistry;
+  githubToken: string;
+  worktreeBase: string; // env WORKTREE_BASE, e.g. /tmp/or-worktrees
+  ledger: ActionLedgerRepository;
+  prLinks: PrLinkRepository;
+  taskSourceFor: (sourceId: string) => TaskSource | undefined;
+  // Injectable seams for tests (default to the real impls):
+  makeGithub?: (cfg: { token: string; repo: string }) => ReturnType<typeof makeGitHubConnector>;
+  checkProtection?: typeof checkBranchProtection;
+  runGit?: (args: string[], cwd: string) => Promise<{ stdout: string; stderr: string }>;
+  runVerify?: typeof runVerifyCommands;
+  getBaseline?: typeof getOrCreateBaseline;
+}
+
+/**
+ * Default `runGit`: execFile argv only, never a shell string. Every call
+ * inherits the full process env, like the trusted repos.yaml verify commands
+ * do (src/verify/run-commands.ts) — EXCEPT `git push`, the one call that
+ * authenticates against GitHub, which gets a minimal env (PATH/HOME/
+ * GITHUB_TOKEN only), never the orchestrator's full secret set. Shared by
+ * preparacao (fetch/worktree/rev-parse), verify (diff --name-only) and pr
+ * (push) so a single injected seam covers every git call in this module.
+ */
+export const defaultRunGit =
+  (githubToken: string) =>
+  (args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> =>
+    execFileAsync(
+      "git",
+      args,
+      args[0] === "push" ? { cwd, env: { ...pickEnv(BASE_ENV_VARS), GITHUB_TOKEN: githubToken } } : { cwd }
+    );
+
+export const registerCardToPrHandlers = (reg: ScriptRegistry, deps: CardToPrDeps): void => {
+  reg.register("card-to-pr-preparacao", makePreparacao(deps));
+  reg.register("card-to-pr-verify", makeVerify(deps));
+  reg.register("card-to-pr-pr", makePr(deps));
+  reg.register("card-to-pr-bloqueado", makeBloqueado(deps));
+};

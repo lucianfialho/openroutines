@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { Queue } from "bullmq";
 import { makeBullMqQueue } from "./bullmq.js";
 import type { Job } from "./types.js";
 
@@ -62,6 +63,20 @@ describe("makeBullMqQueue", () => {
     });
 
     expect(queue).toBeDefined();
+  });
+
+  it("AC1 (#149): configures defaultJobOptions.attempts = 1 — retries are the orchestrator's decision, never BullMQ's", async () => {
+    const handler = vi.fn();
+    makeBullMqQueue({
+      redisUrl: "redis://localhost:6379",
+      handler,
+    });
+
+    expect(Queue).toHaveBeenCalledTimes(1);
+    const opts = (Queue as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1] as {
+      defaultJobOptions: { attempts: number };
+    };
+    expect(opts.defaultJobOptions.attempts).toBe(1);
   });
 
   it("should close worker and queue", async () => {

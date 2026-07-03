@@ -1,0 +1,52 @@
+# deploy/openroutines.service
+#
+# Target install path: /etc/systemd/system/openroutines.service (root:root, 0644)
+# Install:
+#   sudo install -o root -g root -m 0644 deploy/openroutines.service /etc/systemd/system/openroutines.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now openroutines
+#
+# See .openroutines/04-INFRA-MAQUINA.md ("Serviços (systemd)", "Hardening da conta de
+# serviço") and .openroutines/09-RUNBOOK.md (deploy/rollback, crash recovery).
+
+[Unit]
+Description=OpenRoutines orchestrator
+Documentation=https://github.com/lucianfialho/openroutines
+# Postgres/Redis may be native systemd units or Docker containers depending on the
+# bootstrap choice (04 says "containers ou nativos") -- referencing unit names that
+# don't exist on this machine is harmless (systemd just treats them as absent), so
+# this ordering hint is safe either way. Adjust if you run them as native services
+# with different unit names (e.g. postgresql@16-main.service on Ubuntu).
+After=network-online.target postgresql.service redis-server.service docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openroutines
+Group=openroutines
+WorkingDirectory=/home/openroutines/openroutines
+EnvironmentFile=/etc/openroutines/env
+ExecStart=/usr/bin/node dist/main.js
+Restart=always
+RestartSec=5
+# Boot does reconciliation + zombie cleanup + TZ/env validation (see 09-RUNBOOK.md) --
+# give it real time to run before systemd gives up on a slow start.
+TimeoutStartSec=60
+
+# --- Hardening (defense-in-depth on top of the restricted `openroutines` Linux
+# account -- see 05-GUARDRAILS-SEGURANCA.md Camada 5). Conservative on purpose: no
+# MemoryDenyWriteExecute (breaks V8/Node JIT) and no SystemCallFilter (untested
+# against this service's actual syscalls on the target machine; tune once verified
+# there with `systemd-analyze security openroutines`). ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/openroutines/openroutines /home/openroutines/repos /home/openroutines/worktrees /var/log/openroutines
+PrivateTmp=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

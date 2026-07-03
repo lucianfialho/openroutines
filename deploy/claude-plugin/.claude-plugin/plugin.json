@@ -1,0 +1,6 @@
+{
+  "name": "openroutines-guardrails",
+  "version": "0.1.0",
+  "description": "PreToolUse guardrail hooks for OpenRoutines executors: Bash allowlist and Edit/Write path-deny enforcing .openroutines/05-GUARDRAILS-SEGURANCA.md Camada 4.",
+  "hooks": "./hooks/hooks.json"
+}

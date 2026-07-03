@@ -1,0 +1,98 @@
+id: card-to-pr
+name: Card to PR
+description: >
+  Thick-state pipeline (F3 pilot): 1 Trello card -> 1 PR. Each phase is one full
+  CLI-agent invocation or one deterministic script, not a micro-tool loop.
+  preparacao -> plano -> implementacao -> verify -> pr_gate (human) -> pr -> done,
+  diverting to bloqueado when the repo has no branch protection or verify stalls.
+
+inputs:
+  required:
+    - { name: source_id, type: string }
+    - { name: task_id, type: string }
+    - { name: repo, type: string }
+    - { name: title, type: string }
+    - { name: description, type: string }
+  optional:
+    - { name: night_id, type: string }
+
+initial_state: preparacao
+
+states:
+  preparacao:
+    description: Resolve repo, preflight branch protection, create worktree, baseline verify.
+    type: script
+    script: card-to-pr-preparacao
+    transitions:
+      - { to: bloqueado, when: "output.preparacao.branchProtected == false" }
+      - { to: plano }
+
+  plano:
+    description: Explore the repo and produce a plan.
+    provider: claude-cli
+    model: claude-sonnet-5
+    output_schema: .gates/skills/card-to-pr/schemas/plano.schema.json
+    agent_prompt: |
+      Card: {{inputs.title}}
+      Descrição: {{inputs.description}}
+      Worktree: {{outputs.preparacao.worktree.path}}
+
+      Explore o repositório no worktree acima, produza um PLAN.md e emita um JSON com:
+      {summary, files[], estimatedLoc, dataChanges[], testStrategy, risks[]}.
+      Não altere código nesta fase — só planeje.
+    transitions:
+      - { to: implementacao }
+
+  implementacao:
+    description: Implement the plan in the worktree and commit locally (never push).
+    provider: claude-cli
+    model: claude-sonnet-5
+    output_schema: .gates/skills/card-to-pr/schemas/implementacao.schema.json
+    agent_prompt: |
+      Plano aprovado: {{outputs.plano}}
+      Resultado do verify anterior (se for retry): {{outputs.verify}}
+
+      Implemente o plano no worktree {{outputs.preparacao.worktree.path}}. Ao terminar,
+      use git_commit (NUNCA dê push — o orquestrador cuida do push/PR).
+      Emita um JSON com: {filesTouched[], commits[], notes, openDecisions[]}.
+    tools:
+      - read_file
+      - edit_file
+      - write_file
+      - run_shell
+      - git_commit
+      - emit_output
+    transitions:
+      - { to: verify }
+
+  verify:
+    description: Deterministic verify vs baseline + forbidden-path guard; decides retry/stall/pass.
+    type: script
+    script: card-to-pr-verify
+    transitions:
+      - { to: pr_gate, when: "output.verify.passed == true" }
+      - { to: implementacao, when: "output.verify.retryable == true" }
+      - { to: bloqueado }
+
+  pr_gate:
+    description: Human approval before any push/PR.
+    gate: manual_approval
+    transitions:
+      - { to: pr }
+
+  pr:
+    description: Push, open PR to the integration branch, hand the card off to Review — all idempotent.
+    type: script
+    script: card-to-pr-pr
+    transitions:
+      - { to: done }
+
+  bloqueado:
+    description: Move the card to Blocked with a structured reason.
+    type: script
+    script: card-to-pr-bloqueado
+    transitions:
+      - { to: done }
+
+  done:
+    terminal: true
