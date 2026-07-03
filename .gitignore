@@ -9,5 +9,8 @@ coverage/
 .idea/
 .vercel
 
-# AutoDev local planning docs (never committed)
-.autodev/
+# OpenRoutines local planning docs (never committed)
+.openroutines/
+
+# Task source instances (installation-specific ids) — see task-sources.yaml.example
+task-sources.yaml
