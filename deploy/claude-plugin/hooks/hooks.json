@@ -1,0 +1,27 @@
+{
+  "description": "OpenRoutines guardrail hooks -- Bash allowlist + Edit/Write path-deny (see .openroutines/05-GUARDRAILS-SEGURANCA.md, Camada 4). Fails closed: safety-check.py denies anything it does not recognize.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/safety-check.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/safety-check.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
