@@ -19,9 +19,9 @@ export const makeInMemoryRepository = (): ExecutionRepository => {
     findByTask: async (sourceId, taskId) =>
       Array.from(store.values()).filter((r) => r.sourceId === sourceId && r.taskId === taskId),
     findAll: async (opts) => {
-      const all = Array.from(store.values()).sort(
-        (a, b) => b.startedAt.getTime() - a.startedAt.getTime()
-      );
+      const all = Array.from(store.values())
+        .filter((r) => (opts?.status ? r.status === opts.status : true))
+        .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
       const offset = opts?.offset ?? 0;
       const limit = opts?.limit ?? all.length;
       return all.slice(offset, offset + limit);

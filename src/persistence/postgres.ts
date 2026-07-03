@@ -113,10 +113,17 @@ export const makePostgresRepository = (
   };
 
   const findAll = async (
-    opts?: { limit?: number; offset?: number }
+    opts?: { limit?: number; offset?: number; status?: ExecutionRecord["status"] }
   ): Promise<ExecutionRecord[]> => {
     const limit = opts?.limit ?? 100;
     const offset = opts?.offset ?? 0;
+    if (opts?.status) {
+      const result = await pool.query(
+        `SELECT * FROM executions WHERE status = $1 ORDER BY started_at DESC LIMIT $2 OFFSET $3`,
+        [opts.status, limit, offset]
+      );
+      return result.rows.map(rowToRecord);
+    }
     const result = await pool.query(
       `SELECT * FROM executions ORDER BY started_at DESC LIMIT $1 OFFSET $2`,
       [limit, offset]
