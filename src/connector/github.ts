@@ -127,16 +127,22 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
   const createPullRequest = (
     branch: string,
     title: string,
-    body: string
+    body: string,
+    base?: string
   ): Effect.Effect<{ pr: { url: string; number: number; branch: string } }, GitHubCliError> =>
     Effect.gen(function* () {
       yield* ensureBranch(branch);
-      yield* Effect.log(`[GitHub] Creating PR: ${title}`);
+      // When a base is given it is validated as a branch ref too, and passed as
+      // --base so the PR targets an integration branch (development), NEVER the
+      // repo's default (which may be main — the invariant "no transition touches
+      // main"). Omitted → gh's default base (kept for solve-issue's dogfooding).
+      if (base !== undefined) yield* ensureBranch(base);
+      yield* Effect.log(`[GitHub] Creating PR: ${title}${base ? ` -> ${base}` : ""}`);
       // gh pr create does not support --json; create then list to get details.
       // title/body are passed as distinct argv elements — no shell, no escaping.
-      yield* execGh([
-        "pr", "create", "--head", branch, "--title", title, "--body", body,
-      ]);
+      const createArgs = ["pr", "create", "--head", branch, "--title", title, "--body", body];
+      if (base) createArgs.push("--base", base);
+      yield* execGh(createArgs);
       const output = yield* execGh([
         "pr", "list", "--head", branch, "--state", "open", "--json", "number,url",
       ]);

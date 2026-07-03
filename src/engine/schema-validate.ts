@@ -22,10 +22,14 @@ export interface JsonSchema {
 }
 
 export const validate = (value: unknown, schema: JsonSchema, path = ""): void => {
-  // Type validation
+  // Type validation. An integer is a valid number (JSON has one number type;
+  // getJsonType narrows whole values to "integer"), so type:"number" accepts
+  // both — otherwise an LLM emitting a whole-number field (e.g. estimatedLoc: 42)
+  // against type:"number" would fail validation.
   if (schema.type) {
     const actualType = getJsonType(value);
-    if (actualType !== schema.type) {
+    const typeOk = actualType === schema.type || (schema.type === "number" && actualType === "integer");
+    if (!typeOk) {
       throw new ValidationError(
         `Expected type "${schema.type}" at ${path || "root"}, got "${actualType}"`
       );

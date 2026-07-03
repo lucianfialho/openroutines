@@ -57,6 +57,13 @@ describe("resolveOutputPaths", () => {
     const r = resolveOutputPaths(state({}), {}, "exec1", "s1");
     expect(r.outputPath).toBe(".gates/outputs/exec1/s1.output.yaml");
   });
+
+  it("derives the worktree from the F3 `preparacao` output key too (card-to-pr)", () => {
+    const outputs = { preparacao: { worktree: { path: "/wt/card-x" } } };
+    const r = resolveOutputPaths(state({}), outputs, "exec1", "implementacao");
+    expect(r.worktreePath).toBe("/wt/card-x");
+    expect(r.outputPath).toBe("/wt/card-x/.gates/outputs/exec1/implementacao.output.yaml");
+  });
 });
 
 describe("buildContext", () => {

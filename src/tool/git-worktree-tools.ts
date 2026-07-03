@@ -216,6 +216,72 @@ export const makeGitWorktreeTools = (): Tool[] => [
   },
   {
     definition: {
+      name: "git_commit",
+      description:
+        "Stage all changes and commit in a worktree — WITHOUT pushing. The orchestrator owns the remote (D13); the model only commits locally.",
+      parameters: {
+        type: "object",
+        properties: {
+          message: {
+            type: "string",
+            description: "Commit message",
+          },
+          cwd: {
+            type: "string",
+            description: "Worktree path (from git_create_worktree)",
+          },
+        },
+        required: ["message", "cwd"],
+      },
+    },
+    handler: async (args) => {
+      const cwd = String(args.cwd);
+      const message = String(args.message);
+
+      try {
+        // Same pre-commit artifact guard as git_commit_and_push.
+        const { stdout: statusStdout } = await git(["status", "--short"], cwd);
+        const statusLines = statusStdout.trim().split("\n").filter((l) => l.length > 0);
+        const forbiddenPatterns = [
+          { pattern: /node_modules/, desc: "node_modules" },
+          { pattern: /\.env/, desc: ".env file" },
+          { pattern: /->\s/, desc: "symlink" },
+        ];
+        const violations: string[] = [];
+        for (const line of statusLines) {
+          for (const { pattern, desc } of forbiddenPatterns) {
+            if (pattern.test(line)) violations.push(`  ${line}  (${desc})`);
+          }
+        }
+        if (violations.length > 0) {
+          return JSON.stringify({
+            error: `Pre-commit blocked: forbidden artifacts detected in staging area.\n${violations.join("\n")}\nRemove these before committing.`,
+            stdout: statusStdout,
+          });
+        }
+
+        await git(["add", "-A"], cwd);
+        await git(["commit", "-m", message], cwd);
+        const { stdout: branchStdout } = await git(["rev-parse", "--abbrev-ref", "HEAD"], cwd);
+
+        return JSON.stringify({
+          commit: {
+            committed: true,
+            pushed: false,
+            branch: branchStdout.trim(),
+          },
+        });
+      } catch (err: any) {
+        return JSON.stringify({
+          error: err.message,
+          stderr: err.stderr?.trim?.() || "",
+          stdout: err.stdout?.trim?.() || "",
+        });
+      }
+    },
+  },
+  {
+    definition: {
       name: "git_remove_worktree",
       description:
         "Remove a git worktree and its branch. Call this after the PR is created.",

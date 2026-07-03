@@ -52,6 +52,35 @@ import {
   applyImprovement,
   dismissImprovement,
 } from "./observability/feedback-loop.js";
+import { loadRepoRegistry } from "./repo-registry/registry.js";
+import { makeInMemoryActionLedgerRepository } from "./persistence/action-ledger-in-memory.js";
+import { makePostgresActionLedgerRepository } from "./persistence/action-ledger-postgres.js";
+import { makeInMemoryPrLinkRepository } from "./persistence/pr-links-in-memory.js";
+import { makePostgresPrLinkRepository } from "./persistence/pr-links-postgres.js";
+import { loadTaskSources, type ResolvedTaskSource } from "./task-source/loader.js";
+import { makeTrelloTaskSource } from "./connector/trello.js";
+import { makeRestTaskSource } from "./task-source/rest-executor.js";
+import type { TaskSource } from "./task-source/types.js";
+import { registerCardToPrHandlers } from "./pipeline/card-to-pr/index.js";
+
+/**
+ * Build a TaskSource from one loaded task-sources.yaml entry (F2 #144 left
+ * this unwired). `entry.auth` holds env var NAMES, never resolved secrets
+ * (see task-sources.yaml.example) — Trello needs the resolved values up
+ * front, the generic REST executor resolves them itself per-call.
+ */
+const buildTaskSource = (resolved: ResolvedTaskSource): TaskSource => {
+  const { entry, manifest } = resolved;
+  if (entry.type === "trello") {
+    const apiKey = entry.auth.key ? process.env[entry.auth.key] : undefined;
+    const apiToken = entry.auth.token ? process.env[entry.auth.token] : undefined;
+    if (!apiKey || !apiToken) {
+      throw new Error(`trello source '${entry.id}': missing env var(s) named by auth.key/auth.token`);
+    }
+    return makeTrelloTaskSource({ manifest, sourceId: entry.id, boardId: entry.containers.board ?? "", apiKey, apiToken });
+  }
+  return makeRestTaskSource({ manifest, sourceId: entry.id, containers: entry.containers, authEnv: entry.auth });
+};
 
 export interface AppConfig {
   routinesDir: string;
@@ -267,6 +296,67 @@ export const createApp = async (config: AppConfig) => {
     console.log(`[App] Registered ${legacyTools.length} legacy micro-tools (OPENROUTINES_LEGACY_TOOLS=1)`);
   } else {
     console.log("[App] Legacy micro-tools disabled (set OPENROUTINES_LEGACY_TOOLS=1 for pre-F1 solve-issue)");
+  }
+
+  // 4b. Setup card-to-pr script handlers (F3 #146) — the deterministic states
+  // of the card-to-pr pilot skill. Gated on a GitHub token (the pilot can't
+  // push/open a PR without one); repos.yaml/task-sources.yaml are optional in
+  // dev, so a missing/invalid one is logged and skipped rather than crashing boot.
+  if (config.githubToken) {
+    // git_commit is commit-only (no push — D13, the orchestrator owns the
+    // remote), so it is safe to promote to the always-on toolset. The rest of
+    // the legacy git-worktree tools (create/remove worktree, run_shell) stay
+    // behind OPENROUTINES_LEGACY_TOOLS: they carry real destructive power
+    // (force-delete a branch by name/path) and predate the F1 per-state tool
+    // allowlist. card-to-pr's implementacao state declares only `git_commit`
+    // in its own `tools:` list anyway — its worktree is created by the
+    // deterministic preparacao script, never by an LLM tool call.
+    const gitCommitTool = makeGitWorktreeTools().find((t) => t.definition.name === "git_commit");
+    if (gitCommitTool) {
+      toolRegistry.registerMany([gitCommitTool]);
+      console.log("[App] Registered git_commit tool (commit-only, no push)");
+    }
+
+    let repoRegistry: import("./repo-registry/schema.js").RepoRegistry | undefined;
+    try {
+      repoRegistry = loadRepoRegistry();
+    } catch (err) {
+      console.warn("[App] repos.yaml not loaded, card-to-pr disabled:", err instanceof Error ? err.message : err);
+    }
+
+    if (repoRegistry) {
+      let resolvedSources: ResolvedTaskSource[] = [];
+      try {
+        resolvedSources = loadTaskSources();
+      } catch (err) {
+        console.warn(
+          "[App] task-sources.yaml not loaded, card-to-pr TaskSource lookups will be empty:",
+          err instanceof Error ? err.message : err
+        );
+      }
+
+      const taskSources = new Map<string, TaskSource>();
+      for (const resolved of resolvedSources) {
+        try {
+          taskSources.set(resolved.entry.id, buildTaskSource(resolved));
+        } catch (err) {
+          console.warn(`[App] Skipping task source '${resolved.entry.id}':`, err instanceof Error ? err.message : err);
+        }
+      }
+
+      registerCardToPrHandlers(scriptRegistry, {
+        pool: pgPool,
+        registry: repoRegistry,
+        githubToken: config.githubToken,
+        worktreeBase: process.env.WORKTREE_BASE ?? "/tmp/or-worktrees",
+        ledger: pgPool ? makePostgresActionLedgerRepository(pgPool) : makeInMemoryActionLedgerRepository(),
+        prLinks: pgPool ? makePostgresPrLinkRepository(pgPool) : makeInMemoryPrLinkRepository(),
+        taskSourceFor: (sourceId) => taskSources.get(sourceId),
+      });
+      console.log("[App] Registered card-to-pr script handlers");
+    }
+  } else {
+    console.log("[App] No GITHUB_TOKEN configured, card-to-pr script handlers not registered");
   }
 
   // 5. Setup engine
