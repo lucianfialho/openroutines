@@ -94,6 +94,45 @@ pipeline:
     expect(() => parseRoutine("id: test\ntriggers:\n  - type: webhook\npipeline:\n  skill: echo")).toThrow(RoutineParseError);
   });
 
+  it("should reject task_source trigger without sourceId", () => {
+    expect(() =>
+      parseRoutine("id: test\ntriggers:\n  - type: task_source\npipeline:\n  skill: echo")
+    ).toThrow(RoutineParseError);
+  });
+
+  it("should default task_source state to queued when omitted", () => {
+    const yaml = `
+id: test
+triggers:
+  - type: task_source
+    sourceId: trello-main
+pipeline:
+  skill: echo
+`;
+    const routine = parseRoutine(yaml);
+    expect(routine.triggers[0]).toEqual({ type: "task_source", sourceId: "trello-main", state: "queued" });
+  });
+
+  it("should accept task_source trigger with explicit state and labels", () => {
+    const yaml = `
+id: test
+triggers:
+  - type: task_source
+    sourceId: trello-main
+    state: backlog
+    labels: [bug, urgent]
+pipeline:
+  skill: echo
+`;
+    const routine = parseRoutine(yaml);
+    expect(routine.triggers[0]).toEqual({
+      type: "task_source",
+      sourceId: "trello-main",
+      state: "backlog",
+      labels: ["bug", "urgent"],
+    });
+  });
+
   it("should reject connector without name", () => {
     const yaml = `
 id: test

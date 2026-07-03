@@ -5,6 +5,7 @@
  */
 
 import { z } from "zod";
+import { TASK_STATES } from "../task-source/types.js";
 
 /** Basic cron validation: 5 fields (minute hour day month weekday) */
 const cronRegex = /^([\d*,/-]+)\s+([\d*,/-]+)\s+([\d*,/-]+)\s+([\d*,/-]+)\s+([\d*,/-]+)$/;
@@ -22,6 +23,12 @@ export const TriggerSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("api"),
+  }),
+  z.object({
+    type: z.literal("task_source"),
+    sourceId: z.string().min(1),
+    state: z.enum(TASK_STATES).default("queued"),
+    labels: z.array(z.string()).optional(),
   }),
 ]);
 

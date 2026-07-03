@@ -28,6 +28,16 @@ export const matchesTrigger = (
     return triggerDef.events.includes(eventName);
   }
 
+  if (triggerDef.type === "task_source") {
+    const payload = event.payload as { sourceId?: string; task?: { labels?: string[] } } | undefined;
+    if (payload?.sourceId !== triggerDef.sourceId) return false;
+    if (triggerDef.labels && triggerDef.labels.length > 0) {
+      const taskLabels = payload?.task?.labels ?? [];
+      return triggerDef.labels.every((label) => taskLabels.includes(label));
+    }
+    return true;
+  }
+
   return true;
 };
 
