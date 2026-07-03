@@ -22,6 +22,7 @@ export default [
         setImmediate: "readonly",
         crypto: "readonly",
         fetch: "readonly",
+        AbortSignal: "readonly",
         URL: "readonly",
         FormData: "readonly",
         Blob: "readonly",

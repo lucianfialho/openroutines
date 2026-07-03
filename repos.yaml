@@ -1,0 +1,28 @@
+# Repo registry — name -> clone path, base branch, verify commands.
+# Resolved per card/execution (never bound at process boot). See issue #148.
+repos:
+  openroutines:
+    clonePath: /home/openroutines/repos/openroutines
+    githubRepo: lucianfialho/openroutines
+    baseBranch: development
+    verify:
+      install: npm ci
+      build: npm run build
+      typecheck: npx tsc --noEmit
+      lint: npm run lint
+      test: npm test -- --run
+    compose: null
+    labels: [OpenRoutines]
+  detectwater:
+    clonePath: /home/openroutines/repos/detectwater.com.br
+    # TODO(bootstrap): preencher owner real do repo landing
+    githubRepo: PLACEHOLDER/detectwater.com.br
+    baseBranch: development
+    verify:
+      install: npm ci
+      build: npm run build
+      typecheck: npx tsc --noEmit
+      lint: npm run lint
+      test: echo "sem testes"
+    compose: null
+    labels: [OpenRoutines]

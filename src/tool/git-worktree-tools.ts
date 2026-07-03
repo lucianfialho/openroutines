@@ -56,6 +56,11 @@ export const makeGitWorktreeTools = (): Tool[] => [
             type: "string",
             description: "Branch name to create (e.g. 'feat/issue-123-validation')",
           },
+          repoPath: {
+            type: "string",
+            description:
+              "Origin repo clone path to create the worktree from (repos.yaml clonePath). Defaults to PROJECT_ROOT/cwd when omitted.",
+          },
         },
         required: ["branch"],
       },
@@ -65,6 +70,7 @@ export const makeGitWorktreeTools = (): Tool[] => [
       if (!isValidBranch(branch)) {
         return JSON.stringify({ error: `Invalid branch ref (must match ${BRANCH_RE}): ${branch}`, success: false });
       }
+      const repoRoot = args.repoPath ? resolve(String(args.repoPath)) : getProjectRoot();
       // Use a persistent directory for worktrees so they survive container restarts
       const worktreeBase = process.env.WORKTREE_BASE || tmpdir();
       const worktreePath = mkdtempSync(resolve(worktreeBase, "or-worktree-"));
@@ -73,20 +79,20 @@ export const makeGitWorktreeTools = (): Tool[] => [
         // Clean up existing branch/worktree with same name to avoid conflicts
         try {
           // Check if branch exists and delete it
-          await git(["branch", "-D", branch], getProjectRoot());
+          await git(["branch", "-D", branch], repoRoot);
         } catch {
           // Branch didn't exist, ignore
         }
         // Also check for any existing worktree with this branch and remove it
         try {
-          const { stdout: worktreeList } = await git(["worktree", "list", "--porcelain"], getProjectRoot());
+          const { stdout: worktreeList } = await git(["worktree", "list", "--porcelain"], repoRoot);
           const lines = worktreeList.split("\n");
           for (let i = 0; i < lines.length; i++) {
             if (lines[i].startsWith("worktree ")) {
               const wtPath = lines[i].replace("worktree ", "");
               const branchLine = lines[i + 2]; // branch <name> or detached
               if (branchLine && branchLine.includes(branch)) {
-                await git(["worktree", "remove", wtPath, "--force"], getProjectRoot());
+                await git(["worktree", "remove", wtPath, "--force"], repoRoot);
               }
             }
           }
@@ -95,7 +101,7 @@ export const makeGitWorktreeTools = (): Tool[] => [
         }
 
         // Create worktree from current HEAD (has latest local code)
-        await git(["worktree", "add", "-b", branch, worktreePath, "HEAD"], getProjectRoot());
+        await git(["worktree", "add", "-b", branch, worktreePath, "HEAD"], repoRoot);
 
         // Symlink node_modules so npm commands work in worktree
         // When PROJECT_ROOT is mounted (e.g. in Docker), node_modules lives
@@ -127,7 +133,7 @@ export const makeGitWorktreeTools = (): Tool[] => [
         });
       } catch (err: any) {
         // Cleanup on failure
-        try { rmSync(worktreePath, { recursive: true }); } catch {}
+        try { rmSync(worktreePath, { recursive: true }); } catch { /* best-effort cleanup */ }
         return JSON.stringify({
           error: err.message,
           stderr: err.stderr?.trim?.() || "",
@@ -167,7 +173,7 @@ export const makeGitWorktreeTools = (): Tool[] => [
         const forbiddenPatterns = [
           { pattern: /node_modules/, desc: "node_modules" },
           { pattern: /\.env/, desc: ".env file" },
-          { pattern: /\->\s/, desc: "symlink" },
+          { pattern: /->\s/, desc: "symlink" },
         ];
         const violations: string[] = [];
         for (const line of statusLines) {
@@ -224,6 +230,11 @@ export const makeGitWorktreeTools = (): Tool[] => [
             type: "string",
             description: "Branch name to delete",
           },
+          repoPath: {
+            type: "string",
+            description:
+              "Origin repo clone path the worktree belongs to (repos.yaml clonePath). Defaults to PROJECT_ROOT/cwd when omitted.",
+          },
         },
         required: ["cwd", "branch"],
       },
@@ -234,13 +245,14 @@ export const makeGitWorktreeTools = (): Tool[] => [
       if (!isValidBranch(branch)) {
         return JSON.stringify({ error: `Invalid branch ref (must match ${BRANCH_RE}): ${branch}` });
       }
+      const repoRoot = args.repoPath ? resolve(String(args.repoPath)) : getProjectRoot();
 
       try {
         // Remove worktree from git
-        await git(["worktree", "remove", cwd], getProjectRoot());
+        await git(["worktree", "remove", cwd], repoRoot);
 
         // Delete local branch
-        await git(["branch", "-D", branch], getProjectRoot());
+        await git(["branch", "-D", branch], repoRoot);
 
         return JSON.stringify({ removed: true, path: cwd, branch });
       } catch (err: any) {
