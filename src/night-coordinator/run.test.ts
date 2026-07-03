@@ -303,4 +303,29 @@ describe("runNightCycle", () => {
 
     expect(pool.hardStopQueried()).toBe(false);
   });
+
+  it("syncs each source's queued cards into `tasks` before claiming (closes the F2 poller gap)", async () => {
+    const pool = makeMockPool({ lockGranted: true });
+    const saved: Array<{ id: string }> = [];
+    const taskRepo = {
+      save: async (t: { id: string }) => void saved.push(t),
+      findByKey: async () => undefined,
+      findBySource: async () => [],
+    } as unknown as RunNightCycleDeps["taskRepo"];
+    const mkTask = (id: string) => ({ sourceId: "trello-main", id, state: "queued" });
+    const taskSource = {
+      listQueue: () => Effect.succeed([mkTask("c1"), mkTask("c2")]),
+    } as unknown as ReturnType<NonNullable<RunNightCycleDeps["taskSourceFor"]>>;
+
+    const deps = baseDeps(pool, {
+      sources: ["trello-main"],
+      taskSourceFor: () => taskSource,
+      taskRepo,
+    });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.cardsSynced).toBe(2);
+    expect(saved.map((t) => t.id)).toEqual(["c1", "c2"]);
+  });
 });

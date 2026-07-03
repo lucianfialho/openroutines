@@ -16,6 +16,7 @@
  * enforceHardStop later if the queue drains early in the window).
  */
 import { randomUUID } from "crypto";
+import { Effect } from "effect";
 import type { Pool } from "pg";
 import { acquireNightLock } from "./lock.js";
 import { claimReadyCards, type ClaimCandidate } from "./claim.js";
@@ -25,13 +26,15 @@ import { makeGitHubConnector } from "../connector/github.js";
 import { defaultRunGit } from "../pipeline/card-to-pr/index.js";
 import { cleanupZombieProcesses } from "../provider/process-cleanup.js";
 import type { RepoRegistry } from "../repo-registry/schema.js";
-import type { ExecutionRepository, ExecutionProcessRepository, PrLinkRepository } from "../persistence/types.js";
+import type { ExecutionRepository, ExecutionProcessRepository, PrLinkRepository, TaskRepository } from "../persistence/types.js";
+import type { TaskSource } from "../task-source/types.js";
 import type { JobQueue } from "../queue/types.js";
 
 export interface NightSummary {
   started: boolean;
   reason?: "locked";
   nightId?: string;
+  cardsSynced?: number;
   cardsClaimed?: number;
   cardsEnqueued?: number;
 }
@@ -50,6 +53,15 @@ export interface RunNightCycleDeps {
   nightPrCap: number;
   nightParallelism: number;
   tz: string;
+  /**
+   * Task sources to sync into `tasks` at cycle start (the ids from
+   * task-sources.yaml). Without this, `tasks` is never populated and the claim
+   * loop finds nothing — F2 left the poller runtime unwired, so the night-run
+   * ingests the queue itself.
+   */
+  sources?: string[];
+  taskSourceFor?: (sourceId: string) => TaskSource | undefined;
+  taskRepo?: TaskRepository;
   /** Injectable seams for tests; default to the real implementations. */
   runGit?: (args: string[], cwd: string) => Promise<{ stdout: string; stderr: string }>;
   makeGithub?: (cfg: { token: string; repo: string }) => ReturnType<typeof makeGitHubConnector>;
@@ -133,6 +145,34 @@ const insertPendingExecution = async (
   );
 };
 
+/**
+ * Ingest each source's queued cards into the `tasks` table so the claim loop has
+ * something to claim. Upsert by (source_id, task_id); a card already claimed by a
+ * prior night keeps its claimed_by_night_id (save doesn't touch that column), so
+ * re-syncing never re-opens a claimed card.
+ */
+const syncQueuedCards = async (deps: RunNightCycleDeps): Promise<number> => {
+  if (!deps.sources || !deps.taskSourceFor || !deps.taskRepo) return 0;
+  let synced = 0;
+  for (const sourceId of deps.sources) {
+    const ts = deps.taskSourceFor(sourceId);
+    if (!ts) continue;
+    try {
+      const tasks = await Effect.runPromise(ts.listQueue("queued"));
+      for (const task of tasks) {
+        await deps.taskRepo.save(task);
+        synced++;
+      }
+    } catch (err) {
+      console.error(
+        `[NightCoordinator] queue sync failed for source '${sourceId}':`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+  return synced;
+};
+
 export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSummary> => {
   const now = deps.now ?? (() => new Date());
   const generateId = deps.generateId ?? randomUUID;
@@ -146,18 +186,25 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
   }
   const { nightId } = lock;
 
-  // 2. Sync clones — best effort; one repo's fetch failure never blocks the night.
+  // 2. Sync clones + prune orphaned worktrees — best effort; one repo's failure
+  // never blocks the night. `git worktree prune` clears admin metadata for
+  // worktrees whose directory is gone (a crashed/cleaned prior run).
   const runGit = deps.runGit ?? defaultRunGit(deps.githubToken);
   for (const [slug, repoConfig] of Object.entries(deps.registry.repos)) {
     try {
       await runGit(["fetch"], repoConfig.clonePath);
+      await runGit(["worktree", "prune"], repoConfig.clonePath);
     } catch (err) {
-      console.error(`[NightCoordinator] git fetch failed for '${slug}':`, err instanceof Error ? err.message : err);
+      console.error(`[NightCoordinator] sync/prune failed for '${slug}':`, err instanceof Error ? err.message : err);
     }
   }
 
   // 3. Reap zombie CLI processes left by a previous, now-dead orchestrator run.
   await cleanupZombieProcesses(deps.executionProcessRepo);
+
+  // 3b. Ingest the sources' queued cards into `tasks` so the claim loop below
+  // has rows to claim (F2's poller runtime is unwired — the night-run syncs).
+  const cardsSynced = await syncQueuedCards(deps);
 
   // 4. Baseline pre-warm: OPTIONAL for this wave, skipped by choice. Each
   // card's preparacao computes its repo's baseline lazily and idempotently
@@ -263,5 +310,5 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
     });
   }
 
-  return { started: true, nightId, cardsClaimed, cardsEnqueued };
+  return { started: true, nightId, cardsSynced, cardsClaimed, cardsEnqueued };
 };

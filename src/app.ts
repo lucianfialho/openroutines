@@ -57,6 +57,7 @@ import { makeInMemoryActionLedgerRepository } from "./persistence/action-ledger-
 import { makePostgresActionLedgerRepository } from "./persistence/action-ledger-postgres.js";
 import { makeInMemoryPrLinkRepository } from "./persistence/pr-links-in-memory.js";
 import { makePostgresPrLinkRepository } from "./persistence/pr-links-postgres.js";
+import { makePostgresTaskRepository } from "./persistence/task-postgres.js";
 import { loadTaskSources, type ResolvedTaskSource } from "./task-source/loader.js";
 import { makeTrelloTaskSource } from "./connector/trello.js";
 import { makeRestTaskSource } from "./task-source/rest-executor.js";
@@ -353,6 +354,9 @@ export const createApp = async (config: AppConfig) => {
   let repoRegistry: import("./repo-registry/schema.js").RepoRegistry | undefined;
   let cardToPrSkill: SkillStateMachine | undefined;
   let cardToPrStateMachineConfig: StateMachineConfig | undefined;
+  // Hoisted so the night-coordinator (which syncs these sources' queues into
+  // `tasks`) can reuse the same live TaskSource instances built below.
+  let cardTaskSources: Map<string, TaskSource> | undefined;
 
   if (config.githubToken) {
     // git_commit is commit-only (no push — D13, the orchestrator owns the
@@ -386,10 +390,10 @@ export const createApp = async (config: AppConfig) => {
         );
       }
 
-      const taskSources = new Map<string, TaskSource>();
+      cardTaskSources = new Map<string, TaskSource>();
       for (const resolved of resolvedSources) {
         try {
-          taskSources.set(resolved.entry.id, buildTaskSource(resolved));
+          cardTaskSources.set(resolved.entry.id, buildTaskSource(resolved));
         } catch (err) {
           console.warn(`[App] Skipping task source '${resolved.entry.id}':`, err instanceof Error ? err.message : err);
         }
@@ -402,7 +406,7 @@ export const createApp = async (config: AppConfig) => {
         worktreeBase: process.env.WORKTREE_BASE ?? "/tmp/or-worktrees",
         ledger: pgPool ? makePostgresActionLedgerRepository(pgPool) : makeInMemoryActionLedgerRepository(),
         prLinks,
-        taskSourceFor: (sourceId) => taskSources.get(sourceId),
+        taskSourceFor: (sourceId) => cardTaskSources?.get(sourceId),
       });
       console.log("[App] Registered card-to-pr script handlers");
 
@@ -595,6 +599,11 @@ export const createApp = async (config: AppConfig) => {
       nightPrCap,
       nightParallelism,
       tz: nightTz,
+      // Ingest these sources' queued cards into `tasks` at cycle start (F2's
+      // poller runtime is unwired) so the claim loop has rows to claim.
+      sources: cardTaskSources ? [...cardTaskSources.keys()] : [],
+      taskSourceFor: (id) => cardTaskSources?.get(id),
+      taskRepo: makePostgresTaskRepository(pgPool),
     };
     console.log("[App] Night coordinator wired (POST /trigger/night-run, cron 0 1 * * *)");
   } else {
