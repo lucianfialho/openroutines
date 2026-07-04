@@ -397,6 +397,36 @@ describe("proposeWeeklyCards — CVE wave (AC: critical severity)", () => {
   });
 });
 
+// --- Weekly cap resolved from policy.yaml (D32, closes #164 pt7 / #168 knob consumption) ---
+
+describe("proposeWeeklyCards — weekly cap from policy.yaml (D32)", () => {
+  it("with deps.maxWeeklyCards absent, the cap is read from this repo's real policy.yaml (day.max_auto_proposed_cards_per_week=3): 4 qualifying repos yield only 3 cards", async () => {
+    const registry = makeRegistry({
+      "repo-1": makeRepoConfig({ clonePath: "/repos/repo-1" }),
+      "repo-2": makeRepoConfig({ clonePath: "/repos/repo-2" }),
+      "repo-3": makeRepoConfig({ clonePath: "/repos/repo-3" }),
+      "repo-4": makeRepoConfig({ clonePath: "/repos/repo-4" }),
+    });
+    const { createCard } = makeFakeCreateCard();
+
+    const created = await proposeWeeklyCards({
+      registry,
+      createCard,
+      findExistingFingerprints: makeFakeDedupe().findExistingFingerprints,
+      // Every repo has exactly 1 qualifying minor/patch update -> 4 independent
+      // candidates, none of them capped by MAX_DEBT_CARDS_PER_ROUND (that cap
+      // only applies to the debt-aggregation wave) — the ONLY thing that can
+      // cut 4 down to 3 here is the weekly cap itself.
+      checkOutdated: async () => [{ name: "pkg-a", current: "1.0.0", latest: "1.0.1" }],
+      checkCriticalVulnerabilities: noCritical,
+      fetchChangelog: async () => undefined,
+      // maxWeeklyCards deliberately omitted -> must resolve from policy.yaml
+    });
+
+    expect(created).toHaveLength(3);
+  });
+});
+
 // --- Invariant: no general-debt/dep card ever leaves Backlog by default ---
 
 describe("proposeWeeklyCards — Backlog invariant (D26)", () => {

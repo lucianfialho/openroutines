@@ -225,10 +225,14 @@ export const runWeeklyCalibration = async (
     for (const s of steering) corpus.push({ repo: "", kind: "steering", content: s.text });
   }
 
-  // 2. Kimi clusters -> keep only repeated patterns (>= 2); an isolated correction
-  // never becomes a rule. Skip the call on an empty week (expiry below still runs).
+  // 2. Kimi clusters -> keep only repeated patterns (>= 2) that also carry real
+  // provenance (D27: provenance is mandatory, never "—") — an isolated
+  // correction, or one Kimi couldn't source, never becomes a rule. Skip the
+  // call on an empty week (expiry below still runs).
   const { clusters } = corpus.length > 0 ? await deps.cluster(corpus) : { clusters: [] };
-  const repeated = clusters.filter((c) => c.occurrences >= 2);
+  const hasProvenance = (c: FeedbackCluster): boolean =>
+    Array.isArray(c.provenance) && c.provenance.some((p) => p.trim().length > 0);
+  const repeated = clusters.filter((c) => c.occurrences >= 2 && hasProvenance(c));
 
   // 3. D32: a rule naming an out-of-bound operational knob is rejected before any PR.
   const withinBounds = repeated.filter(

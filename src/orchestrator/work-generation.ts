@@ -51,6 +51,7 @@ import { createHash } from "crypto";
 import type { Pool } from "pg";
 import type { RepoConfig, RepoRegistry } from "../repo-registry/schema.js";
 import type { CreateCardInput, CreateCardResult, TrelloAuthConfig } from "../connector/trello.js";
+import { loadPolicy } from "../config/policy.js";
 import { sendTelegramAlert } from "../notify/telegram.js";
 import { defaultExec, type ExecRunner } from "../verify/sast.js";
 
@@ -68,8 +69,6 @@ const RESEARCH_LABEL = "OpenRoutines: Pesquisa";
 
 /** "Máximo 3 cards de dívida geral por rodada" (D26) — a fixed number, unlike the weekly cap. */
 const MAX_DEBT_CARDS_PER_ROUND = 3;
-/** Fallback until policy.yaml (D32) lands; migrate MAX_AUTO_PROPOSED_CARDS_PER_WEEK there when it does. */
-const DEFAULT_MAX_WEEKLY_CARDS = 10;
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 const SIGNAL_THRESHOLDS = {
@@ -521,7 +520,7 @@ export interface ProposeWeeklyCardsDeps {
   /** Telegram alert seam (D22) — defaults to the real sender; tests inject a mock. */
   sendAlert?: (text: string) => Promise<void>;
   now?: () => Date;
-  /** Fallback until policy.yaml (D32) exists — env MAX_AUTO_PROPOSED_CARDS_PER_WEEK, or DEFAULT_MAX_WEEKLY_CARDS. */
+  /** Overrides the weekly cap for tests. Absent -> resolved from policy.yaml's day.max_auto_proposed_cards_per_week (D32, same POLICY_PATH as app.ts). */
   maxWeeklyCards?: number;
   /** Env AUTO_QUEUE_SECURITY_PATCHES === "true" by default — false means every CVE card lands in Backlog like everything else. */
   autoQueueSecurityPatches?: boolean;
@@ -531,7 +530,7 @@ export const proposeWeeklyCards = async (deps: ProposeWeeklyCardsDeps): Promise<
   const now = deps.now ?? (() => new Date());
   const since = new Date(now().getTime() - SEVEN_DAYS_MS);
   const maxWeeklyCards =
-    deps.maxWeeklyCards ?? (parseInt(process.env.MAX_AUTO_PROPOSED_CARDS_PER_WEEK ?? "", 10) || DEFAULT_MAX_WEEKLY_CARDS);
+    deps.maxWeeklyCards ?? loadPolicy(process.env.POLICY_PATH ?? "policy.yaml").day.max_auto_proposed_cards_per_week;
   const autoQueueSecurity = deps.autoQueueSecurityPatches ?? process.env.AUTO_QUEUE_SECURITY_PATCHES === "true";
   const sendAlert = deps.sendAlert ?? sendTelegramAlert;
   const checkOutdatedFn = deps.checkOutdated ?? checkOutdated;

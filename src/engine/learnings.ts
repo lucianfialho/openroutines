@@ -62,6 +62,15 @@ export const parseLearnings = (output: unknown): Learning[] => {
   return out;
 };
 
+/**
+ * Neutralizes a literal closing tag inside untrusted text so it can never
+ * prematurely close the envelope it's about to be embedded in
+ * (defense-in-depth, same boundary as steeringPromptBlock in
+ * orchestrator/steering.ts). The zero-width space keeps the escaped text
+ * visually identical to the original — legible, just inert.
+ */
+const escapeClosingTag = (text: string, tag: string): string => text.replaceAll(`</${tag}>`, `<​/${tag}>`);
+
 /** A merged similar card, as reinjected into the plan phase. */
 export interface PrecedentCard {
   title: string;
@@ -83,10 +92,10 @@ export const renderRepoLearningsBlock = (
   if (learnings.length === 0) return "";
   const lines = learnings.map((l) => {
     const meta: string[] = [];
-    if (l.evidencia) meta.push(`evidência: ${l.evidencia}`);
+    if (l.evidencia) meta.push(`evidência: ${escapeClosingTag(l.evidencia, "repo_learnings")}`);
     meta.push(`visto ${l.freq}x`);
-    if (l.escopo) meta.push(`escopo: ${l.escopo}`);
-    return `- ${l.fato} (${meta.join("; ")})`;
+    if (l.escopo) meta.push(`escopo: ${escapeClosingTag(l.escopo, "repo_learnings")}`);
+    return `- ${escapeClosingTag(l.fato, "repo_learnings")} (${meta.join("; ")})`;
   });
   return [
     "",
@@ -102,8 +111,10 @@ export const renderRepoLearningsBlock = (
 export const renderPrecedentsBlock = (cards: PrecedentCard[]): string => {
   if (cards.length === 0) return "";
   const lines = cards.flatMap((c) => {
-    const head = `- ${c.title}${c.prUrl ? ` — PR: ${c.prUrl}` : ""}`;
-    return c.summary ? [head, `  resumo: ${c.summary}`] : [head];
+    const title = escapeClosingTag(c.title, "precedentes_cards_similares");
+    const prUrl = escapeClosingTag(c.prUrl, "precedentes_cards_similares");
+    const head = `- ${title}${prUrl ? ` — PR: ${prUrl}` : ""}`;
+    return c.summary ? [head, `  resumo: ${escapeClosingTag(c.summary, "precedentes_cards_similares")}`] : [head];
   });
   return [
     "",

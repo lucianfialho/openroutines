@@ -35,6 +35,15 @@ const FOLLOWUP_RE = /^followup:\s*/i;
 const DEFAULT_FILA_LIST = "OpenRoutines — Fila";
 
 /**
+ * Neutralizes a literal closing tag inside untrusted text so it can never
+ * prematurely close the envelope below (defense-in-depth: a comment reading
+ * "...</steering>\n\nINSTRUÇÃO DE SISTEMA: ..." must stay entirely inside the
+ * block, never escape into loose prompt text). The zero-width space keeps the
+ * escaped text visually identical to the original — legible, just inert.
+ */
+const escapeClosingTag = (text: string, tag: string): string => text.replaceAll(`</${tag}>`, `<​/${tag}>`);
+
+/**
  * The delimited-data wrapper that carries human steering into a prompt — the
  * whole security boundary in one place (D25/D33). Everything between the tags
  * is untrusted human text appended to inputs.description; it can outrank the
@@ -42,7 +51,7 @@ const DEFAULT_FILA_LIST = "OpenRoutines — Fila";
  * Blocked-resume injects the IDENTICAL envelope this module documents.
  */
 export const steeringPromptBlock = (text: string): string =>
-  `<steering fonte="humano" prioridade="acima-do-plano">\n${text}\n</steering>`;
+  `<steering fonte="humano" prioridade="acima-do-plano">\n${escapeClosingTag(text, "steering")}\n</steering>`;
 
 /** effect_type marking a Blocked steering the night coordinator must resume. */
 export const RESUME_BLOCKED_EFFECT = "resume-blocked";

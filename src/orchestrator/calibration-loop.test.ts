@@ -21,6 +21,7 @@ const cluster = (over: Partial<FeedbackCluster>): FeedbackCluster => ({
   examples: [{ before: "a", after: "b" }],
   scope: "global",
   proposedRule: "regra",
+  provenance: ["https://github.com/org/repo/pull/1"],
   ...over,
 });
 
@@ -178,6 +179,26 @@ describe("runWeeklyCalibration (F5 #165, D27)", () => {
     expect(bullets.some((b) => b.includes("unknown knob"))).toBe(false);
     // learned rules only ever edit docs — the plan can never target policy.yaml
     for (const e of h.capturedPlan()!.entries) expect(["claude-md", "repo-profile"]).toContain(e.target);
+  });
+
+  it("D27: a cluster with occurrences>=2 but no real provenance is dropped before the PR; one with real provenance survives", async () => {
+    const h = await makeHarness({
+      clusters: [
+        cluster({ occurrences: 3, proposedRule: "regra-sem-provenance", provenance: undefined }),
+        cluster({ occurrences: 2, proposedRule: "regra-provenance-vazia", provenance: [] }),
+        cluster({ occurrences: 2, proposedRule: "regra-provenance-so-espacos", provenance: ["", "   "] }),
+        cluster({ occurrences: 2, proposedRule: "regra-com-provenance", provenance: ["https://github.com/org/repo/pull/7"] }),
+      ],
+    });
+
+    const result = await runWeeklyCalibration(h.deps);
+
+    expect(result.rulesProposed).toBe(1);
+    const bullets = addBullets(h.capturedPlan()!).map((e) => e.bullet);
+    expect(bullets.some((b) => b.includes("regra-com-provenance"))).toBe(true);
+    expect(bullets.some((b) => b.includes("regra-sem-provenance"))).toBe(false);
+    expect(bullets.some((b) => b.includes("regra-provenance-vazia"))).toBe(false);
+    expect(bullets.some((b) => b.includes("regra-provenance-so-espacos"))).toBe(false);
   });
 
   it("8-week expiry: a stale, un-re-seen rule becomes a removal in the same PR; a fresh or re-seen rule is kept", async () => {
