@@ -59,12 +59,12 @@ import { makeInMemoryPrLinkRepository } from "./persistence/pr-links-in-memory.j
 import { makePostgresPrLinkRepository } from "./persistence/pr-links-postgres.js";
 import { makePostgresTaskRepository } from "./persistence/task-postgres.js";
 import { loadTaskSources, type ResolvedTaskSource } from "./task-source/loader.js";
-import { makeTrelloTaskSource } from "./connector/trello.js";
+import { makeTrelloTaskSource, makeTrelloCreateCard } from "./connector/trello.js";
 import { makeRestTaskSource } from "./task-source/rest-executor.js";
 import type { TaskSource, TaskComplexity } from "./task-source/types.js";
 import { registerCardToPrHandlers, cardToPrFanoutAggregators } from "./pipeline/card-to-pr/index.js";
 import { resolveCardToPrProvider, resolveImplementationTier, resolveEscalatedProvider } from "./pipeline/card-to-pr/routing.js";
-import { registerMorningReportHandlers, makeTrelloCreateCard, MORNING_REPORT_TRELLO_LIST } from "./pipeline/morning-report/index.js";
+import { registerMorningReportHandlers, MORNING_REPORT_TRELLO_LIST } from "./pipeline/morning-report/index.js";
 import { runStateMachine, type StateMachineConfig, type StateMachineContext, type DynamicProviderContext } from "./engine/state-machine.js";
 import { recordTierOutcome, type Tier } from "./engine/circuit-breaker.js";
 import type { SkillStateMachine } from "./skill/schema.js";
@@ -675,12 +675,22 @@ export const createApp = async (config: AppConfig) => {
         const trelloBoardId = trelloEntry?.entry.containers.board;
         const trelloApiKey = trelloEntry?.entry.auth.key ? process.env[trelloEntry.entry.auth.key] : undefined;
         const trelloApiToken = trelloEntry?.entry.auth.token ? process.env[trelloEntry.entry.auth.token] : undefined;
-        const createCard =
+        // makeTrelloCreateCard (connector/trello.ts) creates in an arbitrary
+        // list and returns {cardId,url}; morning-report only ever wants
+        // MORNING_REPORT_TRELLO_LIST and its deps.createCard predates that
+        // general shape, so adapt here rather than changing MorningReportDeps.
+        const trelloCreateCard =
           trelloBoardId && trelloApiKey && trelloApiToken
-            ? makeTrelloCreateCard({ boardId: trelloBoardId, listName: MORNING_REPORT_TRELLO_LIST, apiKey: trelloApiKey, apiToken: trelloApiToken })
-            : async () => {
-                throw new Error("morning-report: no Trello source configured (need a 'trello' entry in task-sources.yaml)");
-              };
+            ? makeTrelloCreateCard({ boardId: trelloBoardId, apiKey: trelloApiKey, apiToken: trelloApiToken })
+            : undefined;
+        const createCard = trelloCreateCard
+          ? async (title: string) => {
+              const { cardId, url } = await trelloCreateCard({ listName: MORNING_REPORT_TRELLO_LIST, title });
+              return { id: cardId, url };
+            }
+          : async () => {
+              throw new Error("morning-report: no Trello source configured (need a 'trello' entry in task-sources.yaml)");
+            };
         registerMorningReportHandlers(scriptRegistry, {
           pool: pgPool,
           tz: nightTz,

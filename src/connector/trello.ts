@@ -427,3 +427,108 @@ export const makeTrelloTaskSource = (config: TrelloConfig): TaskSource => {
 
   return { listQueue, getTask, comment, attachArtifact, moveTo, setClassification, watchNew };
 };
+
+/**
+ * Standalone card-creation / cross-linking primitives (F5 #163/#164/#169).
+ * Unlike makeTrelloTaskSource's methods (Effect-based, act on an EXISTING
+ * card), these mint brand-new cards and cross-reference cards — capabilities
+ * issue #142's original TaskSource contract never covered. Kept as raw
+ * Promise-returning exports rather than new TaskSource methods: growing the
+ * shared interface (task-source/types.ts) would ripple into every other
+ * connector (github.ts) for a Trello-only capability, so this is the
+ * "export avulso" a shared-interface change would otherwise require.
+ * Previously lived ad hoc in pipeline/morning-report/index.ts (title-only,
+ * fixed list) — generalized here to the one createCard every F5 call site
+ * (auto-proposed Backlog cards, Mapping cards, followup cards) shares.
+ */
+
+export interface TrelloAuthConfig {
+  apiKey: string;
+  apiToken: string;
+}
+
+export interface TrelloCreateCardConfig extends TrelloAuthConfig {
+  boardId: string;
+}
+
+export interface CreateCardInput {
+  listName: string; // real Trello list name (e.g. "Backlog", "OpenRoutines — Fila") — caller's choice, not a canonical TaskState
+  title: string;
+  description?: string;
+  labels?: string[]; // label names already on the board; a name not found there is dropped, not fatal (card creation still succeeds)
+}
+
+export interface CreateCardResult {
+  cardId: string;
+  url: string;
+}
+
+export const makeTrelloCreateCard =
+  (cfg: TrelloCreateCardConfig) =>
+  async (input: CreateCardInput): Promise<CreateCardResult> => {
+    const auth = `key=${encodeURIComponent(cfg.apiKey)}&token=${encodeURIComponent(cfg.apiToken)}`;
+    const listsRes = await fetch(
+      `https://api.trello.com/1/boards/${encodeURIComponent(cfg.boardId)}/lists?filter=open&fields=id,name&${auth}`
+    );
+    if (!listsRes.ok) throw new Error(`trello: failed to resolve lists (${listsRes.status})`);
+    const lists = (await listsRes.json()) as Array<{ id: string; name: string }>;
+    const list = lists.find((l) => l.name === input.listName);
+    if (!list) throw new Error(`trello: list '${input.listName}' not found on board ${cfg.boardId}`);
+
+    let idLabels = "";
+    if (input.labels?.length) {
+      const labelsRes = await fetch(
+        `https://api.trello.com/1/boards/${encodeURIComponent(cfg.boardId)}/labels?filter=open&fields=id,name&${auth}`
+      );
+      if (!labelsRes.ok) throw new Error(`trello: failed to resolve labels (${labelsRes.status})`);
+      const boardLabels = (await labelsRes.json()) as Array<{ id: string; name: string }>;
+      idLabels = input.labels
+        .map((name) => boardLabels.find((l) => l.name === name)?.id)
+        .filter((id): id is string => id !== undefined)
+        .join(",");
+    }
+
+    const params = [
+      `idList=${encodeURIComponent(list.id)}`,
+      `name=${encodeURIComponent(input.title)}`,
+      input.description ? `desc=${encodeURIComponent(input.description)}` : "",
+      idLabels ? `idLabels=${encodeURIComponent(idLabels)}` : "",
+      auth,
+    ]
+      .filter(Boolean)
+      .join("&");
+
+    const cardRes = await fetch(`https://api.trello.com/1/cards?${params}`, { method: "POST" });
+    if (!cardRes.ok) throw new Error(`trello: failed to create card (${cardRes.status})`);
+    const card = (await cardRes.json()) as { id: string; shortUrl: string };
+    return { cardId: card.id, url: card.shortUrl };
+  };
+
+export interface LinkedCard {
+  id: string;
+  url: string;
+}
+
+/**
+ * Bidirectional cross-reference between two cards (#163/#169: a Blocked card
+ * <-> the Mapping card raised for it; a Done/report-triggered followup card
+ * <-> its parent) — attaches each card's URL onto the other. Trello's
+ * attachment endpoint accepts a plain `url` for a link-type attachment (a
+ * lighter sibling of attachArtifact's file/Blob upload, which the TaskSource
+ * contract already covers); Trello renders it with its own link preview, no
+ * file involved.
+ */
+export const makeTrelloLinkCards =
+  (cfg: TrelloAuthConfig) =>
+  async (a: LinkedCard, b: LinkedCard): Promise<void> => {
+    const auth = `key=${encodeURIComponent(cfg.apiKey)}&token=${encodeURIComponent(cfg.apiToken)}`;
+    const attach = async (cardId: string, url: string): Promise<void> => {
+      const res = await fetch(
+        `https://api.trello.com/1/cards/${encodeURIComponent(cardId)}/attachments?url=${encodeURIComponent(url)}&${auth}`,
+        { method: "POST" }
+      );
+      if (!res.ok) throw new Error(`trello: failed to attach link on card ${cardId} (${res.status})`);
+    };
+    await attach(a.id, b.url);
+    await attach(b.id, a.url);
+  };

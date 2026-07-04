@@ -20,39 +20,15 @@ import { dateInTz } from "../../night-coordinator/run.js";
 import { gatherMorningReportData, renderMorningReportCard, MORNING_REPORT_PREFIX, type MorningReportData } from "../../report/morning-report.js";
 
 /**
- * TaskSource (src/task-source/types.ts) manages EXISTING cards only
- * (listQueue/comment/moveTo/...) — there is no createCard primitive, and the
- * report needs exactly one brand-new card a day, so this is a single raw
- * Trello POST rather than a new TaskSource capability. Resolves the target
- * list by name (one GET), same shape as trello.ts's own list lookup.
+ * createCard now lives in connector/trello.ts (makeTrelloCreateCard,
+ * generalized for F5 #163/#164/#169: arbitrary list, description, labels —
+ * see that module's docstring). app.ts adapts it to the narrower
+ * `(title) => Promise<{id,url}>` shape MorningReportDeps.createCard below
+ * still declares, so nothing here changes behavior.
  */
-export interface TrelloCreateCardConfig {
-  boardId: string;
-  listName: string;
-  apiKey: string;
-  apiToken: string;
-}
 
 /** ponytail: reuses the existing "Done" column; a dedicated report list isn't worth new connector.yaml surface today. */
 export const MORNING_REPORT_TRELLO_LIST = "Done";
-
-export const makeTrelloCreateCard =
-  (cfg: TrelloCreateCardConfig) =>
-  async (title: string): Promise<{ id: string; url: string }> => {
-    const auth = `key=${encodeURIComponent(cfg.apiKey)}&token=${encodeURIComponent(cfg.apiToken)}`;
-    const listsRes = await fetch(`https://api.trello.com/1/boards/${encodeURIComponent(cfg.boardId)}/lists?filter=open&fields=id,name&${auth}`);
-    if (!listsRes.ok) throw new Error(`morning-report: failed to resolve Trello lists (${listsRes.status})`);
-    const lists = (await listsRes.json()) as Array<{ id: string; name: string }>;
-    const list = lists.find((l) => l.name === cfg.listName);
-    if (!list) throw new Error(`morning-report: Trello list '${cfg.listName}' not found on board ${cfg.boardId}`);
-    const cardRes = await fetch(
-      `https://api.trello.com/1/cards?idList=${encodeURIComponent(list.id)}&name=${encodeURIComponent(title)}&${auth}`,
-      { method: "POST" }
-    );
-    if (!cardRes.ok) throw new Error(`morning-report: failed to create Trello card (${cardRes.status})`);
-    const card = (await cardRes.json()) as { id: string; shortUrl: string };
-    return { id: card.id, url: card.shortUrl };
-  };
 
 export interface MorningReportDeps {
   pool: Pool;
