@@ -9,29 +9,29 @@ description: >
   interceptação especial no queueHandler (ao contrário de night-run/
   night-hard-stop, que orquestram efeitos que não cabem num skill declarativo).
 
-initial_state: coletar_dados
+initial_state: collect_data
 
 states:
-  coletar_dados:
+  collect_data:
     description: Resolve o night_runs de hoje e reúne os dados da noite (gatherMorningReportData).
     type: script
-    script: morning-report-coletar-dados
+    script: morning-report-collect-data
     transitions:
-      - { to: montar_relatorio }
+      - { to: build_report }
 
-  montar_relatorio:
+  build_report:
     description: Monta {title, body} na ordem exata do relatório (renderMorningReportCard).
     type: script
-    script: morning-report-montar-relatorio
+    script: morning-report-build-report
     transitions:
-      - { to: publicar_card }
+      - { to: publish_card }
 
-  publicar_card:
+  publish_card:
     description: >
       Cria (uma vez por night_runs, guardado por report_card_id) ou reaproveita
       o card do dia e publica o corpo como comentário 📊 [Relatório].
     type: script
-    script: morning-report-publicar-card
+    script: morning-report-publish-card
     transitions:
       - { to: done }
 

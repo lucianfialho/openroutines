@@ -413,7 +413,7 @@ describe("security-judge — adjudication mode", () => {
 
 // --- real lens template (H1/H2 — the parsers must consume the real render) ---------
 
-const LENS_TEMPLATE = readFileSync(".gates/skills/card-to-pr/prompts/revisao-seguranca.md", "utf-8");
+const LENS_TEMPLATE = readFileSync(".gates/skills/card-to-pr/prompts/review-security.md", "utf-8");
 
 /** Realistic verify output (src/pipeline/card-to-pr/verify.ts shape). */
 const realVerify = (changedFiles: string[]): Record<string, unknown> => ({
@@ -430,13 +430,13 @@ const renderLensPrompt = (outputs: Record<string, unknown>): string =>
   renderTemplate(LENS_TEMPLATE, {
     inputs: { title: "Adicionar filtro de busca", description: "Filtro por status na listagem" },
     outputs: {
-      plano: { summary: "Adicionar filtro", files: ["src/list.ts"] },
-      implementacao: { openDecisions: [] },
+      plan: { summary: "Adicionar filtro", files: ["src/list.ts"] },
+      implementation: { openDecisions: [] },
       ...outputs,
     },
   });
 
-describe("security-judge — real revisao-seguranca.md render", () => {
+describe("security-judge — real review-security.md render", () => {
   it("parses changedFiles from the real render: src/auth/* marks the area critical and spawns the second judge (H1)", async () => {
     const calls: RecordedCall[] = [];
     const { run } = makeJudge(() => round1([]), calls);
@@ -454,12 +454,12 @@ describe("security-judge — real revisao-seguranca.md render", () => {
 
     expect(verdict.criticalArea).toBe(false);
     expect(verdict.secondJudge).toBeUndefined();
-    // Round 1 (unreplaced refutacao/revisao placeholders) is normal mode.
+    // Round 1 (unreplaced refutation/review placeholders) is normal mode.
     expect(calls.filter(isRound1)).toHaveLength(1);
     expect(calls.filter(isAdjudication)).toHaveLength(0);
   });
 
-  it("batch-contested render ({{outputs.refutacao}} + {{outputs.revisao.gaps}}) enters adjudication with the adjudication system prompt (H2)", async () => {
+  it("batch-contested render ({{outputs.refutation}} + {{outputs.review.gaps}}) enters adjudication with the adjudication system prompt (H2)", async () => {
     const calls: RecordedCall[] = [];
     const { run } = makeJudge(
       () => JSON.stringify({ decision: "adjudicado-libera", reasoning: "evidência procede" }),
@@ -468,12 +468,12 @@ describe("security-judge — real revisao-seguranca.md render", () => {
     const verdict = await run(
       renderLensPrompt({
         verify: realVerify(["src/db/query.ts"]),
-        refutacao: {
+        refutation: {
           status: "contestado",
           evidencia: "EVIDENCIA_MARKER: input sanitizado em src/db/sanitize.ts linha 4",
           correcoes: [],
         },
-        revisao: {
+        review: {
           approved: true,
           gaps: [
             { lens: "security", description: "SQL injection via card title", file: "src/db/query.ts", line: 12, contestable: true },
@@ -502,8 +502,8 @@ describe("security-judge — real revisao-seguranca.md render", () => {
     await run(
       renderLensPrompt({
         verify: realVerify(["src/db/query.ts"]),
-        refutacao: { status: "corrigir", correcoes: ["escapar input"] },
-        revisao: {
+        refutation: { status: "corrigir", correcoes: ["escapar input"] },
+        review: {
           approved: true,
           gaps: [{ lens: "security", description: "SQL injection via card title", contestable: true }],
           securityVerdict: null,

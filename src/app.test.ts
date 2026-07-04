@@ -162,7 +162,7 @@ describe("createApp — legacy tool gating", () => {
 
 describe("resolveCardToPrDynamicProvider — H9c", () => {
   const baseCtx = (overrides: Partial<DynamicProviderContext> = {}): DynamicProviderContext => ({
-    stateId: "implementacao",
+    stateId: "implementation",
     state: {} as DynamicProviderContext["state"],
     inputs: {},
     outputs: {},
@@ -201,8 +201,8 @@ describe("resolveCardToPrDynamicProvider — H9c", () => {
     expect(route).toBeUndefined();
   });
 
-  it("a non-routed state (e.g. plano) is untouched by payload.tier", () => {
-    const route = resolveCardToPrDynamicProvider(baseCtx({ stateId: "plano", inputs: { tier: "opus" } }));
+  it("a non-routed state (e.g. plan) is untouched by payload.tier", () => {
+    const route = resolveCardToPrDynamicProvider(baseCtx({ stateId: "plan", inputs: { tier: "opus" } }));
     expect(route).toBeUndefined();
   });
 });
@@ -411,10 +411,10 @@ describe("runCardExecutionJob", () => {
   });
 
   describe("H9b: a pre-LLM script block never charges the tier", () => {
-    it("blockReason 'sem-branch-protection' (preparacao) skips recordTierOutcome entirely", async () => {
+    it("blockReason 'no-branch-protection' (preparation) skips recordTierOutcome entirely", async () => {
       const { deps } = makeDeps();
       await seedExecution(deps.persistence, "exec-1", {
-        stateMachineContext: { outputs: { bloqueado: { blockReason: "sem-branch-protection" } } },
+        stateMachineContext: { outputs: { blocked: { blockReason: "no-branch-protection" } } },
       });
       const job = {
         trigger: {
@@ -430,10 +430,10 @@ describe("runCardExecutionJob", () => {
       expect(pool.queries.some((q) => q.sql.includes("tier_circuit_state"))).toBe(false);
     });
 
-    it("blockReason 'orcamento' (budget denial) skips recordTierOutcome entirely", async () => {
+    it("blockReason 'budget' (budget denial) skips recordTierOutcome entirely", async () => {
       const { deps } = makeDeps();
       await seedExecution(deps.persistence, "exec-1", {
-        stateMachineContext: { outputs: { bloqueado: { blockReason: "orcamento" } } },
+        stateMachineContext: { outputs: { blocked: { blockReason: "budget" } } },
       });
       const job = {
         trigger: {
@@ -449,10 +449,10 @@ describe("runCardExecutionJob", () => {
       expect(pool.queries.some((q) => q.sql.includes("tier_circuit_state"))).toBe(false);
     });
 
-    it("a block reached AFTER the tier ran (e.g. verify-falhou) still charges the tier normally", async () => {
+    it("a block reached AFTER the tier ran (e.g. verify-failed) still charges the tier normally", async () => {
       const { deps } = makeDeps();
       await seedExecution(deps.persistence, "exec-1", {
-        stateMachineContext: { outputs: { bloqueado: { blockReason: "verify-falhou" } } },
+        stateMachineContext: { outputs: { blocked: { blockReason: "verify-failed" } } },
       });
       const job = {
         trigger: {

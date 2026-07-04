@@ -24,13 +24,13 @@ import {
   type RiskyHunk,
 } from "../../report/risk-score.js";
 import { defaultRunGit, type CardToPrDeps } from "./index.js";
-import type { PreparacaoOutput } from "./preparacao.js";
-import type { ReworkPreparacaoOutput } from "./rework.js";
+import type { PreparationOutput } from "./preparation.js";
+import type { ReworkPreparationOutput } from "./rework.js";
 import type { VerifyOutput } from "./verify.js";
 import type { VisualOutput } from "./visual.js";
 import type { ScriptContext } from "../../script/registry.js";
 
-interface PlanoOutput {
+interface PlanOutput {
   summary?: string;
   testStrategy?: string;
 }
@@ -63,7 +63,7 @@ const buildVisualLine = (visual: VisualOutput | undefined): string | undefined =
 };
 
 const buildPrBody = (
-  plano: PlanoOutput | undefined,
+  plan: PlanOutput | undefined,
   verify: VerifyOutput | undefined,
   riskSection: string,
   visual: VisualOutput | undefined
@@ -76,10 +76,10 @@ const buildPrBody = (
     "<summary>Ver evidência completa</summary>",
     "",
     "## Summary",
-    plano?.summary ?? "(no plan summary available)",
+    plan?.summary ?? "(no plan summary available)",
     "",
     "## How to validate",
-    plano?.testStrategy ?? "(no test strategy available)",
+    plan?.testStrategy ?? "(no test strategy available)",
     "",
     "## Verify evidence",
     `known failures (pre-existing, not blocking): ${(verify?.knownFailures ?? []).join(", ") || "none"}`,
@@ -160,7 +160,7 @@ const prNumberFromUrl = (url: string): number | undefined => {
  * exactly that "round 1 already wrote this" state and no-ops instead of
  * incrementing reworkCount a 2nd time.
  */
-const prForRework = async (deps: CardToPrDeps, ctx: ScriptContext, reworkPrep: ReworkPreparacaoOutput) => {
+const prForRework = async (deps: CardToPrDeps, ctx: ScriptContext, reworkPrep: ReworkPreparationOutput) => {
   const worktree = reworkPrep.worktree!;
   const repo = reworkPrep.repo!;
   const sourceId = String(ctx.inputs.source_id);
@@ -227,15 +227,15 @@ const prForRework = async (deps: CardToPrDeps, ctx: ScriptContext, reworkPrep: R
 };
 
 export const makePr = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
-  // Rework flow (F4 #157): entered at rework_preparacao, so `preparacao` is
-  // absent and `rework_preparacao` carries the worktree/repo — same branch
+  // Rework flow (F4 #157): entered at rework_preparation, so `preparation` is
+  // absent and `rework_preparation` carries the worktree/repo — same branch
   // push + re-request review, never a new PR.
-  const reworkPrep = ctx.outputs.rework_preparacao as ReworkPreparacaoOutput | undefined;
+  const reworkPrep = ctx.outputs.rework_preparation as ReworkPreparationOutput | undefined;
   if (reworkPrep) return prForRework(deps, ctx, reworkPrep);
 
-  const preparacao = ctx.outputs.preparacao as PreparacaoOutput;
-  const worktree = preparacao.worktree!;
-  const repo = preparacao.repo!;
+  const preparation = ctx.outputs.preparation as PreparationOutput;
+  const worktree = preparation.worktree!;
+  const repo = preparation.repo!;
   // SECURITY: PR base is always the repo's configured integration branch,
   // never main/master (repo-registry/schema.ts already enforces this at
   // parse time — this is defense in depth, not the primary guarantee).
@@ -259,15 +259,15 @@ export const makePr = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
     return {};
   });
 
-  const plano = ctx.outputs.plano as PlanoOutput | undefined;
+  const plan = ctx.outputs.plan as PlanOutput | undefined;
   const verify = ctx.outputs.verify as (VerifyOutput & VerifyRiskExtras) | undefined;
 
   // Risk radar (F4 #158, D29): computed once, right before the PR body is
   // assembled. The git calls below are read-only (diff/rev-parse) — safe to
   // redo on a crash-resume; only the pr_links write further down is guarded.
-  const { stdout: changedOut } = await runGit(["diff", "--name-only", preparacao.baseSha!, "HEAD"], worktree.path);
+  const { stdout: changedOut } = await runGit(["diff", "--name-only", preparation.baseSha!, "HEAD"], worktree.path);
   const changedFiles = changedOut.split("\n").filter(Boolean);
-  const { stdout: unifiedDiff } = await runGit(["diff", "--unified=0", preparacao.baseSha!, "HEAD"], worktree.path);
+  const { stdout: unifiedDiff } = await runGit(["diff", "--unified=0", preparation.baseSha!, "HEAD"], worktree.path);
   const { stdout: headShaOut } = await runGit(["rev-parse", "HEAD"], worktree.path);
   const headSha = headShaOut.trim();
 
@@ -282,7 +282,7 @@ export const makePr = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
     // 0 for semgrep and can never gate green lane on its own.
     semgrepFindingsCount: verify?.semgrepFindings?.length ?? 0,
     // No test-delta signal is wired anywhere yet (the red->green test-writer
-    // phase between gate_plano/implementacao, 03-PIPELINE-EXECUCAO.md L187,
+    // phase between gate_plan/implementation, 03-PIPELINE-EXECUCAO.md L187,
     // isn't in skill.yaml yet) — see openDecisions.
     testDelta: 0,
     // Fase 6 (validação visual) doesn't exist in skill.yaml yet — undefined
@@ -300,7 +300,7 @@ export const makePr = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
   });
 
   const visual = ctx.outputs.visual as VisualOutput | undefined;
-  const prBody = buildPrBody(plano, verify, riskSection, visual);
+  const prBody = buildPrBody(plan, verify, riskSection, visual);
 
   const prResult = await runIdempotent(
     deps.ledger,

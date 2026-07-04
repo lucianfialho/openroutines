@@ -3,7 +3,7 @@
  *
  * Drives the REAL .gates/skills/card-to-pr/skill.yaml through the REAL
  * runStateMachine / runFanout with the REAL makeSecurityJudgeProvider wired
- * into the providerRegistry: the judge parses the REAL revisao-seguranca.md
+ * into the providerRegistry: the judge parses the REAL review-security.md
  * render (verify/contestacao blocks, critical-area detection, adjudication),
  * and ONLY the inner claude-api LLM is faked (the makeInnerProvider seam that
  * security-judge.test.ts uses). The other lenses/agents are thin fakes.
@@ -97,13 +97,13 @@ const genuine = JSON.stringify({ verdict: "genuine", reasoning: "exploit path co
 // --- prompt-hygiene helper (H5) --------------------------------------------------
 // The template leaves an UNRESOLVED {{outputs.X}} as literal text (template.ts).
 // Two are documented, intended first-pass warts (same ones rework.e2e.test.ts
-// accepts): implementacao's {{outputs.verify}} before any verify ran, and the
-// correctness lens' {{outputs.refutacao}} before any refutacao ran. Everything
+// accepts): implementation's {{outputs.verify}} before any verify ran, and the
+// correctness lens' {{outputs.refutation}} before any refutation ran. Everything
 // else being resolved is the real anti-regression signal for the OUTER prompts;
 // the security judge's INNER prompts must have ZERO {{outputs. (it strips the
 // <contestacao_refutacao> block in normal mode and builds its own adjudication
 // prompt), which is the gate's teeth.
-const KNOWN_FIRST_PASS_WARTS = ["{{outputs.verify}}", "{{outputs.refutacao}}"];
+const KNOWN_FIRST_PASS_WARTS = ["{{outputs.verify}}", "{{outputs.refutation}}"];
 const stripKnownWarts = (s: string): string =>
   KNOWN_FIRST_PASS_WARTS.reduce((acc, w) => acc.split(w).join(""), s);
 
@@ -145,7 +145,7 @@ const event: TriggerEvent = {
   },
 } as TriggerEvent;
 
-// plano/implementacao outputs reused verbatim from e2e.test.ts (estimatedLoc
+// plan/implementation outputs reused verbatim from e2e.test.ts (estimatedLoc
 // omitted on purpose — the schema-validate integer quirk documented there).
 const planoJson = JSON.stringify({
   summary: "Add the missing validation",
@@ -167,7 +167,7 @@ interface HarnessOpts {
   respond: Responder;
   /** Drives verify.changedFiles -> criticalArea via the REAL verify script. */
   changedFiles: string[];
-  /** claude-cli refutacao response (contest vs. correct). Default: contest. */
+  /** claude-cli refutation response (contest vs. correct). Default: contest. */
   refutacaoReply?: (prompt: string) => string;
   budgetGate?: (ctx: { phase: string; tier: string; executionId: string }) => Promise<{ granted: boolean; reservationId?: string }>;
 }
@@ -226,7 +226,7 @@ const makeHarness = (opts: HarnessOpts) => {
   const scriptRegistry = makeScriptRegistry();
   registerCardToPrHandlers(scriptRegistry, deps);
 
-  // ONE judge instance shared across every revisao pass — its inner fake
+  // ONE judge instance shared across every review pass — its inner fake
   // accumulates into innerCalls.
   const judge = makeSecurityJudgeProvider({
     claudeApi: { apiKey: "sk-test" },
@@ -255,8 +255,8 @@ const makeHarness = (opts: HarnessOpts) => {
       if (String(name) === "claude-cli")
         return mkOuter(key, (prompt) => {
           if (prompt.includes("Explore o repositório")) return planoJson;
-          if (prompt.includes("Implemente o plano")) return implementacaoJson;
-          return refutacaoReply(prompt); // refutacao.md
+          if (prompt.includes("Implemente o plan")) return implementacaoJson;
+          return refutacaoReply(prompt); // refutation.md
         });
       throw new Error(`security e2e fixture: unexpected provider '${key}'`);
     },
@@ -335,7 +335,7 @@ describe("security-gate E2E — critical-area routing (H1)", () => {
 // --- H2: full adjudication chain -------------------------------------------------
 
 describe("security-gate E2E — adjudication chain (H2)", () => {
-  it("blocking finding -> gap -> refutacao contests -> revisao re-runs in ADJUDICATION mode with the contest evidence visible -> demoted -> pipeline reaches pr", async () => {
+  it("blocking finding -> gap -> refutation contests -> review re-runs in ADJUDICATION mode with the contest evidence visible -> demoted -> pipeline reaches pr", async () => {
     const EVIDENCIA = "EVIDENCIA_MARKER_H2: input já é sanitizado em src/db/sanitize.ts";
     const h = makeHarness({
       changedFiles: ["src/db/query.ts"], // non-critical: single Opus judge, simpler chain
@@ -354,7 +354,7 @@ describe("security-gate E2E — adjudication chain (H2)", () => {
 
     // The inner fake received a real adjudication call: adjudication SYSTEM
     // prompt ("tribunal") with the contest evidence AND the contested finding
-    // rendered into it — proof {{outputs.refutacao}}/{{outputs.revisao.gaps}}
+    // rendered into it — proof {{outputs.refutation}}/{{outputs.review.gaps}}
     // resolved on the second pass and reached the judge's parser.
     const adjudicationCalls = h.innerCalls.filter(isAdjudication);
     expect(adjudicationCalls).toHaveLength(1);
@@ -372,8 +372,8 @@ describe("security-gate E2E — adjudication chain (H2)", () => {
 
 // --- H3: planted security failure, never fixed (card F4 acceptance #1) -----------
 
-describe("security-gate E2E — planted vuln exhausts refutacao (H3)", () => {
-  it("inner always re-finds the blocking finding -> revisao->refutacao exhausts max_retries:2 -> bloqueado with blockReason 'seguranca-esgotada' (Telegram alert fires)", async () => {
+describe("security-gate E2E — planted vuln exhausts refutation (H3)", () => {
+  it("inner always re-finds the blocking finding -> review->refutation exhausts max_retries:2 -> blocked with blockReason 'security-exhausted' (Telegram alert fires)", async () => {
     const h = makeHarness({
       changedFiles: ["src/db/query.ts"],
       // Stubborn judge: round-1 always re-finds it, round-2 always genuine, and
@@ -385,26 +385,26 @@ describe("security-gate E2E — planted vuln exhausts refutacao (H3)", () => {
         if (isRound2(c)) return genuine;
         return round1([finding({ confidence: 9 })]);
       },
-      // Implementer claims to "corrigir", but the fake implementacao is a no-op
-      // so the vuln persists -> each revisao re-runs in NORMAL mode and re-finds
-      // it, driving the revisao->refutacao edge to exhaustion.
+      // Implementer claims to "corrigir", but the fake implementation is a no-op
+      // so the vuln persists -> each review re-runs in NORMAL mode and re-finds
+      // it, driving the review->refutation edge to exhaustion.
       refutacaoReply: () => JSON.stringify({ status: "corrigir", evidencia: "", correcoes: ["escapar input"] }),
     });
     const r = await h.run();
 
-    // bloqueado -> done is a clean terminal path.
+    // blocked -> done is a clean terminal path.
     expect(r.success).toBe(true);
     expect(r.logs.join(" ")).toContain("Reached terminal state: done");
 
-    // 3 revisao passes (edge fires at count 1, 2, then exhausts at 3).
+    // 3 review passes (edge fires at count 1, 2, then exhausts at 3).
     expect(h.innerCalls.filter(isRound1)).toHaveLength(3);
 
     // Card blocked, NOT handed to Review; blockReason is the security-exhaustion
-    // one (prefix "seguranca*" => the Telegram alert funnel fires).
+    // one (prefix "security*" => the Telegram alert funnel fires).
     expect(h.moveToCalls).toContainEqual(["card1", "blocked"]);
     expect(h.moveToCalls).not.toContainEqual(["card1", "review"]);
     expect(h.sendAlert).toHaveBeenCalledTimes(1);
-    expect(h.sendAlert.mock.calls[0][0]).toContain("seguranca-esgotada");
+    expect(h.sendAlert.mock.calls[0][0]).toContain("security-exhausted");
     assertNoUnresolvedPlaceholders(h);
   }, 20000);
 });
@@ -419,10 +419,10 @@ describe("security-gate E2E — per-lens budget reservation (H6)", () => {
 
     expect(r.success).toBe(true);
     // tier = lens.model ?? lens.provider (state-machine.ts runFanout).
-    const revisaoReservations = h.budgetCalls.filter((c) => c.phase === "revisao");
-    expect(revisaoReservations).toContainEqual({ phase: "revisao", tier: "kimi-k2.6", executionId: "exec1" }); // correctness
-    expect(revisaoReservations).toContainEqual({ phase: "revisao", tier: "claude-opus-4-8", executionId: "exec1" }); // security
-    // data lens (claude-sonnet-5) is skipped by its when: -> no revisao reservation for it.
+    const revisaoReservations = h.budgetCalls.filter((c) => c.phase === "review");
+    expect(revisaoReservations).toContainEqual({ phase: "review", tier: "kimi-k2.6", executionId: "exec1" }); // correctness
+    expect(revisaoReservations).toContainEqual({ phase: "review", tier: "claude-opus-4-8", executionId: "exec1" }); // security
+    // data lens (claude-sonnet-5) is skipped by its when: -> no review reservation for it.
     expect(revisaoReservations.filter((c) => c.tier === "claude-sonnet-5")).toHaveLength(0);
   });
 });

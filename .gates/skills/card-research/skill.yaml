@@ -1,0 +1,89 @@
+id: card-research
+name: Card Pesquisa
+description: >
+  Read-only research/architecture pipeline (F5 #161): 1 Trello card
+  `OpenRoutines: Pesquisa` -> 1 GitHub issue/milestone + full proposal attached
+  to the card. NEVER touches product code — it only reads, judges, and delivers
+  a proposal the future implementation consumes.
+
+  Linear graph: preparacao -> levantamento_proposta -> julgamento_arquitetura ->
+  entrega -> done. There is no intermediate human gate (the gate IS the Opus
+  judgment). refutado loops ONE bounded round back to levantamento with the
+  judge's corrections, then delivers best-effort (gate_plano's pattern, F4).
+
+  Every state is `type: script` (like morning-report): the two LLM phases run
+  inside script handlers, not `type: agent` states, because the runner only
+  wires a per-phase CLI tool allowlist for `fanout` lenses — and
+  levantamento_proposta REQUIRES a restricted allowlist (Read/Glob/Grep + a few
+  read-only Bash prefixes, never Write/Edit). The handlers own the provider
+  calls (claude-cli for the survey, claude.ts/Opus+Fable for the judgment), so
+  provider/model live in src/pipeline/research/, not here.
+
+inputs:
+  required:
+    - { name: source_id, type: string }
+    - { name: task_id, type: string }
+    - { name: repo, type: string }
+    - { name: title, type: string }
+    - { name: description, type: string }
+  optional:
+    - { name: night_id, type: string }
+
+initial_state: preparation
+
+states:
+  preparation:
+    description: >
+      Resolve the card's repo(s), gather each repo's docs/REPO-PROFILE.md, and
+      mount an ephemeral read-only worktree (detached HEAD; writes are blocked
+      by the levantamento allowlist, not by fs perms). Tolerant: a card with no
+      resolvable repo still proceeds (the survey can lean on raizes-docs/ctx7).
+    type: script
+    script: card-research-preparation
+    transitions:
+      - { to: survey_proposal }
+
+  survey_proposal:
+    description: >
+      Sonnet 5 CLI, RESTRICTED allowlist (Read/Glob/Grep, Bash(git log/show),
+      Bash(raizes-docs), Bash(ctx7) — no Write/Edit/npm). Explores read-only and
+      emits {summary, currentState, options[2-3], dataChanges[], filesAffected[],
+      phases[]}. On a refutado re-run, the handler appends the judge's prior
+      corrections to the prompt.
+    type: script
+    script: card-research-survey
+    transitions:
+      - { to: architecture_judgment }
+
+  architecture_judgment:
+    description: >
+      Opus 4.8 (src/provider/claude.ts) is the architecture owner: refutes or
+      refines, validating against raizes-architecture-principles + an explicit
+      security lens. On verdict "escalate" the handler makes ONE second call to
+      the SAME claude.ts with Fable 5 — Fable SEES the Opus parecer in its
+      prompt (deliberately unlike F4's blind adversarial adjudication; research
+      is judgment escalation, not adversarial review) and its verdict is final.
+      Output: {verdict, corrections[], securityOpinion{...}, escalateReason?}.
+    type: script
+    script: card-research-judgment
+    transitions:
+      # refutado gets ONE bounded refinement round (gate_plano's pattern); on
+      # exhaustion we deliver the best-effort proposal + the final parecer
+      # rather than blocking (research always yields a deliverable).
+      - { to: survey_proposal, when: "output.architecture_judgment.verdict == 'refutado'", max_retries: 1, on_exhausted: delivery }
+      - { to: delivery }
+
+  delivery:
+    description: >
+      Orchestrator effect (D21): create the GitHub issue(s) carrying the
+      canonical architecture — phases.length >= 3 -> a milestone with one issue
+      per phase; <= 2 -> loose issues — then on the card post a summary comment,
+      attach the FULL proposal .md, and move it to Review. Output:
+      {issueUrl, milestoneUrl?, cardCommentPosted, attachmentPosted}.
+    type: script
+    script: card-research-delivery
+    transitions:
+      - { to: done }
+
+  done:
+    terminal: true

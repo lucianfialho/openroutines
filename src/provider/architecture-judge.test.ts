@@ -55,7 +55,7 @@ const makeJudge = (respond: Responder, calls: RecordedCall[]) => {
   return { judge, run };
 };
 
-const PLAN_PROMPT = "<card>Add validation</card>\n<plano>{\"summary\":\"...\"}</plano>";
+const PLAN_PROMPT = "<card>Add validation</card>\n<plan>{\"summary\":\"...\"}</plan>";
 
 describe("architecture-judge — escalate:false (Opus is terminal)", () => {
   it("makes exactly ONE call, and the final response is Opus's own", async () => {

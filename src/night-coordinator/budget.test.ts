@@ -85,7 +85,7 @@ describe.skipIf(!hasTestDb())("reserveBudget (real DB, anti-TOCTOU)", () => {
     const executionId = crypto.randomUUID();
     await insertExecution(pool, executionId, { nightId });
 
-    const big = await reserveBudget(pool, { nightId, executionId, phase: "plano", tier: "claude-opus-4.8", estimatedUnits: 4 });
+    const big = await reserveBudget(pool, { nightId, executionId, phase: "plan", tier: "claude-opus-4.8", estimatedUnits: 4 });
     expect(big.granted).toBe(true);
     const tooBig = await reserveBudget(pool, { nightId, executionId, phase: "impl", tier: "claude-opus-4.8", estimatedUnits: 4 });
     expect(tooBig.granted).toBe(false); // 4 + 4 > 5
@@ -100,7 +100,7 @@ describe.skipIf(!hasTestDb())("reserveBudget (real DB, anti-TOCTOU)", () => {
     const executionId = crypto.randomUUID();
     await insertExecution(pool, executionId, { nightId });
 
-    const r = await reserveBudget(pool, { nightId, executionId, phase: "plano", tier: "claude-sonnet-5", estimatedUnits: 1 });
+    const r = await reserveBudget(pool, { nightId, executionId, phase: "plan", tier: "claude-sonnet-5", estimatedUnits: 1 });
     expect(r.granted).toBe(true);
     await settleBudget(pool, r.reservationId!, 0.4);
 

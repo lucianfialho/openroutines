@@ -54,7 +54,7 @@ describe.skipIf(!hasTestDb())("budget_reservations.night_id nullable (020)", () 
 
     await pool.query(
       `INSERT INTO budget_reservations (night_id, execution_id, phase, tier, reserved_usd)
-       VALUES ($1, $2, 'plano', 'claude-sonnet-5', 2)`,
+       VALUES ($1, $2, 'plan', 'claude-sonnet-5', 2)`,
       [nightId, executionId]
     );
     await pool.query(

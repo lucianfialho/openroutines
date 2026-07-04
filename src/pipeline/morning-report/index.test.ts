@@ -11,9 +11,9 @@ import { readFileSync } from "fs";
 import type { Pool } from "pg";
 import { Effect } from "effect";
 import {
-  makeColetarDados,
-  makeMontarRelatorio,
-  makePublicarCard,
+  makeCollectData,
+  makeBuildReport,
+  makePublishCard,
   registerMorningReportHandlers,
   type MorningReportDeps,
 } from "./index.js";
@@ -71,28 +71,28 @@ const baseDeps = (pool: Pool, overrides: Partial<MorningReportDeps> = {}): Morni
   ...overrides,
 });
 
-describe("makeColetarDados", () => {
+describe("makeCollectData", () => {
   it("returns nightId:null when no night_runs row exists for today (no crash, no further queries)", async () => {
     const { pool } = makeMockPool({});
-    const result = await makeColetarDados(baseDeps(pool))({ inputs: {}, outputs: {}, executionId: "e1", stateId: "coletar_dados" });
+    const result = await makeCollectData(baseDeps(pool))({ inputs: {}, outputs: {}, executionId: "e1", stateId: "collect_data" });
     expect(result).toEqual({ nightId: null });
   });
 
   it("gathers data for today's night_runs row", async () => {
     const { pool } = makeMockPool({ nightId: "night-1", execRows: [], tierRows: [], prRows: [] });
-    const result = await makeColetarDados(baseDeps(pool))({ inputs: {}, outputs: {}, executionId: "e1", stateId: "coletar_dados" });
+    const result = await makeCollectData(baseDeps(pool))({ inputs: {}, outputs: {}, executionId: "e1", stateId: "collect_data" });
     expect((result as { nightId: string }).nightId).toBe("night-1");
     expect((result as { data: MorningReportData }).data.nightId).toBe("night-1");
   });
 });
 
-describe("makeMontarRelatorio", () => {
+describe("makeBuildReport", () => {
   it("renders a placeholder body when no night ran", async () => {
-    const result = (await makeMontarRelatorio()({
+    const result = (await makeBuildReport()({
       inputs: {},
-      outputs: { coletar_dados: { nightId: null } },
+      outputs: { collect_data: { nightId: null } },
       executionId: "e1",
-      stateId: "montar_relatorio",
+      stateId: "build_report",
     })) as { title: string; body: string };
     expect(result.body).toContain("Nenhuma execução noturna");
   });
@@ -107,21 +107,21 @@ describe("makeMontarRelatorio", () => {
       cardsBlocked: 0,
       circuitBreakersTriggered: [],
     };
-    const result = (await makeMontarRelatorio()({
+    const result = (await makeBuildReport()({
       inputs: {},
-      outputs: { coletar_dados: { nightId: "night-1", data } },
+      outputs: { collect_data: { nightId: "night-1", data } },
       executionId: "e1",
-      stateId: "montar_relatorio",
+      stateId: "build_report",
     })) as { title: string; body: string };
     expect(result.body).toContain("📊 [Relatório]");
     expect(result.body).toContain("min de review");
   });
 });
 
-describe("makePublicarCard", () => {
+describe("makePublishCard", () => {
   const outputsFor = (nightId: string | null) => ({
-    coletar_dados: { nightId },
-    montar_relatorio: { title: "📊 Relatório matinal", body: "corpo do relatório" },
+    collect_data: { nightId },
+    build_report: { title: "📊 Relatório matinal", body: "corpo do relatório" },
   });
 
   it("creates a new card and persists report_card_id when none exists yet", async () => {
@@ -130,11 +130,11 @@ describe("makePublicarCard", () => {
     const comment = vi.fn(() => Effect.succeed(undefined));
     const taskSourceFor = () => ({ comment } as unknown as TaskSource);
 
-    const result = (await makePublicarCard(baseDeps(pool, { createCard, taskSourceFor }))({
+    const result = (await makePublishCard(baseDeps(pool, { createCard, taskSourceFor }))({
       inputs: {},
       outputs: outputsFor("night-1"),
       executionId: "e1",
-      stateId: "publicar_card",
+      stateId: "publish_card",
     })) as { cardId: string; published: boolean };
 
     expect(createCard).toHaveBeenCalledTimes(1);
@@ -151,11 +151,11 @@ describe("makePublicarCard", () => {
     const comment = vi.fn(() => Effect.succeed(undefined));
     const taskSourceFor = () => ({ comment } as unknown as TaskSource);
 
-    const result = (await makePublicarCard(baseDeps(pool, { createCard, taskSourceFor }))({
+    const result = (await makePublishCard(baseDeps(pool, { createCard, taskSourceFor }))({
       inputs: {},
       outputs: outputsFor("night-1"),
       executionId: "e1",
-      stateId: "publicar_card",
+      stateId: "publish_card",
     })) as { cardId: string; published: boolean };
 
     expect(createCard).not.toHaveBeenCalled();
@@ -167,11 +167,11 @@ describe("makePublicarCard", () => {
   it("still creates/publishes when there is no night_runs row (no persistable guard, documented ponytail gap)", async () => {
     const { pool } = makeMockPool({});
     const createCard = vi.fn(async () => ({ id: "no-night-card" }));
-    const result = (await makePublicarCard(baseDeps(pool, { createCard, taskSourceFor: () => undefined }))({
+    const result = (await makePublishCard(baseDeps(pool, { createCard, taskSourceFor: () => undefined }))({
       inputs: {},
       outputs: outputsFor(null),
       executionId: "e1",
-      stateId: "publicar_card",
+      stateId: "publish_card",
     })) as { cardId: string; published: boolean };
     expect(createCard).toHaveBeenCalledTimes(1);
     expect(result.published).toBe(false); // no TaskSource resolved -> comment skipped, doesn't throw
@@ -183,9 +183,9 @@ describe("registerMorningReportHandlers", () => {
     const reg = makeScriptRegistry();
     const { pool } = makeMockPool({});
     registerMorningReportHandlers(reg, baseDeps(pool));
-    expect(reg.get("morning-report-coletar-dados")).toBeDefined();
-    expect(reg.get("morning-report-montar-relatorio")).toBeDefined();
-    expect(reg.get("morning-report-publicar-card")).toBeDefined();
+    expect(reg.get("morning-report-collect-data")).toBeDefined();
+    expect(reg.get("morning-report-build-report")).toBeDefined();
+    expect(reg.get("morning-report-publish-card")).toBeDefined();
   });
 });
 
@@ -221,7 +221,7 @@ describe.skipIf(!hasTestDb())("morning-report skill.yaml E2E (real DB)", () => {
     };
   };
 
-  it("drives coletar_dados -> montar_relatorio -> publicar_card -> done and creates the card once", async () => {
+  it("drives collect_data -> build_report -> publish_card -> done and creates the card once", async () => {
     const date = uniqueDate();
     const { rows } = await pool.query(`INSERT INTO night_runs (date, budget_cap_usd, pr_cap) VALUES ($1, 30, 6) RETURNING id`, [
       date,

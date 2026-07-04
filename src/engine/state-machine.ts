@@ -82,7 +82,7 @@ export interface StateMachineConfig {
   repoLearnings?: RepoLearningRepository;
   /**
    * Precedent injection for the plan phase (F5 #166): up to 2 merged similar
-   * cards reinjected as few-shot into the `plano` state prompt. Absent → no
+   * cards reinjected as few-shot into the `plan` state prompt. Absent → no
    * precedent block.
    */
   similarCards?: SimilarCardsFn;
@@ -412,7 +412,7 @@ export const runStateMachine = (
         } else {
           // agent_prompt_file (F4 #153) — same file-template alternative already
           // supported for fanout lenses, generalized to regular agent states so
-          // e.g. `refutacao` can keep its prompt in its own .md file.
+          // e.g. `refutation` can keep its prompt in its own .md file.
           let promptTemplate: string;
           if (state.agent_prompt !== undefined) {
             promptTemplate = state.agent_prompt;
@@ -505,7 +505,7 @@ export const runStateMachine = (
             if (config.budgetGate) {
               const gate = yield* Effect.promise(() => config.budgetGate!({ phase: stateId, tier, executionId }));
               if (!gate.granted) {
-                return yield* fail(`orcamento: budget reservation denied for state ${stateId}`, "orcamento");
+                return yield* fail(`budget: budget reservation denied for state ${stateId}`, "budget");
               }
               budgetReservationId = gate.reservationId;
             }
@@ -704,13 +704,13 @@ export const resolveOutputPaths = (
   stateId: string
 ): { worktreePath: string | undefined; outputPath: string; templateOutputPath: string } => {
   // Legacy solve-issue stores the worktree under `create_worktree`; the F3
-  // thick-state skills (card-to-pr) store it under `preparacao`; the rework
-  // flow (F4 #157) under `rework_preparacao`. Accept any so CLI states run
+  // thick-state skills (card-to-pr) store it under `preparation`; the rework
+  // flow (F4 #157) under `rework_preparation`. Accept any so CLI states run
   // inside the card's worktree, not the orchestrator's cwd.
   const worktreePath =
     (outputs.create_worktree as { worktree?: { path?: string } } | undefined)?.worktree?.path ??
-    (outputs.preparacao as { worktree?: { path?: string } } | undefined)?.worktree?.path ??
-    (outputs.rework_preparacao as { worktree?: { path?: string } } | undefined)?.worktree?.path;
+    (outputs.preparation as { worktree?: { path?: string } } | undefined)?.worktree?.path ??
+    (outputs.rework_preparation as { worktree?: { path?: string } } | undefined)?.worktree?.path;
   const outputPath = state.output_path ?? (worktreePath
     ? `${worktreePath}/.gates/outputs/${executionId}/${stateId}.output.yaml`
     : `.gates/outputs/${executionId}/${stateId}.output.yaml`);
@@ -917,7 +917,7 @@ export const runFanout = (
             budget.gate({ phase: budget.phase, tier: lens.model ?? lens.provider, executionId })
           );
           if (!grant.granted) {
-            return { name: lens.name, provider: lens.provider, error: `orcamento: budget reservation denied for lens ${lens.name}`, costUsd: 0 };
+            return { name: lens.name, provider: lens.provider, error: `budget: budget reservation denied for lens ${lens.name}`, costUsd: 0 };
           }
           budgetReservationId = grant.reservationId;
         }

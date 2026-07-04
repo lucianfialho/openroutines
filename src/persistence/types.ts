@@ -82,7 +82,7 @@ export interface PrLink {
   branch: string;
   status: string; // 'open' | 'merged' | 'closed' ...
   reviewState?: string;
-  /** Completed rework rounds (F4 #157, D24); 2 => retrabalho-esgotado. */
+  /** Completed rework rounds (F4 #157, D24); 2 => rework-exhausted. */
   reworkCount?: number;
   /** Agent's HEAD after its last push — a human commit past it aborts rework (F4 #157). */
   lastAgentCommitSha?: string;

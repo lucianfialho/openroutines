@@ -59,9 +59,9 @@ export interface ReconcileDeps {
 
 const worktreePathOf = (exec: ExecutionRecord): string | undefined => {
   const ctx = exec.metadata?.stateMachineContext as
-    | { outputs?: { preparacao?: { worktree?: { path?: string } } } }
+    | { outputs?: { preparation?: { worktree?: { path?: string } } } }
     | undefined;
-  const p = ctx?.outputs?.preparacao?.worktree?.path;
+  const p = ctx?.outputs?.preparation?.worktree?.path;
   return typeof p === "string" && p.length > 0 ? p : undefined;
 };
 
@@ -79,7 +79,7 @@ export const reconcileOrphanedExecutions = async (
         await killExecutionProcessGroup(exec.id, deps.executionProcessRepo);
       }
       const wt = worktreePathOf(exec);
-      // No worktree yet (crashed before preparacao created one) → nothing to reset.
+      // No worktree yet (crashed before preparation created one) → nothing to reset.
       if (wt) await reset(wt);
 
       // Same shape as the /executions/:id/resume path — trigger.executionId makes

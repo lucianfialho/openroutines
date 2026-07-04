@@ -14,7 +14,7 @@
  *     Verify's own scope gate uses). Otherwise: find-or-create ONE open
  *     Mapping card for the repo (never duplicates), cross-link it to the
  *     blocked card (makeTrelloLinkCards), move the original to Blocked. No
- *     Telegram alert — `repo-sem-profile` is not a `seguranca*` blockReason
+ *     Telegram alert — `repo-missing-profile` is not a `security*` blockReason
  *     (.openroutines/10-ESTADOS-DAS-TAREFAS.md), so this module never imports
  *     notify/telegram.ts at all.
  *
@@ -28,7 +28,7 @@
  *   - `runDegradedModeUnblockPoll` — DOES get a runtime wire-up (this issue's
  *     scope covers it): reacts to a Mapping card reaching Done (the signal
  *     available today for "profile merged" — no pr_links row exists for a
- *     Mapping card's docs PR, pipeline/mapeamento/pr-docs.ts never creates one
+ *     Mapping card's docs PR, pipeline/mapping/pr-docs.ts never creates one
  *     and is out of scope here, so this reads board state instead of polling
  *     GitHub). Reads back the cards cross-linked onto it (via the SAME
  *     attachments checkProfileAndBlock wrote — no new persistence/schema) and
@@ -51,11 +51,11 @@ const MAPPING_SCAN_STATES: TaskState[] = ["queued", "working", "review"];
 
 const UNBLOCK_COMMENT = "🤖 [Triagem] Repo Profile mesclado — card destravado automaticamente";
 
-// ---- Repo Profile existence (preflight/preparacao's own pattern) -----------
+// ---- Repo Profile existence (preflight/preparation's own pattern) -----------
 
 /**
  * docs/REPO-PROFILE.md existence on the registry's local clone — the exact
- * read `pipeline/pesquisa/preparacao.ts`'s `readRepoProfile` and
+ * read `pipeline/research/preparation.ts`'s `readRepoProfile` and
  * `pipeline/card-to-pr/visual.ts` already use, reused here as a cheap
  * existence check (no content read needed at triage time, unlike those two).
  */
@@ -150,7 +150,7 @@ export const findExistingMappingCard = async (
 const buildMappingCardBody = (repo: string): string =>
   [
     "# Conceito",
-    `O repositório ${repo} ainda não tem \`docs/REPO-PROFILE.md\` — um card de implementação foi bloqueado até o mapeamento existir (D11).`,
+    `O repositório ${repo} ainda não tem \`docs/REPO-PROFILE.md\` — um card de implementação foi blocked até o mapeamento existir (D11).`,
     "",
     "## Repositório",
     repo,
@@ -174,7 +174,7 @@ const buildMappingCardBody = (repo: string): string =>
 const blockedComment = (mappingUrl: string): string =>
   [
     "⛔ [Bloqueio]",
-    "Motivo: repo-sem-profile",
+    "Motivo: repo-missing-profile",
     `O que falta: o repositório não tem \`docs/REPO-PROFILE.md\` — mapeamento agendado: ${mappingUrl}`,
     "Próximo passo: aguardar o merge do PR de mapeamento — este card volta para a Fila automaticamente.",
   ].join("\n");
@@ -208,7 +208,7 @@ export const checkProfileAndBlock = async (card: Task, deps: DegradedModeDeps): 
   if (card.type === "research" || card.type === "mapping") return { blocked: false };
 
   const repoSlug = resolveTaskRepoSlug(deps.registry, card);
-  if (!repoSlug) return { blocked: false }; // unresolvable repo is a different gate's concern (blockReason repo-nao-resolvivel)
+  if (!repoSlug) return { blocked: false }; // unresolvable repo is a different gate's concern (blockReason repo-unresolvable)
 
   const repoConfig = deps.registry.repos[repoSlug];
   const hasProfile = deps.hasProfile ?? hasRepoProfile;

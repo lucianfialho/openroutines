@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "card-mapping captura_visual output (Kimi agent portion)",
+  "type": "object",
+  "required": ["screenshots", "readmeWritten"],
+  "properties": {
+    "screenshots": {
+      "type": "array",
+      "description": "Relative paths (under docs/visual/) of the PNGs written, one or more per golden route.",
+      "items": { "type": "string" }
+    },
+    "readmeWritten": {
+      "type": "boolean",
+      "description": "true when docs/visual/README.md was written."
+    }
+  }
+}

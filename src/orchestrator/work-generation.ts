@@ -224,7 +224,7 @@ type DebtTipo = "block-reason" | "semgrep" | "dependency-vulnerable" | "flaky";
 interface StateMachineOutputsShape {
   stateMachineContext?: {
     outputs?: {
-      bloqueado?: { blockReason?: string };
+      blocked?: { blockReason?: string };
       verify?: {
         semgrepFindings?: Array<{ ruleId?: string; file?: string; confidence?: number }>;
         dependencyAudit?: { vulnerable?: Array<{ name?: string; advisory?: string }> };
@@ -247,7 +247,7 @@ export const extractDebtOccurrences = (row: ExecutionSignalRow): DebtOccurrence[
   if (!outputs) return [];
   const occurrences: DebtOccurrence[] = [];
 
-  const blockReason = outputs.bloqueado?.blockReason;
+  const blockReason = outputs.blocked?.blockReason;
   if (blockReason) {
     occurrences.push({ repo: row.repo, tipo: "block-reason", chave: blockReason, evidence: `blockReason="${blockReason}"` });
   }
@@ -313,7 +313,7 @@ export const aggregateDebtSignals = (rows: ExecutionSignalRow[]): DebtSignal[] =
 const DEBT_COPY: Record<DebtTipo, { titulo: string; conceito: string; objetivo: string; criterio: string }> = {
   "block-reason": {
     titulo: "bloqueio recorrente",
-    conceito: "O agente foi bloqueado pelo mesmo motivo mais de uma vez nos últimos 7 dias.",
+    conceito: "O agente foi blocked pelo mesmo motivo mais de uma vez nos últimos 7 dias.",
     objetivo: "Investigar e eliminar a causa raiz do bloqueio recorrente.",
     criterio: "O motivo do bloqueio não se repete nas próximas execuções do repositório.",
   },
@@ -476,12 +476,12 @@ const buildDepCardBody = (repo: string, kind: "update" | "major", lines: string[
     conceito:
       kind === "update"
         ? `Dependências desatualizadas (minor/patch) detectadas em ${repo} via \`npm outdated\`.`
-        : `Dependências com bump major disponível em ${repo} via \`npm outdated\` — mudança de contrato exige julgamento antes de atualizar.`,
+        : `Dependências com bump major disponível em ${repo} via \`npm outdated\` — mudança de contrato exige judgment antes de atualizar.`,
     repo,
     objetivo:
       kind === "update"
         ? "Atualizar as dependências listadas para a versão mais recente compatível (minor/patch)."
-        : "Avaliar o changelog de cada dependência e propor um plano de migração para a versão major mais recente.",
+        : "Avaliar o changelog de cada dependência e propor um plan de migração para a versão major mais recente.",
     escopoIncluido: lines,
     criterios:
       kind === "update"

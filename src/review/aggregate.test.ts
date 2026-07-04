@@ -1,12 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { aggregateRevisao } from "./aggregate.js";
+import { aggregateReview } from "./aggregate.js";
 
 const approvedCorrectness = { name: "correctness", output: { approved: true, gaps: [] } };
 const approvedSecurity = { name: "security", output: { approved: true, findings: [], criticalArea: false } };
 
-describe("aggregateRevisao", () => {
+describe("aggregateReview", () => {
   it("approves when every present lens approves, no gaps, securityVerdict passes through", () => {
-    const out = aggregateRevisao([approvedCorrectness, approvedSecurity]);
+    const out = aggregateReview([approvedCorrectness, approvedSecurity]);
     expect(out).toEqual({
       approved: true,
       gaps: [],
@@ -15,7 +15,7 @@ describe("aggregateRevisao", () => {
   });
 
   it("flips approved:false when one lens reports approved:false and unions its contestable gap", () => {
-    const out = aggregateRevisao([
+    const out = aggregateReview([
       { name: "correctness", output: { approved: false, gaps: [{ description: "missing AC", contestable: true }] } },
       approvedSecurity,
     ]);
@@ -24,18 +24,18 @@ describe("aggregateRevisao", () => {
   });
 
   it("securityVerdict is null when the security lens is absent (e.g. not yet wired in a test fixture)", () => {
-    const out = aggregateRevisao([approvedCorrectness]);
+    const out = aggregateReview([approvedCorrectness]);
     expect(out.securityVerdict).toBeNull();
   });
 
   it("a skipped lens (absent from lentes, e.g. dataChanges:false) contributes nothing", () => {
-    const out = aggregateRevisao([approvedCorrectness, approvedSecurity]);
+    const out = aggregateReview([approvedCorrectness, approvedSecurity]);
     expect(out.approved).toBe(true);
     expect(out.gaps).toEqual([]);
   });
 
   it("an 'open' BLOCKING security finding becomes a contestable gap WITHOUT flipping approved (that's the terminal verdict's job)", () => {
-    const out = aggregateRevisao([
+    const out = aggregateReview([
       approvedCorrectness,
       {
         name: "security",
@@ -50,8 +50,8 @@ describe("aggregateRevisao", () => {
     expect(out.gaps).toEqual([{ lens: "security", description: "possible SSRF", contestable: true }]);
   });
 
-  it("an 'open' NON-blocking security finding (low-confidence note) never becomes a gap — no refutacao round for notes (H2)", () => {
-    const out = aggregateRevisao([
+  it("an 'open' NON-blocking security finding (low-confidence note) never becomes a gap — no refutation round for notes (H2)", () => {
+    const out = aggregateReview([
       approvedCorrectness,
       {
         name: "security",
@@ -67,7 +67,7 @@ describe("aggregateRevisao", () => {
   });
 
   it("a terminal (non-open) reproved security verdict flips approved without adding a gap for it", () => {
-    const out = aggregateRevisao([
+    const out = aggregateReview([
       approvedCorrectness,
       {
         name: "security",
@@ -84,7 +84,7 @@ describe("aggregateRevisao", () => {
   });
 
   it("a lens that errored (no output) is fail-closed: approved:false plus a non-contestable gap describing it", () => {
-    const out = aggregateRevisao([approvedCorrectness, { name: "data", error: "schema validation failed: bad JSON" }]);
+    const out = aggregateReview([approvedCorrectness, { name: "data", error: "schema validation failed: bad JSON" }]);
     expect(out.approved).toBe(false);
     expect(out.gaps).toEqual([
       { lens: "data", description: "Lente 'data' falhou: schema validation failed: bad JSON", contestable: false },
@@ -92,7 +92,7 @@ describe("aggregateRevisao", () => {
   });
 
   it("tags a correctness gap as 'conventions' when the lens marks rubrica:convencoes, defaults to 'correctness' otherwise", () => {
-    const out = aggregateRevisao([
+    const out = aggregateReview([
       {
         name: "correctness",
         output: {
@@ -111,7 +111,7 @@ describe("aggregateRevisao", () => {
   });
 
   it("non-contestable gaps from a lens are never unioned into the output (altitude rule: notes don't block)", () => {
-    const out = aggregateRevisao([
+    const out = aggregateReview([
       { name: "correctness", output: { approved: true, gaps: [{ description: "style nit", contestable: false }] } },
     ]);
     expect(out.gaps).toEqual([]);
@@ -119,7 +119,7 @@ describe("aggregateRevisao", () => {
   });
 
   it("carries file/line through when the lens provides them", () => {
-    const out = aggregateRevisao([
+    const out = aggregateReview([
       {
         name: "data",
         output: { approved: false, gaps: [{ description: "missing index", file: "prisma/schema.prisma", line: 42, contestable: true }] },

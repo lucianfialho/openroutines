@@ -1,8 +1,8 @@
 /**
  * Revisao aggregator (F4 #153)
  *
- * Pure function wired as `cardToPrFanoutAggregators.aggregateRevisao`
- * (src/pipeline/card-to-pr/index.ts) into the `revisao` `type: fanout` state's
+ * Pure function wired as `cardToPrFanoutAggregators.aggregateReview`
+ * (src/pipeline/card-to-pr/index.ts) into the `review` `type: fanout` state's
  * `aggregate:`. Called by the runner's `runFanout` (src/engine/state-machine.ts)
  * with the raw per-lens results — `{name, output?, error?}` per lens; a lens
  * skipped by `when:` is simply absent, an errored lens carries `error` instead
@@ -11,9 +11,9 @@
  * Rules:
  *  - `gaps` = union of every CONTESTABLE gap from every lens present, including
  *    security findings still `status:"open"` AND `blocking:true` (a
- *    low-confidence note never forces refutacao) — they take the same
- *    refutacao/adjudication path as any other gap, never a shortcut straight
- *    to bloqueado.
+ *    low-confidence note never forces refutation) — they take the same
+ *    refutation/adjudication path as any other gap, never a shortcut straight
+ *    to blocked.
  *  - `securityVerdict.approved` is trusted as-is: the security-judge provider
  *    (separate issue) owns the "an open finding never flips approved before
  *    adjudication" rule.
@@ -22,7 +22,7 @@
  *  - A lens that errored (no output at all) forces `approved:false` plus a
  *    non-contestable gap describing the failure — fail-closed: a review that
  *    didn't run is never a pass. It still flows through the SAME
- *    revisao->refutacao edge (an implementer can contest a transient tool
+ *    review->refutation edge (an implementer can contest a transient tool
  *    failure), capped like any other gap by the edge's `max_retries`.
  *  - A lens skipped by `when:` is absent from `lentes` — nothing to do.
  */
@@ -50,16 +50,16 @@ export interface LensResult {
   securityVerdict?: { approved: boolean; findings: unknown[]; criticalArea: boolean };
 }
 
-export interface RevisaoOutput {
+export interface ReviewOutput {
   approved: boolean;
   gaps: LensGap[];
   securityVerdict: LensResult["securityVerdict"] | null;
 }
 
-export const aggregateRevisao = (lentes: Array<Record<string, unknown>>): RevisaoOutput => {
+export const aggregateReview = (lentes: Array<Record<string, unknown>>): ReviewOutput => {
   const gaps: LensGap[] = [];
   let approved = true;
-  let securityVerdict: RevisaoOutput["securityVerdict"] = null;
+  let securityVerdict: ReviewOutput["securityVerdict"] = null;
 
   for (const entry of lentes) {
     const name = String(entry.name ?? "unknown");
@@ -76,11 +76,11 @@ export const aggregateRevisao = (lentes: Array<Record<string, unknown>>): Revisa
     if (typeof output.approved === "boolean") approved = approved && output.approved;
 
     if (name === "security") {
-      securityVerdict = output as unknown as RevisaoOutput["securityVerdict"];
+      securityVerdict = output as unknown as ReviewOutput["securityVerdict"];
       const findings = Array.isArray(output.findings) ? (output.findings as Array<Record<string, unknown>>) : [];
       for (const finding of findings) {
         // Only an open AND blocking finding is contestable — a low-confidence
-        // note (blocking:false) never forces a refutacao round.
+        // note (blocking:false) never forces a refutation round.
         if (finding.status !== "open" || finding.blocking !== true) continue;
         gaps.push({
           lens: "security",

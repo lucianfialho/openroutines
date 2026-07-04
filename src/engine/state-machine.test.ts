@@ -58,15 +58,15 @@ describe("resolveOutputPaths", () => {
     expect(r.outputPath).toBe(".gates/outputs/exec1/s1.output.yaml");
   });
 
-  it("derives the worktree from the F3 `preparacao` output key too (card-to-pr)", () => {
-    const outputs = { preparacao: { worktree: { path: "/wt/card-x" } } };
-    const r = resolveOutputPaths(state({}), outputs, "exec1", "implementacao");
+  it("derives the worktree from the F3 `preparation` output key too (card-to-pr)", () => {
+    const outputs = { preparation: { worktree: { path: "/wt/card-x" } } };
+    const r = resolveOutputPaths(state({}), outputs, "exec1", "implementation");
     expect(r.worktreePath).toBe("/wt/card-x");
-    expect(r.outputPath).toBe("/wt/card-x/.gates/outputs/exec1/implementacao.output.yaml");
+    expect(r.outputPath).toBe("/wt/card-x/.gates/outputs/exec1/implementation.output.yaml");
   });
 
-  it("derives the worktree from the F4 #157 `rework_preparacao` output key too (rework flow)", () => {
-    const outputs = { rework_preparacao: { worktree: { path: "/wt/rework-x" } } };
+  it("derives the worktree from the F4 #157 `rework_preparation` output key too (rework flow)", () => {
+    const outputs = { rework_preparation: { worktree: { path: "/wt/rework-x" } } };
     const r = resolveOutputPaths(state({}), outputs, "exec1", "rework");
     expect(r.worktreePath).toBe("/wt/rework-x");
     expect(r.outputPath).toBe("/wt/rework-x/.gates/outputs/exec1/rework.output.yaml");

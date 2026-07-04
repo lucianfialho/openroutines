@@ -14,7 +14,7 @@ const runningExec = (id: string, currentState: string, worktreePath?: string): E
     stateMachineContext: {
       currentState,
       inputs: {},
-      outputs: worktreePath ? { preparacao: { worktree: { path: worktreePath } } } : {},
+      outputs: worktreePath ? { preparation: { worktree: { path: worktreePath } } } : {},
     },
   },
 });
@@ -25,7 +25,7 @@ describe("reconcileOrphanedExecutions", () => {
   it("recovers a running execution: resets its worktree and re-enqueues with the same executionId (AC4)", async () => {
     const repo = makeInMemoryRepository();
     await repo.save(runningExec("e1", "verify", "/tmp/or-worktrees/card-x"));
-    await repo.save({ ...runningExec("e2", "plano"), status: "completed" }); // not running → untouched
+    await repo.save({ ...runningExec("e2", "plan"), status: "completed" }); // not running → untouched
     const enqueued: Job[] = [];
     const reset = vi.fn(async () => {});
 
@@ -44,7 +44,7 @@ describe("reconcileOrphanedExecutions", () => {
 
   it("re-enqueues an execution that crashed before a worktree existed, without resetting", async () => {
     const repo = makeInMemoryRepository();
-    await repo.save(runningExec("e3", "preparacao")); // no worktree path in context
+    await repo.save(runningExec("e3", "preparation")); // no worktree path in context
     const reset = vi.fn(async () => {});
     const enqueued: Job[] = [];
 
@@ -61,7 +61,7 @@ describe("reconcileOrphanedExecutions", () => {
 
   it("marks an execution `failed` (not resumed) and does not enqueue when its reset throws", async () => {
     const repo = makeInMemoryRepository();
-    await repo.save(runningExec("e4", "implementacao", "/tmp/or-worktrees/card-y"));
+    await repo.save(runningExec("e4", "implementation", "/tmp/or-worktrees/card-y"));
     const enqueued: Job[] = [];
 
     const res = await reconcileOrphanedExecutions({

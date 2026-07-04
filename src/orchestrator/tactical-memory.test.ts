@@ -19,7 +19,7 @@ const task = (over: Partial<Task>): Task =>
 
 /**
  * Seed a completed, merged card in the history: one execution + one merged
- * pr_link + one task snapshot (+ optional plano run-state carrying a summary).
+ * pr_link + one task snapshot (+ optional plan run-state carrying a summary).
  */
 const seedMergedCard = async (
   deps: {
@@ -43,7 +43,7 @@ const seedMergedCard = async (
   await deps.prLinks.create({ sourceId: "trello", taskId: args.taskId, repo: args.repo, prNumber: args.prNumber, branch: `b/${args.taskId}`, status: "merged" });
   await deps.tasks.save(task({ id: args.taskId, title: args.title, labels: args.labels }));
   if (args.summary !== undefined && deps.runStates) {
-    deps.runStates.push({ executionId: args.execId, stateId: "plano", skillId: "card-to-pr", output: { summary: args.summary }, status: "completed", startedAt: new Date() });
+    deps.runStates.push({ executionId: args.execId, stateId: "plan", skillId: "card-to-pr", output: { summary: args.summary }, status: "completed", startedAt: new Date() });
   }
 };
 

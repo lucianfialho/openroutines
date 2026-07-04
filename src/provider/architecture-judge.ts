@@ -1,7 +1,7 @@
 /**
  * Architecture-judge composite provider (F4 #185, D9)
  *
- * The `gate_plano` state's provider: Opus judges the plan adversarially
+ * The `gate_plan` state's provider: Opus judges the plan adversarially
  * (architecture A/B/C, raizes-architecture-principles, scope vs. card) and
  * returns {verdict, corrections[], escalate}. Unlike security-judge
  * (independent verification + divergence check), this is a SEQUENTIAL
@@ -89,7 +89,7 @@ export const makeArchitectureJudgeProvider = (config: ArchitectureJudgeConfig): 
 
       // Parsed only to read `escalate` — the runner independently validates
       // whichever response (Opus or Fable) ends up as the final output
-      // against gate-plano.schema.json. A verdict that fails to parse/validate
+      // against gate-plan.schema.json. A verdict that fails to parse/validate
       // here must still fail loudly, never silently default to "no escalation".
       const verdict = yield* Effect.try({
         try: (): ArchitectureVerdict => {
@@ -103,7 +103,7 @@ export const makeArchitectureJudgeProvider = (config: ArchitectureJudgeConfig): 
 
       if (!verdict.escalate) return opusResponse;
 
-      // Fable receives the ORIGINAL request untouched (same plano+card) — it
+      // Fable receives the ORIGINAL request untouched (same plan+card) — it
       // never sees Opus's verdict; isolation by construction, not prompting.
       return yield* completeChecked(second, secondModel, request);
     });

@@ -451,8 +451,8 @@ describe("F4 — fanout lens extensions (#153)", () => {
       id: "t",
       initial_state: "prep",
       states: {
-        prep: { type: "script", script: "prep", transitions: [{ to: "revisao" }] },
-        revisao: {
+        prep: { type: "script", script: "prep", transitions: [{ to: "review" }] },
+        review: {
           type: "fanout",
           lenses: [
             { name: "correctness", provider: "kimi-cli", model: "kimi-k2.6", agent_prompt: "lens A" },
@@ -489,7 +489,7 @@ describe("F4 — fanout lens extensions (#153)", () => {
     });
     expect(r.success).toBe(true);
     expect(calls).toEqual(["kimi-cli:kimi-k2.6"]);
-    const lentes = (repo.lastOutputs().revisao as { lentes: Array<{ name: string }> }).lentes;
+    const lentes = (repo.lastOutputs().review as { lentes: Array<{ name: string }> }).lentes;
     expect(lentes.map((l) => l.name)).toEqual(["correctness"]);
   });
 
@@ -522,7 +522,7 @@ describe("F4 — fanout lens extensions (#153)", () => {
       },
     });
     expect(r.success).toBe(true);
-    const out = repo.lastOutputs().revisao as { approved: boolean; gaps: unknown[]; lensCount: number; lentes: unknown[] };
+    const out = repo.lastOutputs().review as { approved: boolean; gaps: unknown[]; lensCount: number; lentes: unknown[] };
     expect(out.approved).toBe(false);
     expect(out.gaps).toHaveLength(1);
     expect(out.lensCount).toBe(1);
@@ -547,8 +547,8 @@ describe("F4 — fanout lens extensions (#153)", () => {
     writeFileSync(promptPath, "review dataChanges={{outputs.prep.dataChanges}}");
     const { registry, requests } = makeTrackingRegistry();
     const skill = lensSkill();
-    (skill.states.revisao.lenses![0] as Record<string, unknown>).agent_prompt = undefined;
-    (skill.states.revisao.lenses![0] as Record<string, unknown>).agent_prompt_file = promptPath;
+    (skill.states.review.lenses![0] as Record<string, unknown>).agent_prompt = undefined;
+    (skill.states.review.lenses![0] as Record<string, unknown>).agent_prompt_file = promptPath;
     const r = await run(skill, {
       provider: { complete: () => Effect.succeed(resp()) },
       providerRegistry: registry,

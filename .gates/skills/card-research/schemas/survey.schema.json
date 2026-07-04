@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "card-research levantamento_proposta output",
+  "type": "object",
+  "required": ["summary", "currentState", "options", "dataChanges", "filesAffected", "phases"],
+  "properties": {
+    "summary": { "type": "string" },
+    "currentState": { "type": "string" },
+    "options": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "tradeoffs", "recommended"],
+        "properties": {
+          "name": { "type": "string" },
+          "tradeoffs": { "type": "string" },
+          "recommended": { "type": "boolean" }
+        }
+      }
+    },
+    "dataChanges": { "type": "array", "items": { "type": "string" } },
+    "filesAffected": { "type": "array", "items": { "type": "string" } },
+    "phases": { "type": "array", "items": { "type": "string" } }
+  }
+}

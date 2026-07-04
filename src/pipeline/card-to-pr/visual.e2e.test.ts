@@ -1,12 +1,12 @@
 /**
  * card-to-pr visual E2E (F5 #160): drives the REAL skill.yaml through
- * runStateMachine with a UI diff, so revisao routes to the new `visual` state.
+ * runStateMachine with a UI diff, so review routes to the new `visual` state.
  * Mirrors e2e.test.ts's harness; adds the visual seams (compose/SSIM/Kimi/
  * attach) as injected mocks.
  *
- * Flow: preparacao -> plano -> implementacao -> verify(isUI) -> revisao(approved)
- * -> visual(FAIL) -> implementacao -> verify -> revisao -> visual(PASS) -> pr.
- * The first visual failure returns to implementacao (never pr); the second pass
+ * Flow: preparation -> plan -> implementation -> verify(isUI) -> review(approved)
+ * -> visual(FAIL) -> implementation -> verify -> review -> visual(PASS) -> pr.
+ * The first visual failure returns to implementation (never pr); the second pass
  * attaches the screenshots to the card and fills the PR's "Visual" section.
  */
 import { describe, it, expect, vi } from "vitest";
@@ -58,7 +58,7 @@ const makeRepo = () => {
 };
 
 describe("card-to-pr visual E2E (#160)", () => {
-  it("visual reproves once (-> implementacao), then passes (-> pr) with screenshots attached and the PR 'Visual' section filled", async () => {
+  it("visual reproves once (-> implementation), then passes (-> pr) with screenshots attached and the PR 'Visual' section filled", async () => {
     const skill = parseSkillStateMachine(readFileSync(".gates/skills/card-to-pr/skill.yaml", "utf-8"));
 
     const registry: RepoRegistry = {
@@ -72,7 +72,7 @@ describe("card-to-pr visual E2E (#160)", () => {
       },
     };
 
-    // A UI diff (.tsx) so verify.isUI is true -> revisao routes to `visual`.
+    // A UI diff (.tsx) so verify.isUI is true -> review routes to `visual`.
     const runGit = async (args: string[]): Promise<{ stdout: string; stderr: string }> => {
       if (args[0] === "rev-parse") return { stdout: "deadbeefcafebabe1234\n", stderr: "" };
       if (args[0] === "diff" && args[1] === "--name-only") return { stdout: "src/Button.tsx\n", stderr: "" };
@@ -169,7 +169,7 @@ describe("card-to-pr visual E2E (#160)", () => {
           return {
             complete: (req: { messages?: Array<{ content: string }>; prompt?: string }) => {
               const prompt = req.messages?.[req.messages.length - 1]?.content ?? req.prompt ?? "";
-              return Effect.succeed(resp(prompt.includes("Implemente o plano") ? implementacaoJson : planoJson));
+              return Effect.succeed(resp(prompt.includes("Implemente o plan") ? implementacaoJson : planoJson));
             },
           } as unknown as ReturnType<ProviderRegistry["resolve"]>;
         }

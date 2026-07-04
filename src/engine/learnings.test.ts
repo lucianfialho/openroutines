@@ -129,29 +129,29 @@ describe("buildTacticalMemoryPrompt", () => {
   };
 
   it("returns '' when the repo is unknown (identical to current behavior)", async () => {
-    expect(await buildTacticalMemoryPrompt({ stateId: "plano", repo: undefined, inputs: {}, repoLearnings })).toBe("");
+    expect(await buildTacticalMemoryPrompt({ stateId: "plan", repo: undefined, inputs: {}, repoLearnings })).toBe("");
   });
 
   it("injects the repo-learnings block on any agent phase", async () => {
-    const block = await buildTacticalMemoryPrompt({ stateId: "implementacao", repo: "org/repo", inputs: {}, repoLearnings });
+    const block = await buildTacticalMemoryPrompt({ stateId: "implementation", repo: "org/repo", inputs: {}, repoLearnings });
     expect(block).toContain("convention X");
     expect(block).not.toContain("precedentes_cards_similares");
   });
 
   it("adds the precedents block only on the plan phase", async () => {
     const similarCards = async () => [{ title: "Prev card", prUrl: "https://github.com/org/repo/pull/9" }];
-    const onPlano = await buildTacticalMemoryPrompt({ stateId: "plano", repo: "org/repo", inputs: {}, repoLearnings, similarCards });
+    const onPlano = await buildTacticalMemoryPrompt({ stateId: "plan", repo: "org/repo", inputs: {}, repoLearnings, similarCards });
     expect(onPlano).toContain("Prev card");
-    const onImpl = await buildTacticalMemoryPrompt({ stateId: "implementacao", repo: "org/repo", inputs: {}, repoLearnings, similarCards });
+    const onImpl = await buildTacticalMemoryPrompt({ stateId: "implementation", repo: "org/repo", inputs: {}, repoLearnings, similarCards });
     expect(onImpl).not.toContain("Prev card");
   });
 
   it("swallows a failing lookup (best-effort, never breaks the phase)", async () => {
     const boom = { findTopByRepo: async () => { throw new Error("db down"); } };
-    expect(await buildTacticalMemoryPrompt({ stateId: "plano", repo: "org/repo", inputs: {}, repoLearnings: boom })).toBe("");
+    expect(await buildTacticalMemoryPrompt({ stateId: "plan", repo: "org/repo", inputs: {}, repoLearnings: boom })).toBe("");
   });
 
   it("omits the block when the repo has no learnings yet", async () => {
-    expect(await buildTacticalMemoryPrompt({ stateId: "plano", repo: "org/other", inputs: {}, repoLearnings })).toBe("");
+    expect(await buildTacticalMemoryPrompt({ stateId: "plan", repo: "org/other", inputs: {}, repoLearnings })).toBe("");
   });
 });

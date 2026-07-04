@@ -247,13 +247,13 @@ describe.skipIf(!hasTestDb())("buildWeeklyScorecard (real DB, end-to-end SQL)", 
     const e1 = await insertExec("t1", "low", "medium");
     await insertExec("t2", "low", "medium");
 
-    // e1 re-entered "implementacao" twice -> 1 retry; single run_states row = 0 retries.
+    // e1 re-entered "implementation" twice -> 1 retry; single run_states row = 0 retries.
     await pool.query(
-      `INSERT INTO run_states (execution_id, state_id, skill_id, status, started_at) VALUES ($1, 'implementacao', 'card-to-pr', 'completed', NOW())`,
+      `INSERT INTO run_states (execution_id, state_id, skill_id, status, started_at) VALUES ($1, 'implementation', 'card-to-pr', 'completed', NOW())`,
       [e1]
     );
     await pool.query(
-      `INSERT INTO run_states (execution_id, state_id, skill_id, status, started_at) VALUES ($1, 'implementacao', 'card-to-pr', 'completed', NOW())`,
+      `INSERT INTO run_states (execution_id, state_id, skill_id, status, started_at) VALUES ($1, 'implementation', 'card-to-pr', 'completed', NOW())`,
       [e1]
     );
   });

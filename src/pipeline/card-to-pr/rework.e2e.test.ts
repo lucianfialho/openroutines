@@ -1,12 +1,12 @@
 /**
  * card-to-pr rework-loop E2E (F4 #157, D24): drives the REAL skill.yaml from
- * `rework_preparacao` (the exact context app.ts's queueHandler builds for a
+ * `rework_preparation` (the exact context app.ts's queueHandler builds for a
  * rework:true payload) through runStateMachine with the real script handlers,
- * the real revisao fanout and the #185 dynamic-provider hook wired.
+ * the real review fanout and the #185 dynamic-provider hook wired.
  *
  * Covers the yaml wiring the unit tests can't: aborted -> done (no agent
- * call), needsClarification -> rework_pergunta -> done (question posted, no
- * round counted), and the full happy path rework -> verify -> revisao -> pr
+ * call), needsClarification -> rework_question -> done (question posted, no
+ * round counted), and the full happy path rework -> verify -> review -> pr
  * (same-branch push + re-request, NEVER createPullRequest) — with `rework`
  * routed to the card's ORIGINAL tier via resolveCardToPrDynamicProvider.
  */
@@ -67,7 +67,7 @@ const registry: RepoRegistry = {
 };
 
 // The exact context app.ts builds for a rework:true card-execution payload.
-const startContext = (): StateMachineContext => ({ currentState: "rework_preparacao", outputs: {} });
+const startContext = (): StateMachineContext => ({ currentState: "rework_preparation", outputs: {} });
 
 const event: TriggerEvent = {
   type: "card-execution",
@@ -90,7 +90,7 @@ interface HarnessOpts {
   reworkAgentOutput?: string;
   /** Queue of runVerify results, one per verify run (exhausted -> all-pass). */
   verifySequence?: Array<Record<string, { passed: boolean } | undefined>>;
-  /** Queue of correctness-lens outputs, one per revisao pass (exhausted -> approved). */
+  /** Queue of correctness-lens outputs, one per review pass (exhausted -> approved). */
   correctnessSequence?: string[];
 }
 
@@ -203,7 +203,7 @@ const makeHarness = async (opts: HarnessOpts = {}) => {
         return mkProvider(key, () => JSON.stringify({ approved: true, findings: [], criticalArea: false }));
       }
       if (String(name) === "claude-cli") {
-        // Serves refutacao (static sonnet) and an ESCALATED rework attempt (H8).
+        // Serves refutation (static sonnet) and an ESCALATED rework attempt (H8).
         return mkProvider(key, (prompt) => (prompt.includes("Refutação") ? refutacaoOutput : reworkOutput));
       }
       throw new Error(`rework e2e fixture: unexpected provider '${String(name)}'`);
@@ -224,7 +224,7 @@ const makeHarness = async (opts: HarnessOpts = {}) => {
 };
 
 describe("card-to-pr rework E2E (#157, D24)", () => {
-  it("full round: rework_preparacao -> rework (routed to the card's ORIGINAL kimi tier) -> verify -> revisao -> pr (same branch + re-request, never createPullRequest) -> done", async () => {
+  it("full round: rework_preparation -> rework (routed to the card's ORIGINAL kimi tier) -> verify -> review -> pr (same branch + re-request, never createPullRequest) -> done", async () => {
     const h = await makeHarness();
 
     const r = await Effect.runPromise(
@@ -239,7 +239,7 @@ describe("card-to-pr rework E2E (#157, D24)", () => {
 
     expect(r.success).toBe(true);
     expect(r.logs.join(" ")).toContain("Reached terminal state: done");
-    // D9/D24: complexity lowest -> the rework agent ran on kimi-k2.6, via the SAME hook as implementacao
+    // D9/D24: complexity lowest -> the rework agent ran on kimi-k2.6, via the SAME hook as implementation
     expect(h.providerCalls).toContain("kimi-cli:kimi-k2.6");
     // orchestrator pushed the SAME branch, no --force, and re-requested bob
     const push = h.runGit.mock.calls.find(([args]) => args[0] === "push");
@@ -256,7 +256,7 @@ describe("card-to-pr rework E2E (#157, D24)", () => {
     expect(h.moveToCalls).toContainEqual(["card1", "review"]);
   });
 
-  it("human commit on the branch: rework_preparacao aborts straight to done — no agent call, no push, no round counted, direction asked on the PR", async () => {
+  it("human commit on the branch: rework_preparation aborts straight to done — no agent call, no push, no round counted, direction asked on the PR", async () => {
     const h = await makeHarness({ humanCommit: true });
 
     const r = await Effect.runPromise(
@@ -280,7 +280,7 @@ describe("card-to-pr rework E2E (#157, D24)", () => {
     expect(h.moveToCalls).toHaveLength(0);
   });
 
-  it("ambiguous feedback: rework -> rework_pergunta posts the question on the PR thread -> done, without counting a round", async () => {
+  it("ambiguous feedback: rework -> rework_question posts the question on the PR thread -> done, without counting a round", async () => {
     const h = await makeHarness({
       reworkAgentOutput: JSON.stringify({ needsClarification: true, question: "o comentário pede X ou Y?" }),
     });
@@ -306,12 +306,12 @@ describe("card-to-pr rework E2E (#157, D24)", () => {
     expect(link.reviewState).toBe("changes_requested"); // next night re-admits after direction arrives
   });
 
-  it("H5: retry edges in the rework flow re-enter REWORK (never implementacao) with fully-resolved prompts — refutacao-corrigir and verify-retry", async () => {
+  it("H5: retry edges in the rework flow re-enter REWORK (never implementation) with fully-resolved prompts — refutation-corrigir and verify-retry", async () => {
     const gapDescription = "nao tratou o null em src/foo.ts";
     const h = await makeHarness({
-      // rework(1) -> verify PASS -> revisao GAPS -> refutacao corrigir ->
+      // rework(1) -> verify PASS -> review GAPS -> refutation corrigir ->
       // rework(2) -> verify FAIL(retryable) -> rework(3) -> verify PASS ->
-      // revisao approved -> pr -> done
+      // review approved -> pr -> done
       verifySequence: [verifyPass, { build: { passed: true }, test: { passed: false } }, verifyPass],
       correctnessSequence: [
         JSON.stringify({ approved: false, gaps: [{ description: gapDescription, file: "src/foo.ts", line: 12, contestable: true, rubrica: "correcao" }] }),
@@ -333,19 +333,19 @@ describe("card-to-pr rework E2E (#157, D24)", () => {
     expect(r.logs.join(" ")).toContain("Reached terminal state: done");
     expect(h.runVerify).toHaveBeenCalledTimes(3);
 
-    // implementacao's prompt was NEVER rendered — the retry edges landed on rework.
-    expect(h.prompts.some((p) => p.prompt.includes("Implemente o plano"))).toBe(false);
+    // implementation's prompt was NEVER rendered — the retry edges landed on rework.
+    expect(h.prompts.some((p) => p.prompt.includes("Implemente o plan"))).toBe(false);
 
     const reworkPrompts = h.prompts.filter((p) => p.prompt.includes("Retrabalho")).map((p) => p.prompt);
     expect(reworkPrompts).toHaveLength(3);
-    // 1st pass: retry-context placeholders are literal (accepted wart, same as implementacao's).
+    // 1st pass: retry-context placeholders are literal (accepted wart, same as implementation's).
     expect(reworkPrompts[0]).toContain("{{outputs.verify}}");
-    // 2nd entry (refutacao 'corrigir') and 3rd (verify retry): NO dangling
+    // 2nd entry (refutation 'corrigir') and 3rd (verify retry): NO dangling
     // placeholder — the agent is never blind. Format-agnostic asserts only
     // (template.ts rendering of objects/arrays may change).
     expect(reworkPrompts[1]).not.toContain("{{outputs.");
     expect(reworkPrompts[2]).not.toContain("{{outputs.");
-    // The revisao gap and the failed-verify context actually reached the agent.
+    // The review gap and the failed-verify context actually reached the agent.
     expect(reworkPrompts[1]).toContain(gapDescription);
     expect(reworkPrompts[2]).toContain("failureSignature");
 
@@ -356,7 +356,7 @@ describe("card-to-pr rework E2E (#157, D24)", () => {
     expect(link.reworkCount).toBe(1);
   }, 30000);
 
-  it("H8: verify failing twice in the rework flow escalates the tier once (kimi -> sonnet), then verify's attempt cap routes to bloqueado", async () => {
+  it("H8: verify failing twice in the rework flow escalates the tier once (kimi -> sonnet), then verify's attempt cap routes to blocked", async () => {
     const h = await makeHarness({
       // Different failing steps -> different failureSignatures (no stall):
       // attempt1 test fails, attempt2 build fails, attempt3 fails again.
@@ -377,15 +377,15 @@ describe("card-to-pr rework E2E (#157, D24)", () => {
       )
     );
 
-    expect(r.success).toBe(true); // bloqueado -> done is a clean terminal path
+    expect(r.success).toBe(true); // blocked -> done is a clean terminal path
     expect(h.runVerify).toHaveBeenCalledTimes(3);
     // The runner asked the hook for the ESCALATED route on the rework state.
     expect(h.routeSpy).toHaveBeenCalledWith(expect.objectContaining({ stateId: "rework", escalated: true }));
     // rework ran twice on the card's original kimi tier, then ONCE on the
-    // escalated sonnet tier — and never fell into implementacao.
+    // escalated sonnet tier — and never fell into implementation.
     const reworkKeys = h.prompts.filter((p) => p.prompt.includes("Retrabalho")).map((p) => p.key);
     expect(reworkKeys).toEqual(["kimi-cli:kimi-k2.6", "kimi-cli:kimi-k2.6", "claude-cli:claude-sonnet-5"]);
-    expect(h.prompts.some((p) => p.prompt.includes("Implemente o plano"))).toBe(false);
+    expect(h.prompts.some((p) => p.prompt.includes("Implemente o plan"))).toBe(false);
     // 3rd failure (verify attempt cap, retryable:false) blocked the card: no
     // push, no re-request, card moved to blocked.
     expect(h.runGit.mock.calls.some(([args]) => args[0] === "push")).toBe(false);

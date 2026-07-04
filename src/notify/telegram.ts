@@ -2,14 +2,14 @@
  * Telegram alert channel (D22, F4 #186).
  *
  * The orchestrator's only "wake you up at 3am" signal: card blocked with a
- * `seguranca*` blockReason, or the night-run itself failing/hard-stopping
+ * `security*` blockReason, or the night-run itself failing/hard-stopping
  * with work interrupted. D22 rejected WhatsApp Cloud API (Meta-preapproved
  * templates) in favor of "1 token, 1 POST" — deliberately no queue/retry.
  * Everything else stays on the board/report, never here (10-ESTADOS-DAS-TAREFAS.md).
  */
 
 export function isSecurityBlockReason(blockReason: string | undefined): boolean {
-  return !!blockReason && blockReason.startsWith("seguranca");
+  return !!blockReason && blockReason.startsWith("security");
 }
 
 export async function sendTelegramAlert(text: string): Promise<void> {
@@ -21,7 +21,7 @@ export async function sendTelegramAlert(text: string): Promise<void> {
   }
   // ponytail: 1 POST, sem retry/fila — D22 pede "sendMessage único"; se falhar
   // (rede ou HTTP), só loga — o card 📊 07:30 ausente (09-RUNBOOK.md) é o
-  // alarme de reserva. Nunca deixa o caller (bloqueado.ts/runNightCycle) explodir
+  // alarme de reserva. Nunca deixa o caller (blocked.ts/runNightCycle) explodir
   // por causa de um alerta que é conveniência, não caminho crítico.
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {

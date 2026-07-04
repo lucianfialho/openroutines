@@ -2,16 +2,16 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { isSecurityBlockReason, sendTelegramAlert } from "./telegram.js";
 
 describe("isSecurityBlockReason", () => {
-  it("matches the 'seguranca' prefix, not exact equality", () => {
-    expect(isSecurityBlockReason("seguranca")).toBe(true);
-    expect(isSecurityBlockReason("seguranca-divergente")).toBe(true);
-    expect(isSecurityBlockReason("seguranca-outra-coisa")).toBe(true);
+  it("matches the 'security' prefix, not exact equality", () => {
+    expect(isSecurityBlockReason("security")).toBe(true);
+    expect(isSecurityBlockReason("security-divergent")).toBe(true);
+    expect(isSecurityBlockReason("security-outra-coisa")).toBe(true);
   });
 
   it("returns false for every other blockReason and for undefined", () => {
-    expect(isSecurityBlockReason("verify-falhou")).toBe(false);
-    expect(isSecurityBlockReason("plano-refutado-2x")).toBe(false);
-    expect(isSecurityBlockReason("retrabalho-esgotado")).toBe(false);
+    expect(isSecurityBlockReason("verify-failed")).toBe(false);
+    expect(isSecurityBlockReason("plan-refuted-2x")).toBe(false);
+    expect(isSecurityBlockReason("rework-exhausted")).toBe(false);
     expect(isSecurityBlockReason(undefined)).toBe(false);
   });
 });
@@ -38,13 +38,13 @@ describe("sendTelegramAlert", () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { ok: true }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await sendTelegramAlert("⛔ card bloqueado");
+    await sendTelegramAlert("⛔ card blocked");
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://api.telegram.org/botbot123:ABC/sendMessage");
     expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body as string)).toEqual({ chat_id: "999", text: "⛔ card bloqueado" });
+    expect(JSON.parse(init.body as string)).toEqual({ chat_id: "999", text: "⛔ card blocked" });
   });
 
   it("does not throw, does not call fetch, and just warns when TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are missing", async () => {

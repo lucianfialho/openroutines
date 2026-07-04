@@ -4,7 +4,7 @@
  * effect mocked/injected — mirrors src/engine/state-machine-f1.test.ts's
  * harness pattern.
  *
- * preparacao -> plano -> implementacao -> verify(passed) -> revisao (fanout,
+ * preparation -> plan -> implementation -> verify(passed) -> review (fanout,
  * approved; dataChanges stays false in this fixture so the data lens never
  * fires) -> pr(mock push+PR) -> done. `pr_gate` is gone (F4 #153): the
  * adversarial review + security lens ARE the pre-PR gate now, so this happy
@@ -68,7 +68,7 @@ const makeRepo = () => {
 };
 
 describe("card-to-pr E2E (#146, #153)", () => {
-  it("preparacao -> plano -> implementacao -> verify -> revisao (approved) -> pr -> done", async () => {
+  it("preparation -> plan -> implementation -> verify -> review (approved) -> pr -> done", async () => {
     const skill = parseSkillStateMachine(readFileSync(".gates/skills/card-to-pr/skill.yaml", "utf-8"));
 
     const registry: RepoRegistry = {
@@ -144,7 +144,7 @@ describe("card-to-pr E2E (#146, #153)", () => {
       // whole-number LOC estimate in production too (see deviationsFromSpec).
       dataChanges: [],
       // needsArchGate:false (F4 #185) — this happy-path fixture goes straight
-      // to implementacao, never through gate_plano; see gate-plano.e2e.test.ts
+      // to implementation, never through gate_plan; see gate-plan.e2e.test.ts
       // for the architecture-gate flow.
       needsArchGate: false,
       risks: [],
@@ -155,8 +155,8 @@ describe("card-to-pr E2E (#146, #153)", () => {
       notes: "done",
       openDecisions: [],
     });
-    // plano/implementacao both declare provider:claude-cli and are served in
-    // order from one queue. The revisao fanout (F4 #153) resolves its lenses
+    // plan/implementation both declare provider:claude-cli and are served in
+    // order from one queue. The review fanout (F4 #153) resolves its lenses
     // to their OWN named providers: correctness (kimi-cli) and security
     // (security-judge) always answer approved; data (claude-cli) is never
     // called because runGit's diff is empty here (dataChanges stays false).
@@ -212,7 +212,7 @@ describe("card-to-pr E2E (#146, #153)", () => {
     expect(r.success).toBe(true);
     expect(r.logs.join(" ")).toContain("Reached terminal state: done");
     expect(moveToCalls).toContainEqual(["card1", "review"]);
-    expect(claudeCliCalls).toBe(2); // plano + implementacao only — the data lens never fires
+    expect(claudeCliCalls).toBe(2); // plan + implementation only — the data lens never fires
 
     const links = await prLinks.findByTask("trello-main", "card1");
     expect(links).toHaveLength(1);
@@ -221,12 +221,12 @@ describe("card-to-pr E2E (#146, #153)", () => {
 
   // Normal-flow analog of rework.e2e.test.ts's H8 (this file's review found the
   // escalation path covered only for rework, never for a fresh card): verify
-  // failing retryable twice must retry `implementacao` on the card's original
+  // failing retryable twice must retry `implementation` on the card's original
   // tier once, then grant the F4 #159 tier escalation for the 2nd retry — and
-  // never divert through the rework flow's `rework`/`rework_preparacao`
-  // states, since `output.rework_preparacao` is never set here (skill.yaml's
+  // never divert through the rework flow's `rework`/`rework_preparation`
+  // states, since `output.rework_preparation` is never set here (skill.yaml's
   // verify->rework edge only matches inside the rework flow).
-  it("H8-normal: verify failing twice from preparacao escalates implementacao's tier once (kimi -> sonnet), never the rework route, then verify's attempt cap routes to bloqueado", async () => {
+  it("H8-normal: verify failing twice from preparation escalates implementation's tier once (kimi -> sonnet), never the rework route, then verify's attempt cap routes to blocked", async () => {
     const skill = parseSkillStateMachine(readFileSync(".gates/skills/card-to-pr/skill.yaml", "utf-8"));
 
     const registry: RepoRegistry = {
@@ -296,7 +296,7 @@ describe("card-to-pr E2E (#146, #153)", () => {
       files: ["src/foo.ts"],
       testStrategy: "unit tests around the new validation",
       dataChanges: [],
-      needsArchGate: false, // straight to implementacao, same as the happy-path fixture above
+      needsArchGate: false, // straight to implementation, same as the happy-path fixture above
       risks: [],
     });
     const implementacaoJson = JSON.stringify({
@@ -321,14 +321,14 @@ describe("card-to-pr E2E (#146, #153)", () => {
       resolve: (name, model) => {
         const key = `${String(name)}:${model ?? ""}`;
         if (String(name) === "claude-cli") {
-          // Serves BOTH plano (static tier) and the ESCALATED 3rd implementacao
+          // Serves BOTH plan (static tier) and the ESCALATED 3rd implementation
           // attempt (D9's "lowest" complexity escalates kimi -> sonnet, the
-          // same claude-cli/claude-sonnet-5 route plano already uses).
-          return mkProvider(key, (prompt) => (prompt.includes("Implemente o plano") ? implementacaoJson : planoJson));
+          // same claude-cli/claude-sonnet-5 route plan already uses).
+          return mkProvider(key, (prompt) => (prompt.includes("Implemente o plan") ? implementacaoJson : planoJson));
         }
         if (String(name) === "kimi-cli") {
-          // implementacao's card-original tier for complexity "lowest" (D9) —
-          // only ever hit by implementacao here (revisao is never reached).
+          // implementation's card-original tier for complexity "lowest" (D9) —
+          // only ever hit by implementation here (review is never reached).
           return mkProvider(key, () => implementacaoJson);
         }
         throw new Error(`e2e escalation fixture: unexpected provider '${key}'`);
@@ -360,16 +360,16 @@ describe("card-to-pr E2E (#146, #153)", () => {
 
     const r = await Effect.runPromise(runStateMachine(config)(skill, routine, event, "exec1"));
 
-    expect(r.success).toBe(true); // bloqueado -> done is a clean terminal path
+    expect(r.success).toBe(true); // blocked -> done is a clean terminal path
     expect(runVerify).toHaveBeenCalledTimes(3);
-    // The runner asked the hook for the ESCALATED route on implementacao —
+    // The runner asked the hook for the ESCALATED route on implementation —
     // never on `rework` (this execution never enters the rework flow at all).
-    expect(routeSpy).toHaveBeenCalledWith(expect.objectContaining({ stateId: "implementacao", escalated: true }));
+    expect(routeSpy).toHaveBeenCalledWith(expect.objectContaining({ stateId: "implementation", escalated: true }));
     expect(routeSpy).not.toHaveBeenCalledWith(expect.objectContaining({ stateId: "rework" }));
 
-    // implementacao ran twice on the card's original kimi tier, then ONCE on
+    // implementation ran twice on the card's original kimi tier, then ONCE on
     // the escalated sonnet tier — and never through rework's own template.
-    const implPrompts = prompts.filter((p) => p.prompt.includes("Implemente o plano"));
+    const implPrompts = prompts.filter((p) => p.prompt.includes("Implemente o plan"));
     expect(implPrompts.map((p) => p.key)).toEqual(["kimi-cli:kimi-k2.6", "kimi-cli:kimi-k2.6", "claude-cli:claude-sonnet-5"]);
     // 1st pass: the retry-context placeholder is literal (no prior verify to
     // interpolate yet — accepted wart, same one rework.e2e.test.ts's H5 documents).
@@ -381,10 +381,10 @@ describe("card-to-pr E2E (#146, #153)", () => {
     expect(prompts.some((p) => p.prompt.includes("Retrabalho"))).toBe(false);
 
     // Pin (deliberate, mirrors rework.e2e.test.ts's H8): skill.yaml's
-    // verify->implementacao edge carries max_retries:1 + on_exhausted:bloqueado.
+    // verify->implementation edge carries max_retries:1 + on_exhausted: blocked.
     // Exhaustion spends that edge's ONE grant as a tier escalation instead of
     // firing on_exhausted immediately — so a would-be SECOND exhaustion of the
-    // SAME edge falls straight to bloqueado (escalatedEdges guards against
+    // SAME edge falls straight to blocked (escalatedEdges guards against
     // ever granting twice), never an infinite retry loop on the escalated
     // tier. Here verify.ts's own attempt<=2 cap wins the race first (3rd
     // failure -> retryable:false -> the earlier `retryable != true` edge), but

@@ -1,12 +1,12 @@
 /**
- * card-to-pr / rework_preparacao + rework_pergunta (F4 #157, D24)
+ * card-to-pr / rework_preparation + rework_question (F4 #157, D24)
  *
- * rework_preparacao (script): recreate a worktree from the PR branch's REMOTE
+ * rework_preparation (script): recreate a worktree from the PR branch's REMOTE
  * head (detached, no new branch), guard against human commits since the
  * agent's last push (abort + ask for direction — NEVER overwrite), and build
  * the delimited fix-list from the PR's inline review comments.
  *
- * rework_pergunta (script): when the rework agent flags the feedback as
+ * rework_question (script): when the rework agent flags the feedback as
  * ambiguous, the ORCHESTRATOR posts its question on the PR thread (D13: only
  * the orchestrator touches the remote) and the flow ends without counting a
  * rework round.
@@ -24,7 +24,7 @@ import type { VerifyResults } from "../../verify/run-commands.js";
 import { ensureIgnoreScripts } from "../../security/supply-chain-guard.js";
 import { buildFixList, type FixListComment } from "../../review/build-fix-list.js";
 import { defaultRunGit, type CardToPrDeps } from "./index.js";
-import type { PreparacaoOutput } from "./preparacao.js";
+import type { PreparationOutput } from "./preparation.js";
 
 /**
  * Default agent commit identity — the values git-worktree-tools' git_commit
@@ -33,8 +33,8 @@ import type { PreparacaoOutput } from "./preparacao.js";
  */
 export const DEFAULT_AGENT_GIT_AUTHORS = ["OpenRoutines Bot", "openroutines@bot.local"];
 
-/** Field-compatible with PreparacaoOutput where verify/pr read it (worktree/baseSha/baselineResults/repo). */
-export interface ReworkPreparacaoOutput {
+/** Field-compatible with PreparationOutput where verify/pr read it (worktree/baseSha/baselineResults/repo). */
+export interface ReworkPreparationOutput {
   aborted: boolean;
   abortReason?: "commit-humano" | "sem-last-agent-sha" | "pr-nao-aberto";
   prNumber?: number;
@@ -44,12 +44,12 @@ export interface ReworkPreparacaoOutput {
   worktree?: { path: string; branch: string };
   baseSha?: string;
   baselineResults?: VerifyResults | null;
-  repo?: PreparacaoOutput["repo"];
+  repo?: PreparationOutput["repo"];
 }
 
 const slugifyTaskId = (id: string): string => id.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40);
 
-const toRepoOutput = (repoConfig: RepoConfig, slug: string): PreparacaoOutput["repo"] => ({
+const toRepoOutput = (repoConfig: RepoConfig, slug: string): PreparationOutput["repo"] => ({
   githubRepo: repoConfig.githubRepo,
   baseBranch: repoConfig.baseBranch,
   clonePath: repoConfig.clonePath,
@@ -83,7 +83,7 @@ export const findHumanAuthors = (gitLogOutput: string, agentAuthors: string[]): 
   return humans;
 };
 
-export const makeReworkPreparacao = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
+export const makeReworkPreparation = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
   const sourceId = String(ctx.inputs.source_id);
   const taskId = String(ctx.inputs.task_id);
   const repoField = String(ctx.inputs.repo);
@@ -110,7 +110,7 @@ export const makeReworkPreparacao = (deps: CardToPrDeps): ScriptHandler => async
       { sourceId, taskId, branch },
       { status: snapshot.prState === "MERGED" ? "merged" : "closed" }
     );
-    return { aborted: true, abortReason: "pr-nao-aberto", prNumber } satisfies ReworkPreparacaoOutput;
+    return { aborted: true, abortReason: "pr-nao-aberto", prNumber } satisfies ReworkPreparationOutput;
   }
 
   const runGit = deps.runGit ?? defaultRunGit(deps.githubToken);
@@ -157,7 +157,7 @@ export const makeReworkPreparacao = (deps: CardToPrDeps): ScriptHandler => async
         return {};
       }
     );
-    return { aborted: true, abortReason: reason, prNumber } satisfies ReworkPreparacaoOutput;
+    return { aborted: true, abortReason: reason, prNumber } satisfies ReworkPreparationOutput;
   };
 
   if (!lastAgentSha) {
@@ -202,12 +202,12 @@ export const makeReworkPreparacao = (deps: CardToPrDeps): ScriptHandler => async
     baseSha,
     baselineResults,
     repo: repoOut,
-  } satisfies ReworkPreparacaoOutput;
+  } satisfies ReworkPreparationOutput;
 };
 
 /** Ambiguous review feedback: the orchestrator posts the agent's question on the PR thread (D13). */
-export const makeReworkPergunta = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
-  const reworkPrep = ctx.outputs.rework_preparacao as ReworkPreparacaoOutput;
+export const makeReworkQuestion = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
+  const reworkPrep = ctx.outputs.rework_preparation as ReworkPreparationOutput;
   const rework = ctx.outputs.rework as { question?: string } | undefined;
   const question = rework?.question?.trim() || "o feedback do review não deu direção acionável — pode detalhar o que deve mudar?";
 

@@ -19,7 +19,7 @@
  *  4. Any assertion below the confidence threshold OR of kind "brand-fidelity"
  *     escalates to Sonnet vision (src/provider/claude.ts, real image blocks).
  *  5. On pass: screenshots attach to the card; the `pr` state fills the PR's
- *     "Visual" section from this output. On fail: back to implementacao (the
+ *     "Visual" section from this output. On fail: back to implementation (the
  *     skill.yaml edge caps it at one cycle).
  *
  * `down()` ALWAYS runs in `finally`, its error swallowed so it can never mask
@@ -40,7 +40,7 @@ import type { TaskSource } from "../../task-source/types.js";
 import { extractOutput } from "../../engine/output.js";
 import { up as composeUpDefault, down as composeDownDefault, DEFAULT_COMPOSE_FILE, DEFAULT_BASE_URL } from "../../orchestrator/compose-lifecycle.js";
 import type { CardToPrDeps } from "./index.js";
-import type { PreparacaoOutput } from "./preparacao.js";
+import type { PreparationOutput } from "./preparation.js";
 
 export interface VisualAssertionSpec {
   id: string;
@@ -265,20 +265,20 @@ const buildVisionPrompt = (assertion: VisualAssertionSpec, criteria: { title: st
 
 // ---- Handler ----
 
-const readSpec = (ctx: ScriptContext): { preparacao: PreparacaoOutput; assertions: VisualAssertionSpec[] } => {
-  // Rework flow (F4 #157) enters at rework_preparacao; both carry a
+const readSpec = (ctx: ScriptContext): { preparation: PreparationOutput; assertions: VisualAssertionSpec[] } => {
+  // Rework flow (F4 #157) enters at rework_preparation; both carry a
   // field-compatible worktree/repo, same as verify.ts / pr.ts read them.
-  const preparacao = (ctx.outputs.preparacao ?? ctx.outputs.rework_preparacao) as PreparacaoOutput;
-  const plano = ctx.outputs.plano as { visualAssertions?: VisualAssertionSpec[] } | undefined;
-  return { preparacao, assertions: plano?.visualAssertions ?? [] };
+  const preparation = (ctx.outputs.preparation ?? ctx.outputs.rework_preparation) as PreparationOutput;
+  const plan = ctx.outputs.plan as { visualAssertions?: VisualAssertionSpec[] } | undefined;
+  return { preparation, assertions: plan?.visualAssertions ?? [] };
 };
 
 export const makeVisual = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
   const visual = deps.visual;
   if (!visual) throw new Error("visual phase reached but deps.visual is not configured");
 
-  const { preparacao, assertions } = readSpec(ctx);
-  const worktreePath = preparacao.worktree!.path;
+  const { preparation, assertions } = readSpec(ctx);
+  const worktreePath = preparation.worktree!.path;
   const composeUp = visual.composeUp ?? composeUpDefault;
   const composeDown = visual.composeDown ?? composeDownDefault;
   const runSsim = visual.runSsim ?? defaultRunSsim;

@@ -189,16 +189,16 @@ describe("F1 runner — type: fanout", () => {
   it("runs lenses in parallel and aggregates {lentes, approved}", async () => {
     const skill: SkillStateMachine = {
       id: "t",
-      initial_state: "revisao",
+      initial_state: "review",
       states: {
-        revisao: {
+        review: {
           type: "fanout",
           lenses: [
             { name: "correctness", provider: "pA", agent_prompt: "review A" },
             { name: "security", provider: "pB", agent_prompt: "review B" },
           ],
           transitions: [
-            { to: "done_ok", when: "output.revisao.approved == true" },
+            { to: "done_ok", when: "output.review.approved == true" },
             { to: "done_fail" },
           ],
         },
@@ -217,7 +217,7 @@ describe("F1 runner — type: fanout", () => {
     expect(r.success).toBe(true);
     expect(pA.complete).toHaveBeenCalledOnce();
     expect(pB.complete).toHaveBeenCalledOnce();
-    const out = (repo.lastContext()!.outputs as any).revisao;
+    const out = (repo.lastContext()!.outputs as any).review;
     expect(out.lentes).toHaveLength(2);
     expect(out.approved).toBe(true);
     expect(r.logs.join(" ")).toContain("Reached terminal state: done_ok");
@@ -228,16 +228,16 @@ describe("F1 runner — type: fanout", () => {
   it("marks approved:false when a lens errors, without collapsing the state", async () => {
     const skill: SkillStateMachine = {
       id: "t",
-      initial_state: "revisao",
+      initial_state: "review",
       states: {
-        revisao: {
+        review: {
           type: "fanout",
           lenses: [
             { name: "ok", provider: "pOk", agent_prompt: "a" },
             { name: "boom", provider: "pBoom", agent_prompt: "b" },
           ],
           transitions: [
-            { to: "done_ok", when: "output.revisao.approved == true" },
+            { to: "done_ok", when: "output.review.approved == true" },
             { to: "done_fail" },
           ],
         },
@@ -251,7 +251,7 @@ describe("F1 runner — type: fanout", () => {
     const repo = makeRepo();
     const { provider } = seqProvider(() => resp());
     const r = await run(skill, { provider, providerRegistry, repository: repo.repo });
-    const out = (repo.lastContext()!.outputs as any).revisao;
+    const out = (repo.lastContext()!.outputs as any).review;
     expect(out.lentes).toHaveLength(2);
     expect(out.approved).toBe(false);
     expect(r.logs.join(" ")).toContain("Reached terminal state: done_fail");

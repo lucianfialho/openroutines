@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { Effect } from "effect";
-import { makeReworkPreparacao, makeReworkPergunta, findHumanAuthors, DEFAULT_AGENT_GIT_AUTHORS } from "./rework.js";
-import type { ReworkPreparacaoOutput } from "./rework.js";
+import { makeReworkPreparation, makeReworkQuestion, findHumanAuthors, DEFAULT_AGENT_GIT_AUTHORS } from "./rework.js";
+import type { ReworkPreparationOutput } from "./rework.js";
 import type { CardToPrDeps } from "./index.js";
 import { makeInMemoryActionLedgerRepository } from "../../persistence/action-ledger-in-memory.js";
 import { makeInMemoryPrLinkRepository } from "../../persistence/pr-links-in-memory.js";
@@ -95,14 +95,14 @@ const seedLink = async (deps: CardToPrDeps, lastAgentCommitSha?: string) => {
   });
 };
 
-describe("makeReworkPreparacao (F4 #157, D24)", () => {
+describe("makeReworkPreparation (F4 #157, D24)", () => {
   it("AC: recreates the worktree from origin/<branch> — detached, no -b (inspected via git args)", async () => {
     const runGit = makeRunGit();
     const { github } = makeGithubMock();
     const deps = makeDeps({ runGit, makeGithub: (() => github) as unknown as CardToPrDeps["makeGithub"] });
     await seedLink(deps, "agentsha1");
 
-    const out = (await makeReworkPreparacao(deps)({ inputs, outputs: {}, executionId: "exec-rw1", stateId: "rework_preparacao" })) as unknown as ReworkPreparacaoOutput;
+    const out = (await makeReworkPreparation(deps)({ inputs, outputs: {}, executionId: "exec-rw1", stateId: "rework_preparation" })) as unknown as ReworkPreparationOutput;
 
     expect(out.aborted).toBe(false);
     const wtCall = runGit.mock.calls.find(([args]) => args[0] === "worktree");
@@ -129,7 +129,7 @@ describe("makeReworkPreparacao (F4 #157, D24)", () => {
     const deps = makeDeps({ runGit, makeGithub: (() => github) as unknown as CardToPrDeps["makeGithub"] });
     await seedLink(deps, "agentsha1");
 
-    const out = (await makeReworkPreparacao(deps)({ inputs, outputs: {}, executionId: "exec-rw2", stateId: "rework_preparacao" })) as unknown as ReworkPreparacaoOutput;
+    const out = (await makeReworkPreparation(deps)({ inputs, outputs: {}, executionId: "exec-rw2", stateId: "rework_preparation" })) as unknown as ReworkPreparationOutput;
 
     expect(out.aborted).toBe(true);
     expect(out.abortReason).toBe("commit-humano");
@@ -151,7 +151,7 @@ describe("makeReworkPreparacao (F4 #157, D24)", () => {
     const deps = makeDeps({ runGit, makeGithub: (() => github) as unknown as CardToPrDeps["makeGithub"] });
     await seedLink(deps); // no sha
 
-    const out = (await makeReworkPreparacao(deps)({ inputs, outputs: {}, executionId: "exec-rw3", stateId: "rework_preparacao" })) as unknown as ReworkPreparacaoOutput;
+    const out = (await makeReworkPreparation(deps)({ inputs, outputs: {}, executionId: "exec-rw3", stateId: "rework_preparation" })) as unknown as ReworkPreparationOutput;
 
     expect(out.aborted).toBe(true);
     expect(out.abortReason).toBe("sem-last-agent-sha");
@@ -170,7 +170,7 @@ describe("makeReworkPreparacao (F4 #157, D24)", () => {
     const deps = makeDeps({ makeGithub: (() => github) as unknown as CardToPrDeps["makeGithub"] });
     await seedLink(deps, "agentsha1");
 
-    const out = (await makeReworkPreparacao(deps)({ inputs, outputs: {}, executionId: "exec-rw4", stateId: "rework_preparacao" })) as unknown as ReworkPreparacaoOutput;
+    const out = (await makeReworkPreparation(deps)({ inputs, outputs: {}, executionId: "exec-rw4", stateId: "rework_preparation" })) as unknown as ReworkPreparationOutput;
 
     expect(out.fixList!.startsWith(FIX_LIST_HIERARCHY)).toBe(true);
     expect(out.fixList).toContain("faltou tratar o null");
@@ -188,7 +188,7 @@ describe("makeReworkPreparacao (F4 #157, D24)", () => {
     const deps = makeDeps({ runGit, makeGithub: (() => github) as unknown as CardToPrDeps["makeGithub"] });
     await seedLink(deps, "agentsha1");
 
-    const out = (await makeReworkPreparacao(deps)({ inputs, outputs: {}, executionId: "exec-rw5", stateId: "rework_preparacao" })) as unknown as ReworkPreparacaoOutput;
+    const out = (await makeReworkPreparation(deps)({ inputs, outputs: {}, executionId: "exec-rw5", stateId: "rework_preparation" })) as unknown as ReworkPreparationOutput;
 
     expect(out.aborted).toBe(true);
     expect(out.abortReason).toBe("pr-nao-aberto");
@@ -207,12 +207,12 @@ describe("findHumanAuthors", () => {
   });
 });
 
-describe("makeReworkPergunta (F4 #157, D13)", () => {
+describe("makeReworkQuestion (F4 #157, D13)", () => {
   it("posts the agent's question on the PR thread exactly once across a crash-resume (ledger-guarded)", async () => {
     const { github, prComments } = makeGithubMock();
     const deps = makeDeps({ makeGithub: (() => github) as unknown as CardToPrDeps["makeGithub"] });
     const outputs = {
-      rework_preparacao: {
+      rework_preparation: {
         aborted: false,
         prNumber: 42,
         repo: { githubRepo: "acme/widgets", baseBranch: "development", clonePath: "/tmp/c", slug: "acme-widgets", verify: { build: "true", test: "true" } },
@@ -220,9 +220,9 @@ describe("makeReworkPergunta (F4 #157, D13)", () => {
       rework: { needsClarification: true, question: "o comentário pede X ou Y?" },
     };
 
-    const handler = makeReworkPergunta(deps);
-    const r1 = await handler({ inputs, outputs, executionId: "exec-q1", stateId: "rework_pergunta" });
-    const r2 = await handler({ inputs, outputs, executionId: "exec-q1", stateId: "rework_pergunta" });
+    const handler = makeReworkQuestion(deps);
+    const r1 = await handler({ inputs, outputs, executionId: "exec-q1", stateId: "rework_question" });
+    const r2 = await handler({ inputs, outputs, executionId: "exec-q1", stateId: "rework_question" });
 
     expect(prComments).toHaveLength(1); // idempotent across the two runs
     expect(prComments[0]).toContain("o comentário pede X ou Y?");

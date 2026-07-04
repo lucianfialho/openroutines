@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { makeVerify } from "./verify.js";
 import type { CardToPrDeps } from "./index.js";
-import type { PreparacaoOutput } from "./preparacao.js";
+import type { PreparationOutput } from "./preparation.js";
 import { makeInMemoryActionLedgerRepository } from "../../persistence/action-ledger-in-memory.js";
 import { makeInMemoryPrLinkRepository } from "../../persistence/pr-links-in-memory.js";
 import type { VerifyResults } from "../../verify/run-commands.js";
@@ -17,7 +17,7 @@ vi.mock("../../verify/sast.js", async (importOriginal) => {
   return { ...actual, runSast: vi.fn() };
 });
 
-const preparacaoFixture = (overrides: Partial<PreparacaoOutput> = {}): PreparacaoOutput => ({
+const preparationFixture = (overrides: Partial<PreparationOutput> = {}): PreparationOutput => ({
   branchProtected: true,
   worktree: { path: "/tmp/or-verify-test-wt", branch: "openroutines/card-t1" },
   baseSha: "base-sha",
@@ -69,19 +69,19 @@ describe("makeVerify", () => {
     const runGit = vi.fn(async () => ({ stdout: "", stderr: "" }));
     const runVerify = vi.fn(async () => failingBuildResults);
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
-    const preparacao = preparacaoFixture();
+    const preparation = preparationFixture();
 
-    const r1 = await handler({ inputs, outputs: { preparacao }, executionId: "e1", stateId: "verify" });
+    const r1 = await handler({ inputs, outputs: { preparation }, executionId: "e1", stateId: "verify" });
     expect(r1).toMatchObject({ passed: false, attempt: 1, stalled: false, retryable: true });
     expect((r1 as Record<string, unknown>).blockReason).toBeUndefined();
 
-    const r2 = await handler({ inputs, outputs: { preparacao, verify: r1 }, executionId: "e1", stateId: "verify" });
+    const r2 = await handler({ inputs, outputs: { preparation, verify: r1 }, executionId: "e1", stateId: "verify" });
     expect(r2).toMatchObject({
       passed: false,
       attempt: 2,
       stalled: true,
       retryable: false,
-      blockReason: "verify-falhou",
+      blockReason: "verify-failed",
     });
 
     expect(runVerify).toHaveBeenCalledTimes(2);
@@ -99,10 +99,10 @@ describe("makeVerify", () => {
         : ({ build: { passed: true }, typecheck: undefined, lint: undefined, test: { passed: false } } as VerifyResults);
     });
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
-    const preparacao = preparacaoFixture();
+    const preparation = preparationFixture();
 
-    const r1 = await handler({ inputs, outputs: { preparacao }, executionId: "e1", stateId: "verify" });
-    const r2 = await handler({ inputs, outputs: { preparacao, verify: r1 }, executionId: "e1", stateId: "verify" });
+    const r1 = await handler({ inputs, outputs: { preparation }, executionId: "e1", stateId: "verify" });
+    const r2 = await handler({ inputs, outputs: { preparation, verify: r1 }, executionId: "e1", stateId: "verify" });
 
     expect(r2).toMatchObject({ attempt: 2, stalled: false, retryable: true });
   });
@@ -111,9 +111,9 @@ describe("makeVerify", () => {
     const runGit = vi.fn(async () => ({ stdout: ".github/workflows/ci.yml\n", stderr: "" }));
     const runVerify = vi.fn(async () => passingResults);
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
-    const preparacao = preparacaoFixture();
+    const preparation = preparationFixture();
 
-    const r = await handler({ inputs, outputs: { preparacao }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({
       passed: false,
@@ -130,9 +130,9 @@ describe("makeVerify", () => {
     );
     const runVerify = vi.fn(async () => passingResults);
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
-    const preparacao = preparacaoFixture();
+    const preparation = preparationFixture();
 
-    const r = await handler({ inputs, outputs: { preparacao }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({
       passed: false,
@@ -146,7 +146,7 @@ describe("makeVerify", () => {
     const runVerify = vi.fn(async () => passingResults);
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
 
-    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation: preparationFixture() }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({
       passed: false,
@@ -163,7 +163,7 @@ describe("makeVerify", () => {
     const runVerify = vi.fn(async () => passingResults);
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
 
-    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation: preparationFixture() }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({ diffLoc: 18 }); // (10+5) + (0+3), NOT changed.length (2)
   });
@@ -177,7 +177,7 @@ describe("makeVerify", () => {
     const runVerify = vi.fn(async () => passingResults);
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
 
-    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation: preparationFixture() }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({ diffLoc: 5 });
   });
@@ -187,7 +187,7 @@ describe("makeVerify", () => {
     const runVerify = vi.fn(async () => passingResults);
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
 
-    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation: preparationFixture() }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({
       passed: false,
@@ -199,9 +199,9 @@ describe("makeVerify", () => {
     const runGit = vi.fn(async () => ({ stdout: "src/index.ts\n", stderr: "" }));
     const runVerify = vi.fn(async () => passingResults);
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
-    const preparacao = preparacaoFixture();
+    const preparation = preparationFixture();
 
-    const r = await handler({ inputs, outputs: { preparacao }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({ passed: true, forbiddenPathsTouched: [], blockReason: undefined });
   });
@@ -215,7 +215,7 @@ describe("makeVerify", () => {
     vi.mocked(runSast).mockResolvedValueOnce({ ...emptySastResult(), secretsFound: [secret] });
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
 
-    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation: preparationFixture() }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({ passed: false, secretsFound: [secret] });
   });
@@ -230,7 +230,7 @@ describe("makeVerify", () => {
     });
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
 
-    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation: preparationFixture() }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({ passed: false, dependencyAudit: { new: [{ name: "left-pad", version: "^1.0.0" }], vulnerable: [vuln] } });
   });
@@ -243,7 +243,7 @@ describe("makeVerify", () => {
     vi.mocked(runSast).mockResolvedValueOnce({ ...emptySastResult(), dependencyAudit: { new: [], vulnerable: [] } });
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
 
-    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation: preparationFixture() }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({ passed: true, dependencyAudit: { vulnerable: [] } });
   });
@@ -261,9 +261,9 @@ describe("makeVerify", () => {
     };
     vi.mocked(runSast).mockResolvedValueOnce({ ...emptySastResult(), dependencyAudit: { new: [], vulnerable: [vuln] } });
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
-    const preparacao = preparacaoFixture({ baselineResults });
+    const preparation = preparationFixture({ baselineResults });
 
-    const r = await handler({ inputs, outputs: { preparacao }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({ passed: true, dependencyAudit: { vulnerable: [] } });
   });
@@ -275,7 +275,7 @@ describe("makeVerify", () => {
     vi.mocked(runSast).mockResolvedValueOnce({ ...emptySastResult(), semgrepFindings: [finding] });
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
 
-    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation: preparationFixture() }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({ passed: true, semgrepFindings: [finding] });
   });
@@ -289,7 +289,7 @@ describe("makeVerify", () => {
     });
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
 
-    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation: preparationFixture() }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({ passed: true, sastNotes: ["semgrep indisponível no PATH — etapa ignorada"] });
   });
@@ -302,7 +302,7 @@ describe("makeVerify", () => {
     const runVerify = vi.fn(async () => passingResults);
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
 
-    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation: preparationFixture() }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({
       isUI: true,
@@ -316,7 +316,7 @@ describe("makeVerify", () => {
     const runVerify = vi.fn(async () => passingResults);
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
 
-    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+    const r = await handler({ inputs, outputs: { preparation: preparationFixture() }, executionId: "e1", stateId: "verify" });
 
     expect(r).toMatchObject({ isUI: false, dataChanges: false });
   });

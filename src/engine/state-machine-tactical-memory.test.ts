@@ -53,9 +53,9 @@ const recordingProvider = (learnings: unknown) => {
 
 const singlePhase: SkillStateMachine = {
   id: "t",
-  initial_state: "plano",
+  initial_state: "plan",
   states: {
-    plano: { agent_prompt: "Plan: {{inputs.title}}", transitions: [{ to: "done" }] },
+    plan: { agent_prompt: "Plan: {{inputs.title}}", transitions: [{ to: "done" }] },
     done: { terminal: true },
   },
 } as SkillStateMachine;

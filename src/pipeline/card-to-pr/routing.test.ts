@@ -36,45 +36,45 @@ describe("resolveImplementationTier (D9)", () => {
 });
 
 describe("resolveCardToPrProvider", () => {
-  it("plano é sempre claude-cli/claude-sonnet-5, para qualquer complexity/altaImpl", () => {
-    expect(resolveCardToPrProvider("plano", {})).toEqual({ provider: "claude-cli", model: "claude-sonnet-5" });
-    expect(resolveCardToPrProvider("plano", { complexity: "highest", altaImpl: true })).toEqual({
+  it("plan é sempre claude-cli/claude-sonnet-5, para qualquer complexity/altaImpl", () => {
+    expect(resolveCardToPrProvider("plan", {})).toEqual({ provider: "claude-cli", model: "claude-sonnet-5" });
+    expect(resolveCardToPrProvider("plan", { complexity: "highest", altaImpl: true })).toEqual({
       provider: "claude-cli",
       model: "claude-sonnet-5",
     });
   });
 
-  it("gate_plano é sempre architecture-judge/claude-opus-4-8, para qualquer complexity/altaImpl", () => {
-    expect(resolveCardToPrProvider("gate_plano", {})).toEqual({
+  it("gate_plan é sempre architecture-judge/claude-opus-4-8, para qualquer complexity/altaImpl", () => {
+    expect(resolveCardToPrProvider("gate_plan", {})).toEqual({
       provider: "architecture-judge",
       model: "claude-opus-4-8",
     });
-    expect(resolveCardToPrProvider("gate_plano", { complexity: "lowest" })).toEqual({
+    expect(resolveCardToPrProvider("gate_plan", { complexity: "lowest" })).toEqual({
       provider: "architecture-judge",
       model: "claude-opus-4-8",
     });
   });
 
-  it("implementacao roteia por tier: kimi/sonnet/opus -> provider+model correspondentes", () => {
-    expect(resolveCardToPrProvider("implementacao", { complexity: "low" })).toEqual({
+  it("implementation roteia por tier: kimi/sonnet/opus -> provider+model correspondentes", () => {
+    expect(resolveCardToPrProvider("implementation", { complexity: "low" })).toEqual({
       provider: "kimi-cli",
       model: "kimi-k2.6",
     });
-    expect(resolveCardToPrProvider("implementacao", { complexity: "medium" })).toEqual({
+    expect(resolveCardToPrProvider("implementation", { complexity: "medium" })).toEqual({
       provider: "claude-cli",
       model: "claude-sonnet-5",
     });
-    expect(resolveCardToPrProvider("implementacao", { complexity: "highest" })).toEqual({
+    expect(resolveCardToPrProvider("implementation", { complexity: "highest" })).toEqual({
       provider: "claude-cli",
       model: "claude-opus-4-8",
     });
-    expect(resolveCardToPrProvider("implementacao", { complexity: "low", altaImpl: true })).toEqual({
+    expect(resolveCardToPrProvider("implementation", { complexity: "low", altaImpl: true })).toEqual({
       provider: "claude-cli",
       model: "claude-opus-4-8",
     });
   });
 
-  it("rework (F4 #157, D24) roteia pelo tier ORIGINAL do card — idêntico à implementacao para as mesmas entradas", () => {
+  it("rework (F4 #157, D24) roteia pelo tier ORIGINAL do card — idêntico à implementation para as mesmas entradas", () => {
     for (const input of [
       { complexity: "low" as const },
       { complexity: "medium" as const },
@@ -82,7 +82,7 @@ describe("resolveCardToPrProvider", () => {
       { complexity: "low" as const, altaImpl: true },
       {},
     ]) {
-      expect(resolveCardToPrProvider("rework", input)).toEqual(resolveCardToPrProvider("implementacao", input));
+      expect(resolveCardToPrProvider("rework", input)).toEqual(resolveCardToPrProvider("implementation", input));
     }
   });
 });

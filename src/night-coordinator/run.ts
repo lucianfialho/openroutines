@@ -215,7 +215,7 @@ const blockExhaustedRework = async (deps: RunNightCycleDeps, link: PrLink): Prom
     await Effect.runPromise(
       ts.comment(
         link.taskId,
-        `⛔ [Bloqueio]\nMotivo: retrabalho-esgotado\nO que falta: ${REWORK_MAX_ROUNDS} rodadas de retrabalho não satisfizeram o review do PR #${link.prNumber ?? "?"}\nPróximo passo: assumir o PR manualmente`
+        `⛔ [Bloqueio]\nMotivo: rework-exhausted\nO que falta: ${REWORK_MAX_ROUNDS} rodadas de retrabalho não satisfizeram o review do PR #${link.prNumber ?? "?"}\nPróximo passo: assumir o PR manualmente`
       )
     );
   }
@@ -234,7 +234,7 @@ const blockExhaustedRework = async (deps: RunNightCycleDeps, link: PrLink): Prom
  * (last_rework_night_id — completed round — plus the claimed_by_night_id
  * stamp below, which refuses a 2nd admission of the same card in the same
  * night even before the first completes). At the cap it blocks with
- * 'retrabalho-esgotado' instead.
+ * 'rework-exhausted' instead.
  */
 const admitReworkCards = async (deps: RunNightCycleDeps, nightId: string, generateId: () => string): Promise<number> => {
   let admitted = 0;
@@ -295,7 +295,7 @@ const admitReworkCards = async (deps: RunNightCycleDeps, nightId: string, genera
           ...(complexity ? { complexity } : {}),
           ...(altaImpl ? { altaImpl: true } : {}),
           // Rework markers: the queue handler starts the machine at
-          // rework_preparacao when it sees rework:true.
+          // rework_preparation when it sees rework:true.
           rework: true,
           prNumber: link.prNumber,
           branch: link.branch,
@@ -444,7 +444,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
       : 0;
 
     // 4. Baseline pre-warm: OPTIONAL for this wave, skipped by choice. Each
-    // card's preparacao computes its repo's baseline lazily and idempotently
+    // card's preparation computes its repo's baseline lazily and idempotently
     // (getOrCreateBaseline, ON CONFLICT DO NOTHING), so the first card of a
     // repo tonight pays one extra verify run instead of the coordinator paying
     // it up front for every registered repo, including idle ones.
@@ -564,7 +564,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
               executionId,
               skill: "card-to-pr",
               tier,
-              // F4 #185 (D9): consumed by card-to-pr's implementacao dynamic
+              // F4 #185 (D9): consumed by card-to-pr's implementation dynamic
               // routing — independent of `tier` above (that one is the
               // circuit breaker's night-level bookkeeping bucket).
               complexity: card.complexity,

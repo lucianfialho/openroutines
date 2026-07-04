@@ -17,13 +17,13 @@ import type { Task, TaskSource, TaskState } from "../task-source/types.js";
 import type { CreateCardInput } from "../connector/trello.js";
 import { sendTelegramAlert } from "../notify/telegram.js";
 
-// D11/blockReason repo-sem-profile is explicitly NOT a seguranca* reason
+// D11/blockReason repo-missing-profile is explicitly NOT a security* reason
 // (10-ESTADOS-DAS-TAREFAS.md) — degraded-mode.ts never imports this module,
 // so this mock+assertion is the regression guard: it fails loudly the day
 // someone wires an alert call into this gate.
 vi.mock("../notify/telegram.js", () => ({
   sendTelegramAlert: vi.fn(async () => {}),
-  isSecurityBlockReason: (r: string | undefined) => !!r && r.startsWith("seguranca"),
+  isSecurityBlockReason: (r: string | undefined) => !!r && r.startsWith("security"),
 }));
 
 const SOURCE = "trello-main";
@@ -112,7 +112,7 @@ describe("checkProfileAndBlock (F5 #163)", () => {
     expect(linkCards).toHaveBeenCalledWith({ id: "card-1", url: card.url }, { id: "map-1", url: "https://trello.com/c/map-1" });
     expect(moveTo).toHaveBeenCalledWith("card-1", "blocked");
     expect(comment).toHaveBeenCalledTimes(1);
-    expect(comment.mock.calls[0][1]).toContain("repo-sem-profile");
+    expect(comment.mock.calls[0][1]).toContain("repo-missing-profile");
     expect(sendTelegramAlert).not.toHaveBeenCalled();
   });
 

@@ -20,21 +20,21 @@ import { runVerifyCommands } from "../../verify/run-commands.js";
 import { getOrCreateBaseline } from "../../verify/baseline.js";
 import { pickEnv, BASE_ENV_VARS } from "../../util/env.js";
 import { sendTelegramAlert } from "../../notify/telegram.js";
-import { aggregateRevisao } from "../../review/aggregate.js";
-import { makePreparacao } from "./preparacao.js";
+import { aggregateReview } from "../../review/aggregate.js";
+import { makePreparation } from "./preparation.js";
 import { makeVerify } from "./verify.js";
 import { makePr } from "./pr.js";
-import { makeBloqueado } from "./bloqueado.js";
-import { makeReworkPreparacao, makeReworkPergunta } from "./rework.js";
+import { makeBlocked } from "./blocked.js";
+import { makeReworkPreparation, makeReworkQuestion } from "./rework.js";
 import { makeVisual, type VisualDeps } from "./visual.js";
 
 /**
  * Named `type: fanout` aggregators for card-to-pr (F4 #153) — resolved by the
  * runner via `StateMachineConfig.fanoutAggregators` when a state declares
- * `aggregate: aggregateRevisao` (see skill.yaml's `revisao` state). Wiring
+ * `aggregate: aggregateReview` (see skill.yaml's `review` state). Wiring
  * this into StateMachineConfig at boot is the next agent's job (app.ts).
  */
-export const cardToPrFanoutAggregators = { aggregateRevisao };
+export const cardToPrFanoutAggregators = { aggregateReview };
 
 const execFileAsync = promisify(execFile);
 
@@ -74,7 +74,7 @@ export interface CardToPrDeps {
  * do (src/verify/run-commands.ts) — EXCEPT `git push`, the one call that
  * authenticates against GitHub, which gets a minimal env (PATH/HOME/
  * GITHUB_TOKEN only), never the orchestrator's full secret set. Shared by
- * preparacao (fetch/worktree/rev-parse), verify (diff --name-only) and pr
+ * preparation (fetch/worktree/rev-parse), verify (diff --name-only) and pr
  * (push) so a single injected seam covers every git call in this module.
  */
 export const defaultRunGit =
@@ -87,11 +87,11 @@ export const defaultRunGit =
     );
 
 export const registerCardToPrHandlers = (reg: ScriptRegistry, deps: CardToPrDeps): void => {
-  reg.register("card-to-pr-preparacao", makePreparacao(deps));
+  reg.register("card-to-pr-preparation", makePreparation(deps));
   reg.register("card-to-pr-verify", makeVerify(deps));
   reg.register("card-to-pr-visual", makeVisual(deps));
   reg.register("card-to-pr-pr", makePr(deps));
-  reg.register("card-to-pr-bloqueado", makeBloqueado(deps));
-  reg.register("card-to-pr-rework-preparacao", makeReworkPreparacao(deps));
-  reg.register("card-to-pr-rework-pergunta", makeReworkPergunta(deps));
+  reg.register("card-to-pr-blocked", makeBlocked(deps));
+  reg.register("card-to-pr-rework-preparation", makeReworkPreparation(deps));
+  reg.register("card-to-pr-rework-question", makeReworkQuestion(deps));
 };

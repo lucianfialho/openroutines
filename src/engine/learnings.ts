@@ -132,7 +132,7 @@ export interface TacticalMemoryInput {
   inputs: Record<string, unknown>;
   repoLearnings?: Pick<RepoLearningRepository, "findTopByRepo">;
   similarCards?: SimilarCardsFn;
-  /** State id that receives the merged-card precedents block (default "plano"). */
+  /** State id that receives the merged-card precedents block (default "plan"). */
   planStateId?: string;
 }
 
@@ -152,7 +152,7 @@ export const buildTacticalMemoryPrompt = async (input: TacticalMemoryInput): Pro
       // best-effort: memory reinjection must never break a phase
     }
   }
-  if (input.similarCards && input.stateId === (input.planStateId ?? "plano")) {
+  if (input.similarCards && input.stateId === (input.planStateId ?? "plan")) {
     try {
       block += renderPrecedentsBlock(await input.similarCards(input.repo, input.inputs));
     } catch {

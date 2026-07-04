@@ -22,13 +22,13 @@ describe("renderTemplate", () => {
 
   it("renders an array of gap objects as parseable JSON", () => {
     const gaps = [{ lens: "security", description: "SSRF", file: "src/a.ts", line: 3, contestable: true }];
-    const out = renderTemplate("{{outputs.revisao.gaps}}", { inputs: {}, outputs: { revisao: { gaps } } });
+    const out = renderTemplate("{{outputs.review.gaps}}", { inputs: {}, outputs: { review: { gaps } } });
     expect(JSON.parse(out)).toEqual(gaps);
   });
 
-  it("leaves unknown placeholders untouched (round-1: refutacao not yet produced)", () => {
-    const out = renderTemplate("{{outputs.refutacao}}", { inputs: {}, outputs: {} });
-    expect(out).toBe("{{outputs.refutacao}}");
+  it("leaves unknown placeholders untouched (round-1: refutation not yet produced)", () => {
+    const out = renderTemplate("{{outputs.refutation}}", { inputs: {}, outputs: {} });
+    expect(out).toBe("{{outputs.refutation}}");
   });
 
   it("output_path falls back to the default", () => {

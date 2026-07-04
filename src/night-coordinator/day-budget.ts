@@ -99,7 +99,7 @@ export interface DayDispatchCard {
 export interface DayDispatchDeps {
   /** Atomic day-budget reservation for this card's research run (binds reserveDayBudget). */
   reserve: (card: DayDispatchCard) => Promise<{ granted: boolean }>;
-  /** Runs the card-pesquisa state machine for this card in the SAME cycle (wired in app.ts). */
+  /** Runs the card-research state machine for this card in the SAME cycle (wired in app.ts). */
   dispatchPesquisa: (card: DayDispatchCard) => Promise<void>;
 }
 

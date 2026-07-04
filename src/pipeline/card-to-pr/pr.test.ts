@@ -2,12 +2,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Effect } from "effect";
 import { makePr } from "./pr.js";
 import type { CardToPrDeps } from "./index.js";
-import type { PreparacaoOutput } from "./preparacao.js";
+import type { PreparationOutput } from "./preparation.js";
 import { makeInMemoryActionLedgerRepository } from "../../persistence/action-ledger-in-memory.js";
 import { makeInMemoryPrLinkRepository } from "../../persistence/pr-links-in-memory.js";
 import type { TaskSource } from "../../task-source/types.js";
 
-const preparacaoFixture = (): PreparacaoOutput => ({
+const preparationFixture = (): PreparationOutput => ({
   branchProtected: true,
   worktree: { path: "/tmp/or-pr-test-wt", branch: "openroutines/card-t1" },
   baseSha: "base-sha",
@@ -79,8 +79,8 @@ describe("makePr", () => {
     };
 
     const outputs = {
-      preparacao: preparacaoFixture(),
-      plano: { summary: "Add validation", testStrategy: "unit tests" },
+      preparation: preparationFixture(),
+      plan: { summary: "Add validation", testStrategy: "unit tests" },
       verify: { passed: true, newFailures: [], knownFailures: [] },
     };
     const handler = makePr(deps);
@@ -145,7 +145,7 @@ describe("makePr", () => {
       runGit: vi.fn(async () => ({ stdout: "", stderr: "" })),
     };
 
-    const outputs = { preparacao: preparacaoFixture() };
+    const outputs = { preparation: preparationFixture() };
     const r = await makePr(deps)({ inputs, outputs, executionId: "exec1", stateId: "pr" });
 
     expect(createPullRequest).not.toHaveBeenCalled();
@@ -165,9 +165,9 @@ describe("makePr", () => {
       taskSourceFor: () => undefined,
       runGit: vi.fn(async () => ({ stdout: "", stderr: "" })),
     };
-    const preparacao = { ...preparacaoFixture(), repo: { ...preparacaoFixture().repo!, baseBranch: "main" } };
+    const preparation = { ...preparationFixture(), repo: { ...preparationFixture().repo!, baseBranch: "main" } };
 
-    await expect(makePr(deps)({ inputs, outputs: { preparacao }, executionId: "exec1", stateId: "pr" })).rejects.toThrow(
+    await expect(makePr(deps)({ inputs, outputs: { preparation }, executionId: "exec1", stateId: "pr" })).rejects.toThrow(
       /main\/master/
     );
   });
@@ -210,7 +210,7 @@ describe("makePr", () => {
     const ui = makeDeps();
     await makePr(ui.deps)({
       inputs,
-      outputs: { preparacao: preparacaoFixture(), plano: { summary: "s", testStrategy: "t" }, verify: { passed: true, knownFailures: [] }, visual: uiVisual },
+      outputs: { preparation: preparationFixture(), plan: { summary: "s", testStrategy: "t" }, verify: { passed: true, knownFailures: [] }, visual: uiVisual },
       executionId: "exec-ui",
       stateId: "pr",
     });
@@ -221,7 +221,7 @@ describe("makePr", () => {
     const nonUi = makeDeps();
     await makePr(nonUi.deps)({
       inputs,
-      outputs: { preparacao: preparacaoFixture(), plano: { summary: "s", testStrategy: "t" }, verify: { passed: true, knownFailures: [] } },
+      outputs: { preparation: preparationFixture(), plan: { summary: "s", testStrategy: "t" }, verify: { passed: true, knownFailures: [] } },
       executionId: "exec-nonui",
       stateId: "pr",
     });
@@ -230,13 +230,13 @@ describe("makePr", () => {
 
   describe("F4 #157: rework completion path (D24)", () => {
     const reworkOutputs = () => ({
-      rework_preparacao: {
+      rework_preparation: {
         aborted: false,
         prNumber: 42,
         reviewers: ["bob"],
         worktree: { path: "/tmp/or-rework-wt", branch: "openroutines/card-t1" },
         baseSha: "mergebase123",
-        repo: preparacaoFixture().repo,
+        repo: preparationFixture().repo,
       },
       rework: { needsClarification: false, filesTouched: ["src/foo.ts"], commits: ["abc fix"], notes: "" },
       verify: { passed: true, newFailures: [], knownFailures: [] },
@@ -368,8 +368,8 @@ describe("makePr", () => {
     });
 
     const outputsWithVerify = (verify: Record<string, unknown> = {}) => ({
-      preparacao: preparacaoFixture(),
-      plano: { summary: "Add validation", testStrategy: "unit tests" },
+      preparation: preparationFixture(),
+      plan: { summary: "Add validation", testStrategy: "unit tests" },
       verify: { passed: true, newFailures: [], knownFailures: [], diffLoc: 3, ...verify },
     });
 

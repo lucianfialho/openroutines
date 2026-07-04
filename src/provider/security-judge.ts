@@ -3,7 +3,7 @@
  *
  * The mandatory 🛡️ security lens of the adversarial review. Registered in the
  * provider registry as "security-judge" and referenced by the `security`
- * branch of the `revisao` fanout state. Internally it orchestrates multiple
+ * branch of the `review` fanout state. Internally it orchestrates multiple
  * claude-api calls (never the agentic CLI, never a fallback model) and returns
  * a CompletionResponse whose `content` is the SecurityVerdict JSON:
  *
@@ -21,9 +21,9 @@
  *
  * `approved` only reflects TERMINAL post-adjudication state: a freshly found
  * blocking finding stays status:"open" and does NOT flip approved (the generic
- * refutacao state routes it to the implementer); approved goes false only on
+ * refutation state routes it to the implementer); approved goes false only on
  * adjudicado-bloqueia or on second-judge divergence (=> blockReason
- * "seguranca-divergente" downstream).
+ * "security-divergent" downstream).
  *
  * Anti-bypass: the `model` reported by EVERY response is checked against the
  * requested one — a mismatch rejects the verdict (an overloaded API silently
@@ -212,7 +212,7 @@ const requestText = (request: CompletionRequest): string => {
  * Contested security gaps from the <contestacao_refutacao> block; [] => normal
  * mode. Two accepted forms:
  *  - per-item: {lens:"security", status:"contestado", evidencia, finding}
- *  - batch (what the lens template renders): {refutacao:{status:"contestado",
+ *  - batch (what the lens template renders): {refutation:{status:"contestado",
  *    evidencia}, gaps:[LensGap...]} — or flat top-level status/evidencia — the
  *    single batch evidencia applies to every security gap of the contested round.
  */
@@ -226,7 +226,7 @@ const parseContestedGaps = (text: string): ContestedGap[] => {
     return [];
   }
   const root = asRecord(parsed);
-  const batch = asRecord(root?.refutacao) ?? root;
+  const batch = asRecord(root?.refutation) ?? root;
   const batchEvidencia = batch?.status === "contestado" ? (asString(batch.evidencia) ?? "") : undefined;
   const items: unknown[] = Array.isArray(parsed)
     ? parsed
@@ -545,8 +545,8 @@ export const makeSecurityJudgeProvider = (config: SecurityJudgeConfig): Provider
         verdict = {
           model,
           // Fresh findings stay status:"open" and do NOT flip approved — the
-          // generic refutacao state owns their resolution. Only second-judge
-          // divergence blocks here (=> blockReason "seguranca-divergente").
+          // generic refutation state owns their resolution. Only second-judge
+          // divergence blocks here (=> blockReason "security-divergent").
           approved: !diverged,
           findings: verified,
           criticalArea,

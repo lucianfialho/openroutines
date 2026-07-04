@@ -3,8 +3,8 @@
  *
  * Deterministic verify-vs-baseline + forbidden-path guard + SAST (semgrep,
  * gitleaks, npm audit — see verify/sast.ts). Decides pass/retry/stall so the
- * state machine can loop back to implementacao at most once before routing to
- * bloqueado (see skill.yaml transitions).
+ * state machine can loop back to implementation at most once before routing to
+ * blocked (see skill.yaml transitions).
  */
 import { createHash } from "crypto";
 import type { ScriptHandler } from "../../script/registry.js";
@@ -20,7 +20,7 @@ import {
 import type { BaselineResults } from "../../verify/baseline.js";
 import { SECURITY_FP_FILE_PATH } from "../../security/fp-file.js";
 import { defaultRunGit, type CardToPrDeps } from "./index.js";
-import type { PreparacaoOutput } from "./preparacao.js";
+import type { PreparationOutput } from "./preparation.js";
 
 export interface VerifyOutput {
   passed: boolean;
@@ -77,19 +77,19 @@ const sumNumstat = (stdout: string): number =>
     }, 0);
 
 export const makeVerify = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
-  // Rework flow (F4 #157) enters at rework_preparacao, whose output is
-  // field-compatible with PreparacaoOutput for everything verify reads.
-  const preparacao = (ctx.outputs.preparacao ?? ctx.outputs.rework_preparacao) as PreparacaoOutput;
-  const wt = preparacao.worktree!.path;
-  const base = preparacao.baseSha!;
-  const verifyCommands = preparacao.repo!.verify;
+  // Rework flow (F4 #157) enters at rework_preparation, whose output is
+  // field-compatible with PreparationOutput for everything verify reads.
+  const preparation = (ctx.outputs.preparation ?? ctx.outputs.rework_preparation) as PreparationOutput;
+  const wt = preparation.worktree!.path;
+  const base = preparation.baseSha!;
+  const verifyCommands = preparation.repo!.verify;
 
   const runVerify = deps.runVerify ?? runVerifyCommands;
   const current = await runVerify(wt, verifyCommands);
 
   // A missing baseline (manual run, no night_id/pool) means an empty baseline —
-  // every current failure is treated as new (strict), per preparacao's contract.
-  const diff = diffAgainstBaseline((preparacao.baselineResults ?? {}) as VerifyResults, current);
+  // every current failure is treated as new (strict), per preparation's contract.
+  const diff = diffAgainstBaseline((preparation.baselineResults ?? {}) as VerifyResults, current);
 
   const runGit = deps.runGit ?? defaultRunGit(deps.githubToken);
   const { stdout } = await runGit(["diff", "--name-only", base, "HEAD"], wt);
@@ -105,7 +105,7 @@ export const makeVerify = (deps: CardToPrDeps): ScriptHandler => async (ctx) => 
   // finding never reproves a card — only what THIS diff newly introduces does
   // (same "known flaky" principle diffAgainstBaseline already applies above).
   const sastRaw = await runSast(wt, base);
-  const baselineSast = (preparacao.baselineResults as BaselineResults | null | undefined)?.sast;
+  const baselineSast = (preparation.baselineResults as BaselineResults | null | undefined)?.sast;
   const sast = filterSastAgainstBaseline(sastRaw, baselineSast);
   // Semgrep feeds the security lens (separate issue) but never gates `passed`
   // by itself — only an actual secret or a new high/critical prod
@@ -155,6 +155,6 @@ export const makeVerify = (deps: CardToPrDeps): ScriptHandler => async (ctx) => 
     failureSignature,
     stalled,
     retryable,
-    blockReason: !passed && !retryable ? "verify-falhou" : undefined,
+    blockReason: !passed && !retryable ? "verify-failed" : undefined,
   } satisfies VerifyOutput;
 };

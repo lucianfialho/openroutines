@@ -64,9 +64,9 @@ const seqProvider = (responses: CompletionResponse[] | (() => CompletionResponse
 
 const oneAgentStateSkill: SkillStateMachine = {
   id: "t",
-  initial_state: "plano",
+  initial_state: "plan",
   states: {
-    plano: { agent_prompt: "p", model: "claude-sonnet-5", transitions: [{ to: "done" }] },
+    plan: { agent_prompt: "p", model: "claude-sonnet-5", transitions: [{ to: "done" }] },
     done: { terminal: true },
   },
 } as SkillStateMachine;
@@ -83,16 +83,16 @@ describe("F3 Wave D — budget hook", () => {
     const r = await run({ provider, repository: repo.repo, budgetGate });
 
     expect(r.success).toBe(false);
-    expect(r.output).toContain("orcamento");
+    expect(r.output).toContain("budget");
     expect(provider.complete).not.toHaveBeenCalled();
-    expect(budgetGate).toHaveBeenCalledWith({ phase: "plano", tier: "claude-sonnet-5", executionId: "exec1" });
+    expect(budgetGate).toHaveBeenCalledWith({ phase: "plan", tier: "claude-sonnet-5", executionId: "exec1" });
     expect(repo.get("exec1")!.status).toBe("failed");
-    expect(repo.get("exec1")!.metadata?.blockReason).toBe("orcamento");
+    expect(repo.get("exec1")!.metadata?.blockReason).toBe("budget");
   });
 
   it("a denied reservation preserves the stateMachineContext persisted for this state, instead of clobbering it", async () => {
     // runStateMachine's own persistStateContext writes stateMachineContext for
-    // "plano" at the top of this same state's processing, BEFORE the budget
+    // "plan" at the top of this same state's processing, BEFORE the budget
     // check runs — fail()'s read-then-merge must not wipe that write.
     const repo = makeRepo();
     const { provider } = seqProvider(() => resp());
@@ -101,8 +101,8 @@ describe("F3 Wave D — budget hook", () => {
     await run({ provider, repository: repo.repo, budgetGate });
 
     const metadata = repo.get("exec1")!.metadata as { stateMachineContext?: { currentState?: string }; blockReason?: string };
-    expect(metadata.blockReason).toBe("orcamento");
-    expect(metadata.stateMachineContext?.currentState).toBe("plano");
+    expect(metadata.blockReason).toBe("budget");
+    expect(metadata.stateMachineContext?.currentState).toBe("plan");
   });
 
   it("budgetGate granted:true lets the call through and passes the reservationId to budgetSettle with the actual cost", async () => {
@@ -149,13 +149,13 @@ describe("F3 Wave D — budget hook", () => {
 
 describe("F4 H6 — budget hook inside fanout (per-lens reservation)", () => {
   // `approvedWhen` doubles as the assert on the aggregated envelope: the run
-  // only reaches `done` (success) when output.revisao.approved matches it.
+  // only reaches `done` (success) when output.review.approved matches it.
   const fanoutSkill = (approvedWhen: string): SkillStateMachine =>
     ({
       id: "t",
-      initial_state: "revisao",
+      initial_state: "review",
       states: {
-        revisao: {
+        review: {
           type: "fanout",
           lenses: [
             { name: "correctness", provider: "kimi-cli", model: "kimi-k2.6", agent_prompt: "lens A" },
@@ -193,13 +193,13 @@ describe("F4 H6 — budget hook inside fanout (per-lens reservation)", () => {
         repository: makeRepo().repo,
         budgetGate,
         budgetSettle,
-      })(fanoutSkill("output.revisao.approved == true"), routine, event, "exec1")
+      })(fanoutSkill("output.review.approved == true"), routine, event, "exec1")
     );
 
     expect(r.success).toBe(true); // approved:true — no lens errored
     expect(budgetGate).toHaveBeenCalledTimes(2);
-    expect(budgetGate).toHaveBeenCalledWith({ phase: "revisao", tier: "kimi-k2.6", executionId: "exec1" });
-    expect(budgetGate).toHaveBeenCalledWith({ phase: "revisao", tier: "security-judge", executionId: "exec1" });
+    expect(budgetGate).toHaveBeenCalledWith({ phase: "review", tier: "kimi-k2.6", executionId: "exec1" });
+    expect(budgetGate).toHaveBeenCalledWith({ phase: "review", tier: "security-judge", executionId: "exec1" });
     expect(completes["kimi-cli"]).toHaveBeenCalledOnce();
     expect(completes["security-judge"]).toHaveBeenCalledOnce();
     expect(budgetSettle).toHaveBeenCalledWith("res-kimi-k2.6", 0.1);
@@ -216,7 +216,7 @@ describe("F4 H6 — budget hook inside fanout (per-lens reservation)", () => {
         providerRegistry: registry,
         repository: makeRepo().repo,
         budgetGate,
-      })(fanoutSkill("output.revisao.approved == false"), routine, event, "exec1")
+      })(fanoutSkill("output.review.approved == false"), routine, event, "exec1")
     );
 
     // approved:false (denied lens carries {error}) and the machine still
@@ -234,7 +234,7 @@ describe("F4 H6 — budget hook inside fanout (per-lens reservation)", () => {
         provider: { complete: () => Effect.succeed(resp()) },
         providerRegistry: registry,
         repository: makeRepo().repo,
-      })(fanoutSkill("output.revisao.approved == true"), routine, event, "exec1")
+      })(fanoutSkill("output.review.approved == true"), routine, event, "exec1")
     );
 
     expect(r.success).toBe(true);

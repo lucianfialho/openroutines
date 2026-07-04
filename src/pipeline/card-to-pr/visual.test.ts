@@ -37,8 +37,8 @@ const baseDeps = (visual: VisualDeps, taskSourceFor?: CardToPrDeps["taskSourceFo
 const ctx = (visualAssertions: unknown[] = []): ScriptContext => ({
   inputs: { source_id: "s", task_id: "t1", title: "Card", description: "desc" },
   outputs: {
-    preparacao: { worktree: { path: "/tmp/wt/card-t1" } },
-    plano: { visualAssertions },
+    preparation: { worktree: { path: "/tmp/wt/card-t1" } },
+    plan: { visualAssertions },
   },
   executionId: "e1",
   stateId: "visual",

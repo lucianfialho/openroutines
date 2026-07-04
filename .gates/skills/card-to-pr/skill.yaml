@@ -33,29 +33,29 @@ inputs:
     - { name: prNumber, type: integer }
     - { name: branch, type: string }
 
-initial_state: preparacao
+initial_state: preparation
 
 states:
-  preparacao:
+  preparation:
     description: Resolve repo, preflight branch protection, create worktree, baseline verify.
     type: script
-    script: card-to-pr-preparacao
+    script: card-to-pr-preparation
     transitions:
-      - { to: bloqueado, when: "output.preparacao.branchProtected == false" }
-      - { to: plano }
+      - { to: blocked, when: "output.preparation.branchProtected == false" }
+      - { to: plan }
 
-  plano:
+  plan:
     description: >
       Explore the repo and produce a plan; decides whether the architecture
       gate (gate_plano) must approve it before implementation starts.
     provider: claude-cli
     model: claude-sonnet-5
-    output_schema: .gates/skills/card-to-pr/schemas/plano.schema.json
+    output_schema: .gates/skills/card-to-pr/schemas/plan.schema.json
     agent_prompt: |
       Card: {{inputs.title}}
       Descrição: {{inputs.description}}
       Complexidade triada: {{inputs.complexity}}
-      Worktree: {{outputs.preparacao.worktree.path}}
+      Worktree: {{outputs.preparation.worktree.path}}
 
       Explore o repositório no worktree acima, produza um PLAN.md e emita um JSON com:
       {summary, files[], estimatedLoc, dataChanges[], testStrategy, needsArchGate, risks[], visualAssertions[]}.
@@ -66,10 +66,10 @@ states:
       "brand-fidelity" para asserções de identidade de marca (F5 #160). Não
       altere código nesta fase — só planeje.
     transitions:
-      - { to: gate_plano, when: "output.plano.needsArchGate == true" }
-      - { to: implementacao }
+      - { to: gate_plan, when: "output.plan.needsArchGate == true" }
+      - { to: implementation }
 
-  gate_plano:
+  gate_plan:
     description: >
       Architecture gate (F4 #185, D9): Opus judges the plan adversarially —
       architecture A/B/C, raizes-architecture-principles, scope vs. card —
@@ -81,22 +81,22 @@ states:
     type: agent
     provider: architecture-judge
     model: claude-opus-4-8
-    output_schema: .gates/skills/card-to-pr/schemas/gate-plano.schema.json
+    output_schema: .gates/skills/card-to-pr/schemas/gate-plan.schema.json
     agent_prompt: |
       Julgue adversarialmente o plano abaixo: arquitetura A/B/C,
       raizes-architecture-principles, escopo vs. card.
 
       Card: {{inputs.title}} — {{inputs.description}}
-      Plano: {{outputs.plano}}
+      Plano: {{outputs.plan}}
 
       Emita um JSON com: {verdict: "aprovado"|"refutado", corrections: string[], escalate: boolean}.
       escalate=true só se a decisão de arquitetura for nova/ambígua/de alto
       risco/sem precedente — nunca para evitar julgar.
     transitions:
-      - { to: implementacao, when: "output.gate_plano.verdict == 'aprovado'" }
-      - { to: plano, when: "output.gate_plano.verdict == 'refutado'", max_retries: 1, on_exhausted: bloqueado }
+      - { to: implementation, when: "output.gate_plan.verdict == 'aprovado'" }
+      - { to: plan, when: "output.gate_plan.verdict == 'refutado'", max_retries: 1, on_exhausted: blocked }
 
-  implementacao:
+  implementation:
     description: Implement the plan in the worktree and commit locally (never push).
     # F4 #185 (D9): resolved per-card by the dispatcher's resolveDynamicProvider
     # hook (complexity/altaImpl -> kimi/sonnet/opus). provider:/model: below
@@ -104,12 +104,12 @@ states:
     dynamic_provider: true
     provider: claude-cli
     model: claude-sonnet-5
-    output_schema: .gates/skills/card-to-pr/schemas/implementacao.schema.json
+    output_schema: .gates/skills/card-to-pr/schemas/implementation.schema.json
     agent_prompt: |
-      Plano aprovado: {{outputs.plano}}
+      Plano aprovado: {{outputs.plan}}
       Resultado do verify anterior (se for retry): {{outputs.verify}}
 
-      Implemente o plano no worktree {{outputs.preparacao.worktree.path}}. Ao terminar,
+      Implemente o plano no worktree {{outputs.preparation.worktree.path}}. Ao terminar,
       use git_commit (NUNCA dê push — o orquestrador cuida do push/PR).
       Emita um JSON com: {filesTouched[], commits[], notes, openDecisions[]}.
     tools:
@@ -128,20 +128,20 @@ states:
     script: card-to-pr-verify
     transitions:
       # Ordered — first true `when` wins (condition.ts has no '&&'). A retryable
-      # failure in the REWORK flow (output.rework_preparacao only exists there)
+      # failure in the REWORK flow (output.rework_preparation only exists there)
       # must re-enter `rework`, whose prompt interpolates rework_preparacao.* —
-      # re-entering implementacao there would leave {{outputs.plano}}/
-      # {{outputs.preparacao.*}} as literal placeholders (blind agent). Both
+      # re-entering implementacao there would leave {{outputs.plan}}/
+      # {{outputs.preparation.*}} as literal placeholders (blind agent). Both
       # retry edges carry max_retries so tier escalation (F4 #159) grants ONE
       # escalated attempt on exhaustion before on_exhausted -> bloqueado;
       # verify.ts's own attempt<=2 cap still sends the 3rd failure to bloqueado
       # via the retryable != true edge.
-      - { to: revisao, when: "output.verify.passed == true" }
-      - { to: bloqueado, when: "output.verify.retryable != true" }
-      - { to: rework, when: "output.rework_preparacao.worktree.path", max_retries: 1, on_exhausted: bloqueado }
-      - { to: implementacao, max_retries: 1, on_exhausted: bloqueado }
+      - { to: review, when: "output.verify.passed == true" }
+      - { to: blocked, when: "output.verify.retryable != true" }
+      - { to: rework, when: "output.rework_preparation.worktree.path", max_retries: 1, on_exhausted: blocked }
+      - { to: implementation, max_retries: 1, on_exhausted: blocked }
 
-  revisao:
+  review:
     description: >
       Adversarial multi-lens review (F4 #153), fresh context per lens: 3 lenses
       in this order — correctness+conventions/raizes-docs (Kimi, always, 1
@@ -156,37 +156,37 @@ states:
       - name: correctness
         provider: kimi-cli
         model: kimi-k2.6
-        agent_prompt_file: .gates/skills/card-to-pr/prompts/revisao-correcao.md
+        agent_prompt_file: .gates/skills/card-to-pr/prompts/review-correctness.md
         output_schema: .gates/skills/card-to-pr/schemas/lens-correctness.json
       - name: data
         provider: claude-cli
         model: claude-sonnet-5
         tools: [Read, Grep, Glob]
         when: "output.verify.dataChanges == true"
-        agent_prompt_file: .gates/skills/card-to-pr/prompts/revisao-dados.md
+        agent_prompt_file: .gates/skills/card-to-pr/prompts/review-data.md
         output_schema: .gates/skills/card-to-pr/schemas/lens-data.json
       - name: security
         provider: security-judge
         model: claude-opus-4-8
-        agent_prompt_file: .gates/skills/card-to-pr/prompts/revisao-seguranca.md
+        agent_prompt_file: .gates/skills/card-to-pr/prompts/review-security.md
         output_schema: .gates/skills/card-to-pr/schemas/lens-security.json
-    aggregate: aggregateRevisao
+    aggregate: aggregateReview
     transitions:
       # Order matters (first true `when` wins): refutacao is ALWAYS checked
       # before bloqueado — on the first pass gaps.length>0 is already true,
       # before anything could have gone through adjudication yet. A security
       # finding still `status:"open"` surfaces as a gap too, so it takes this
       # SAME edge — never a direct shortcut to bloqueado.
-      - { to: refutacao, when: "output.revisao.gaps.length > 0", max_retries: 2, on_exhausted: bloqueado }
-      - { to: bloqueado, when: "output.revisao.securityVerdict.approved == false" }
+      - { to: refutation, when: "output.review.gaps.length > 0", max_retries: 2, on_exhausted: blocked }
+      - { to: blocked, when: "output.review.securityVerdict.approved == false" }
       # F5 #160 ValidacaoVisual edge (approved + isUI). condition.ts has no '&&',
       # so the AND is expressed by ORDER: the two edges above already diverted
       # every non-approved outcome (any gap -> refutacao; a failed security
       # verdict -> bloqueado), so reaching here means approved. isUI is the
       # deterministic diff-derived flag (verify.ts), never the card's text.
       - { to: visual, when: "output.verify.isUI == true" }
-      - { to: pr, when: "output.revisao.approved == true" }
-      - { to: bloqueado }
+      - { to: pr, when: "output.review.approved == true" }
+      - { to: blocked }
 
   visual:
     description: >
@@ -207,15 +207,15 @@ states:
       # Ordered — first true `when` wins (condition.ts has no '&&'):
       - { to: pr, when: "output.visual.passed == true" }
       # A failed visual returns to implementacao to fix the divergence — capped
-      # at ONE cycle (max_retries:1 + on_exhausted:bloqueado, the F4 pattern).
-      # In the REWORK flow (output.rework_preparacao exists) it must re-enter
+      # at ONE cycle (max_retries:1 + on_exhausted: blocked, the F4 pattern).
+      # In the REWORK flow (output.rework_preparation exists) it must re-enter
       # `rework`, not implementacao — same reason verify does: implementacao's
-      # prompt interpolates {{outputs.plano}}/{{outputs.preparacao.*}}, absent
+      # prompt interpolates {{outputs.plan}}/{{outputs.preparation.*}}, absent
       # in the rework flow, which would leave a blind agent.
-      - { to: rework, when: "output.rework_preparacao.worktree.path", max_retries: 1, on_exhausted: bloqueado }
-      - { to: implementacao, max_retries: 1, on_exhausted: bloqueado }
+      - { to: rework, when: "output.rework_preparation.worktree.path", max_retries: 1, on_exhausted: blocked }
+      - { to: implementation, max_retries: 1, on_exhausted: blocked }
 
-  refutacao:
+  refutation:
     description: >
       Generic adversarial-gap responder (F4 #153): receives every contestable
       gap from the last `revisao` pass (correctness/conventions/data/security,
@@ -227,22 +227,22 @@ states:
     type: agent
     provider: claude-cli
     model: claude-sonnet-5
-    output_schema: .gates/skills/card-to-pr/schemas/refutacao.schema.json
-    agent_prompt_file: .gates/skills/card-to-pr/prompts/refutacao.md
+    output_schema: .gates/skills/card-to-pr/schemas/refutation.schema.json
+    agent_prompt_file: .gates/skills/card-to-pr/prompts/refutation.md
     tools:
       - read_file
       - emit_output
     transitions:
       # Ordered — first true `when` wins (condition.ts has no '&&'):
       # 'contestado' goes back to revisao in BOTH flows, so it is checked
-      # FIRST; then the rework-flow marker (output.rework_preparacao only
+      # FIRST; then the rework-flow marker (output.rework_preparation only
       # exists in the rework flow) routes the remaining status — 'corrigir',
-      # the only other value refutacao.schema.json admits — to `rework`
+      # the only other value refutation.schema.json admits — to `rework`
       # (whose prompt has the flow's real context); the last edge is the
       # normal flow's 'corrigir' -> implementacao.
-      - { to: revisao, when: "output.refutacao.status == 'contestado'" }
-      - { to: rework, when: "output.rework_preparacao.worktree.path" }
-      - { to: implementacao, when: "output.refutacao.status == 'corrigir'" }
+      - { to: review, when: "output.refutation.status == 'contestado'" }
+      - { to: rework, when: "output.rework_preparation.worktree.path" }
+      - { to: implementation, when: "output.refutation.status == 'corrigir'" }
 
   # ---- Rework loop (F4 #157, D24): PR got CHANGES_REQUESTED, the card came
   # back for corrections ON THE SAME BRANCH. Entered directly (the queue
@@ -251,16 +251,16 @@ states:
   # review instead of creating a PR. The 2-round cap is per CARD (pr_links.
   # rework_count, enforced by the night-coordinator's admission), not a
   # max_retries of this graph.
-  rework_preparacao:
+  rework_preparation:
     description: >
       Recreate a worktree from the PR branch's remote head (detached, no new
       branch), abort on any human commit since the agent's last push (never
       overwrite — ask for direction instead), and build the delimited
       fix-list from the review comments.
     type: script
-    script: card-to-pr-rework-preparacao
+    script: card-to-pr-rework-preparation
     transitions:
-      - { to: done, when: "output.rework_preparacao.aborted == true" }
+      - { to: done, when: "output.rework_preparation.aborted == true" }
       - { to: rework }
 
   rework:
@@ -285,15 +285,15 @@ states:
       - git_commit
       - emit_output
     transitions:
-      - { to: rework_pergunta, when: "output.rework.needsClarification == true" }
+      - { to: rework_question, when: "output.rework.needsClarification == true" }
       - { to: verify }
 
-  rework_pergunta:
+  rework_question:
     description: >
       Orchestrator-side effect of an ambiguous review: post the agent's
       question on the PR thread (D13) and end without counting a round.
     type: script
-    script: card-to-pr-rework-pergunta
+    script: card-to-pr-rework-question
     transitions:
       - { to: done }
 
@@ -308,10 +308,10 @@ states:
     transitions:
       - { to: done }
 
-  bloqueado:
+  blocked:
     description: Move the card to Blocked with a structured reason.
     type: script
-    script: card-to-pr-bloqueado
+    script: card-to-pr-blocked
     transitions:
       - { to: done }
 

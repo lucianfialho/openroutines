@@ -82,7 +82,7 @@ export type ExecRunner = (
 ) => Promise<{ stdout: string; stderr: string }>;
 
 export interface SastOptions {
-  /** Injectable seam for tests — same pattern as preparacao.ts's runGit/checkProtection. */
+  /** Injectable seam for tests — same pattern as preparation.ts's runGit/checkProtection. */
   exec?: ExecRunner;
 }
 

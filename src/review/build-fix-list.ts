@@ -5,7 +5,7 @@
  * agent receives: the FIXED precedence hierarchy first (never negotiable by
  * comment text), then the comments themselves as low-confidence DATA —
  * `arquivo:linha — texto`, in the order given (same delimitation idiom as
- * prompts/refutacao.md).
+ * prompts/refutation.md).
  */
 
 export interface FixListComment {

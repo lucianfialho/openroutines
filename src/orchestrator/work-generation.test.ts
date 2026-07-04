@@ -98,7 +98,7 @@ describe("extractDebtOccurrences", () => {
       metadata: {
         stateMachineContext: {
           outputs: {
-            bloqueado: { blockReason: "verify-falhou" },
+            blocked: { blockReason: "verify-failed" },
             verify: {
               semgrepFindings: [
                 { ruleId: "rule-1", file: "src/a.ts", confidence: 5 }, // below 8 -> counts
@@ -113,7 +113,7 @@ describe("extractDebtOccurrences", () => {
     };
 
     const occurrences = extractDebtOccurrences(row);
-    expect(occurrences).toContainEqual(expect.objectContaining({ tipo: "block-reason", chave: "verify-falhou" }));
+    expect(occurrences).toContainEqual(expect.objectContaining({ tipo: "block-reason", chave: "verify-failed" }));
     expect(occurrences).toContainEqual(expect.objectContaining({ tipo: "semgrep", chave: "rule-1:src/a.ts" }));
     expect(occurrences.some((o) => o.chave.startsWith("rule-2"))).toBe(false);
     expect(occurrences).toContainEqual(expect.objectContaining({ tipo: "dependency-vulnerable", chave: "lodash:GHSA-1" }));
@@ -128,12 +128,12 @@ describe("extractDebtOccurrences", () => {
 describe("aggregateDebtSignals — recurrence thresholds", () => {
   it("keeps a blockReason seen 2x but drops one seen once", () => {
     const rows: ExecutionSignalRow[] = [
-      { repo: "acme", metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "verify-falhou" } } } } },
-      { repo: "acme", metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "verify-falhou" } } } } },
-      { repo: "acme", metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "orcamento" } } } } },
+      { repo: "acme", metadata: { stateMachineContext: { outputs: { blocked: { blockReason: "verify-failed" } } } } },
+      { repo: "acme", metadata: { stateMachineContext: { outputs: { blocked: { blockReason: "verify-failed" } } } } },
+      { repo: "acme", metadata: { stateMachineContext: { outputs: { blocked: { blockReason: "budget" } } } } },
     ];
     const signals = aggregateDebtSignals(rows);
-    expect(signals).toEqual([expect.objectContaining({ tipo: "block-reason", chave: "verify-falhou", count: 2 })]);
+    expect(signals).toEqual([expect.objectContaining({ tipo: "block-reason", chave: "verify-failed", count: 2 })]);
   });
 
   it("requires 3 occurrences for flaky but only 1 for a vulnerable dependency", () => {
@@ -224,8 +224,8 @@ describe("proposeWeeklyCards — general debt aggregation (AC: recurring blockRe
   it("2 blockReason occurrences in the same repo produce exactly 1 Backlog card citing the evidence", async () => {
     const registry = makeRegistry({ acme: makeRepoConfig({ clonePath: "/repos/acme" }) });
     const rows: ExecutionSignalRow[] = [
-      { repo: "acme", metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "verify-falhou" } } } } },
-      { repo: "acme", metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "verify-falhou" } } } } },
+      { repo: "acme", metadata: { stateMachineContext: { outputs: { blocked: { blockReason: "verify-failed" } } } } },
+      { repo: "acme", metadata: { stateMachineContext: { outputs: { blocked: { blockReason: "verify-failed" } } } } },
     ];
     const { createCard, calls } = makeFakeCreateCard();
     const { findExistingFingerprints } = makeFakeDedupe();
@@ -243,15 +243,15 @@ describe("proposeWeeklyCards — general debt aggregation (AC: recurring blockRe
     expect(created[0]).toMatchObject({ repo: "acme", type: "debt-block-reason", listName: BACKLOG_LIST_NAME });
     expect(calls[0].listName).toBe(BACKLOG_LIST_NAME);
     expect(calls[0].labels).toEqual([AUTO_PROPOSED_LABEL]);
-    expect(calls[0].description).toContain("verify-falhou");
+    expect(calls[0].description).toContain("verify-failed");
     expect(calls[0].description).toContain("2x"); // evidence cites the occurrence count
   });
 
   it("rerunning over the same dataset does not duplicate the card (fingerprint dedupe)", async () => {
     const registry = makeRegistry({ acme: makeRepoConfig({ clonePath: "/repos/acme" }) });
     const rows: ExecutionSignalRow[] = [
-      { repo: "acme", metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "verify-falhou" } } } } },
-      { repo: "acme", metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "verify-falhou" } } } } },
+      { repo: "acme", metadata: { stateMachineContext: { outputs: { blocked: { blockReason: "verify-failed" } } } } },
+      { repo: "acme", metadata: { stateMachineContext: { outputs: { blocked: { blockReason: "verify-failed" } } } } },
     ];
     const first = makeFakeCreateCard();
     const firstRun = await proposeWeeklyCards({
@@ -282,8 +282,8 @@ describe("proposeWeeklyCards — general debt aggregation (AC: recurring blockRe
     const registry = makeRegistry({ acme: makeRepoConfig({ clonePath: "/repos/acme" }) });
     const rows: ExecutionSignalRow[] = [];
     for (const reason of ["r1", "r2", "r3", "r4"]) {
-      rows.push({ repo: "acme", metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: reason } } } } });
-      rows.push({ repo: "acme", metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: reason } } } } });
+      rows.push({ repo: "acme", metadata: { stateMachineContext: { outputs: { blocked: { blockReason: reason } } } } });
+      rows.push({ repo: "acme", metadata: { stateMachineContext: { outputs: { blocked: { blockReason: reason } } } } });
     }
     const { createCard } = makeFakeCreateCard();
     const created = await proposeWeeklyCards({
@@ -377,8 +377,8 @@ describe("proposeWeeklyCards — CVE wave (AC: critical severity)", () => {
     const registry = makeRegistry({ acme: makeRepoConfig({ clonePath: "/repos/acme" }) });
     const { createCard } = makeFakeCreateCard();
     const rows: ExecutionSignalRow[] = [
-      { repo: "acme", metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "verify-falhou" } } } } },
-      { repo: "acme", metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "verify-falhou" } } } } },
+      { repo: "acme", metadata: { stateMachineContext: { outputs: { blocked: { blockReason: "verify-failed" } } } } },
+      { repo: "acme", metadata: { stateMachineContext: { outputs: { blocked: { blockReason: "verify-failed" } } } } },
     ];
 
     const created = await proposeWeeklyCards({
@@ -433,8 +433,8 @@ describe("proposeWeeklyCards — Backlog invariant (D26)", () => {
   it("every card except an opted-in CVE lands in Backlog", async () => {
     const registry = makeRegistry({ acme: makeRepoConfig({ clonePath: "/repos/acme" }) });
     const rows: ExecutionSignalRow[] = [
-      { repo: "acme", metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "verify-falhou" } } } } },
-      { repo: "acme", metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "verify-falhou" } } } } },
+      { repo: "acme", metadata: { stateMachineContext: { outputs: { blocked: { blockReason: "verify-failed" } } } } },
+      { repo: "acme", metadata: { stateMachineContext: { outputs: { blocked: { blockReason: "verify-failed" } } } } },
     ];
 
     const created = await proposeWeeklyCards({

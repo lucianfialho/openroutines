@@ -51,7 +51,7 @@ const escapeClosingTag = (text: string, tag: string): string => text.replaceAll(
  * Blocked-resume injects the IDENTICAL envelope this module documents.
  */
 export const steeringPromptBlock = (text: string): string =>
-  `<steering fonte="humano" prioridade="acima-do-plano">\n${escapeClosingTag(text, "steering")}\n</steering>`;
+  `<steering fonte="humano" prioridade="acima-do-plan">\n${escapeClosingTag(text, "steering")}\n</steering>`;
 
 /** effect_type marking a Blocked steering the night coordinator must resume. */
 export const RESUME_BLOCKED_EFFECT = "resume-blocked";

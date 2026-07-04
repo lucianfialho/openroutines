@@ -78,7 +78,7 @@ interface StateMachineOutputsShape {
 /**
  * Reads night_runs/executions/pr_links/tier_circuit_state for `nightId`.
  *
- * `executions.metadata` (where `outputs.bloqueado.blockReason` lives) is safe
+ * `executions.metadata` (where `outputs.blocked.blockReason` lives) is safe
  * to read here even for normally-completed executions: postgres.ts's upsert
  * does `metadata = COALESCE(EXCLUDED.metadata, executions.metadata)`, so
  * `succeed()`/`fail()`'s final write (state-machine.ts) never nulls out
@@ -110,14 +110,14 @@ export const gatherMorningReportData = async (
 
   for (const row of execRows) {
     const metadata = row.metadata as StateMachineOutputsShape | null;
-    const bloqueado = metadata?.stateMachineContext?.outputs?.bloqueado as { blockReason?: string } | undefined;
-    if (bloqueado?.blockReason) {
+    const blocked = metadata?.stateMachineContext?.outputs?.blocked as { blockReason?: string } | undefined;
+    if (blocked?.blockReason) {
       cardsBlocked++;
-      if (isSecurityBlockReason(bloqueado.blockReason)) {
+      if (isSecurityBlockReason(blocked.blockReason)) {
         securityBlocks.push({
           cardId: String(row.task_id),
           title: row.title ? String(row.title) : String(row.task_id),
-          blockReason: bloqueado.blockReason,
+          blockReason: blocked.blockReason,
           trelloUrl: row.url ? String(row.url) : "",
         });
       }
@@ -217,11 +217,11 @@ export const renderMorningReportCard = (data: MorningReportData): { title: strin
   // "cabeçalho com total" (03-PIPELINE-EXECUCAO.md) — the closing tally, LAST
   // in the doc's own section order; the 📊 [Relatório] protocol marker
   // (02-FLUXO-TRELLO.md) is a separate envelope tag that always leads the
-  // body regardless, same shape as bloqueado.ts's `⛔ [Bloqueio]` comments.
+  // body regardless, same shape as blocked.ts's `⛔ [Bloqueio]` comments.
   const summary = [
     "## 📈 Resumo",
     "",
-    `✅ ${data.cardsCompleted} concluído(s) · ⛔ ${data.cardsBlocked} bloqueado(s)`,
+    `✅ ${data.cardsCompleted} concluído(s) · ⛔ ${data.cardsBlocked} blocked(s)`,
     `⏱️ hoje: ~${totalMinutes} min de review`,
   ].join("\n");
 

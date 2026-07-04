@@ -162,7 +162,7 @@ describe.skipIf(!hasTestDb())("reserveDayBudget (real DB, anti-TOCTOU, night-iso
     await clearDayReservations();
     // Fill the whole daytime budget (cap 4, one 4-unit reservation).
     const dayExec = await newDayExec();
-    const day = await reserveDayBudget(pool, { executionId: dayExec, phase: "card-pesquisa", tier: "claude-opus-4.8", estimatedUnits: 4, dayBudgetUsd: 4 });
+    const day = await reserveDayBudget(pool, { executionId: dayExec, phase: "card-research", tier: "claude-opus-4.8", estimatedUnits: 4, dayBudgetUsd: 4 });
     expect(day.granted).toBe(true);
     const { rows: dayRows } = await pool.query(`SELECT night_id FROM budget_reservations WHERE id = $1`, [day.reservationId]);
     expect(dayRows[0].night_id).toBeNull();
@@ -176,7 +176,7 @@ describe.skipIf(!hasTestDb())("reserveDayBudget (real DB, anti-TOCTOU, night-iso
     const nightExec = crypto.randomUUID();
     await insertExecution(pool, nightExec, { nightId });
     execIds.push(nightExec);
-    expect((await reserveBudget(pool, { nightId, executionId: nightExec, phase: "plano", tier: "claude-opus-4.8", estimatedUnits: 4 })).granted).toBe(true);
+    expect((await reserveBudget(pool, { nightId, executionId: nightExec, phase: "plan", tier: "claude-opus-4.8", estimatedUnits: 4 })).granted).toBe(true);
 
     // ...and that night reservation did not inflate the day sum.
     const { rows } = await pool.query(

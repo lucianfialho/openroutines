@@ -22,7 +22,7 @@ import { hasTestDb, makeTestPool, ensureSchema, uniqueDate, cleanupNight } from 
 const syntheticData = (): MorningReportData => ({
   nightId: "night-1",
   securityBlocks: [
-    { cardId: "card-sec", title: "Card com achado de segurança", blockReason: "seguranca", trelloUrl: "https://trello.com/c/sec" },
+    { cardId: "card-sec", title: "Card com achado de segurança", blockReason: "security", trelloUrl: "https://trello.com/c/sec" },
   ],
   prs: [
     { cardId: "card-a", prUrl: "https://github.com/acme/widgets/pull/9", repo: "acme-widgets", riskScore: 50, greenLane: false, estimatedMinutes: 15, costUsd: 0.42 },
@@ -145,15 +145,15 @@ describe("gatherMorningReportData (mocked pool, synthetic data)", () => {
       execRows: [
         {
           task_id: "card-sec",
-          metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "seguranca" } } } },
+          metadata: { stateMachineContext: { outputs: { blocked: { blockReason: "security" } } } },
           provider_breakdown: null,
           cost_usd: null,
           title: "Card com achado de segurança",
           url: "https://trello.com/c/sec",
         },
         {
-          task_id: "card-verify-falhou",
-          metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "verify-falhou" } } } },
+          task_id: "card-verify-failed",
+          metadata: { stateMachineContext: { outputs: { blocked: { blockReason: "verify-failed" } } } },
           // Legacy pre-H11 row: bare provider keys must still map via fallback.
           provider_breakdown: { "kimi-cli": 0.02 },
           cost_usd: 0.02,
@@ -188,11 +188,11 @@ describe("gatherMorningReportData (mocked pool, synthetic data)", () => {
     expect(data.securityBlocks[0]).toMatchObject({
       cardId: "card-sec",
       title: "Card com achado de segurança",
-      blockReason: "seguranca",
+      blockReason: "security",
       trelloUrl: "https://trello.com/c/sec",
     });
 
-    // 2 bloqueado outputs total (1 security + 1 non-security "verify-falhou").
+    // 2 blocked outputs total (1 security + 1 non-security "verify-failed").
     expect(data.cardsBlocked).toBe(2);
     expect(data.cardsCompleted).toBe(2); // === prs.length
 
@@ -256,7 +256,7 @@ describe.skipIf(!hasTestDb())("gatherMorningReportData (real DB)", () => {
     await pool.query(
       `INSERT INTO executions (id, routine_id, trigger_type, skill_name, status, started_at, night_id, source_id, task_id, metadata)
        VALUES (gen_random_uuid(), 'night-run', 'card-execution', 'card-to-pr', 'completed', NOW(), $1, $2, 'card-sec', $3::jsonb)`,
-      [nightId, sourceId, JSON.stringify({ stateMachineContext: { outputs: { bloqueado: { blockReason: "seguranca-divergente" } } } })]
+      [nightId, sourceId, JSON.stringify({ stateMachineContext: { outputs: { blocked: { blockReason: "security-divergent" } } } })]
     );
     await pool.query(
       `INSERT INTO executions (id, routine_id, trigger_type, skill_name, status, started_at, night_id, source_id, task_id, provider_breakdown, cost_usd)
@@ -294,7 +294,7 @@ describe.skipIf(!hasTestDb())("gatherMorningReportData (real DB)", () => {
     expect(data.prs[0].costUsd).toBe(7); // card-shipped's cost_usd
     expect(data.prs[1].costUsd).toBe(0); // card-green — no cost_usd row, no crash
     expect(data.securityBlocks).toHaveLength(1);
-    expect(data.securityBlocks[0]).toMatchObject({ cardId: "card-sec", blockReason: "seguranca-divergente" });
+    expect(data.securityBlocks[0]).toMatchObject({ cardId: "card-sec", blockReason: "security-divergent" });
     expect(data.costsByTier.sonnet).toBe(2); // legacy provider-key fallback
     expect(data.costsByTier.opus).toBe(5); // security-judge (1) + model-keyed opus (4)
     expect(data.circuitBreakersTriggered).toEqual([{ tier: "kimi" }]);

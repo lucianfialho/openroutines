@@ -529,7 +529,7 @@ describe("runNightCycle — F4 #157 rework admission (D24)", () => {
     expect(queue.jobs).toHaveLength(1);
   });
 
-  it("AC: rework_count at the cap blocks the card with 'retrabalho-esgotado' — comment posted, review_state terminal, NO Telegram alert", async () => {
+  it("AC: rework_count at the cap blocks the card with 'rework-exhausted' — comment posted, review_state terminal, NO Telegram alert", async () => {
     const pool = makeMockPool({ lockGranted: true, taskContent });
     const prLinks = makeInMemoryPrLinkRepository();
     await seedLink(prLinks, { reworkCount: 2 });
@@ -543,8 +543,8 @@ describe("runNightCycle — F4 #157 rework admission (D24)", () => {
     expect(summary.reworkAdmitted).toBe(0);
     expect(queue.jobs).toHaveLength(0);
     expect(moveTo).toHaveBeenCalledWith("card1", "blocked");
-    expect(comment).toHaveBeenCalledWith("card1", expect.stringContaining("retrabalho-esgotado"));
-    // D22 taxonomy: retrabalho-esgotado NEVER wakes anyone up (explicit negative)
+    expect(comment).toHaveBeenCalledWith("card1", expect.stringContaining("rework-exhausted"));
+    // D22 taxonomy: rework-exhausted NEVER wakes anyone up (explicit negative)
     expect(sendAlert).not.toHaveBeenCalled();
     // terminal review_state: neither next night's admission nor the poller re-acts
     expect((await prLinks.findByTask("trello-main", "card1"))[0].reviewState).toBe("rework-exhausted");
@@ -613,7 +613,7 @@ describe("runNightCycle — F5 #169 Blocked-resume admission (D25)", () => {
     expect(queue.jobs).toHaveLength(1);
     const payload = queue.jobs[0].trigger.payload as { description: string; [k: string]: unknown };
     expect(payload).toMatchObject({ source_id: "trello-main", task_id: "card1", repo: "acme-widgets", skill: "card-to-pr" });
-    expect(payload.description).toContain('<steering fonte="humano" prioridade="acima-do-plano">');
+    expect(payload.description).toContain('<steering fonte="humano" prioridade="acima-do-plan">');
     expect(payload.description).toContain("usar dayjs em vez de moment");
     expect(payload.description.startsWith(cardBody("acme-widgets"))).toBe(true); // appended, not replacing the concept
     expect(await cardSteering.findUnapplied()).toHaveLength(0); // markApplied ran
@@ -629,7 +629,7 @@ describe("runNightCycle — F5 #169 Blocked-resume admission (D25)", () => {
     await runNightCycle(baseDeps(pool, { queue, cardSteering }));
 
     const payload = queue.jobs[0].trigger.payload as { description: string; [k: string]: unknown };
-    const open = payload.description.indexOf('<steering fonte="humano" prioridade="acima-do-plano">');
+    const open = payload.description.indexOf('<steering fonte="humano" prioridade="acima-do-plan">');
     const close = payload.description.indexOf("</steering>");
     expect(open).toBeGreaterThan(-1);
     expect(payload.description.indexOf(attack)).toBeGreaterThan(open);

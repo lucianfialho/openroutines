@@ -73,8 +73,8 @@ import { makePostgresCardSteeringRepository } from "./persistence/card-steering-
 import { makeRestTaskSource } from "./task-source/rest-executor.js";
 import type { TaskSource, TaskComplexity } from "./task-source/types.js";
 import { registerCardToPrHandlers, cardToPrFanoutAggregators } from "./pipeline/card-to-pr/index.js";
-import { registerPesquisaHandlers } from "./pipeline/pesquisa/index.js";
-import { registerMapeamentoHandlers } from "./pipeline/mapeamento/index.js";
+import { registerResearchHandlers } from "./pipeline/research/index.js";
+import { registerMappingHandlers } from "./pipeline/mapping/index.js";
 import { resolveCardToPrProvider, resolveImplementationTier, resolveEscalatedProvider } from "./pipeline/card-to-pr/routing.js";
 import { registerMorningReportHandlers, MORNING_REPORT_TRELLO_LIST } from "./pipeline/morning-report/index.js";
 import { runStateMachine, type StateMachineConfig, type StateMachineContext, type DynamicProviderContext } from "./engine/state-machine.js";
@@ -127,20 +127,20 @@ const routeForTier = (tier: Tier): { provider: string; model?: string } | undefi
 /**
  * Complexity routing hook (F4 #185, D9) for card-to-pr's dispatch — wired as
  * `StateMachineConfig.resolveDynamicProvider` for the `card-to-pr` skill.
- * Only `implementacao` declares `dynamic_provider: true` in skill.yaml
- * (`plano`/`gate_plano` stay static; routing.ts's fixed routes for them exist
+ * Only `implementation` declares `dynamic_provider: true` in skill.yaml
+ * (`plan`/`gate_plan` stay static; routing.ts's fixed routes for them exist
  * only as the one auditable source of truth, never wired here) — an
  * unescalated call resolves straight from the card's complexity/altaImpl
- * inputs, an escalated one (F4 #159: the verify->implementacao retry cap just
+ * inputs, an escalated one (F4 #159: the verify->implementation retry cap just
  * exhausted) bumps one tier up the same D9 ladder instead of re-deriving it
  * from scratch.
  */
 export const resolveCardToPrDynamicProvider = (
   ctx: DynamicProviderContext
 ): { provider: string; model?: string } | undefined => {
-  // `rework` (F4 #157, D24) routes exactly like implementacao: the card's
+  // `rework` (F4 #157, D24) routes exactly like implementation: the card's
   // ORIGINAL D9 tier from the same complexity/altaImpl inputs.
-  if (ctx.stateId !== "implementacao" && ctx.stateId !== "rework") return undefined;
+  if (ctx.stateId !== "implementation" && ctx.stateId !== "rework") return undefined;
   const complexity = ctx.inputs.complexity as TaskComplexity | undefined;
   const altaImpl = ctx.inputs.altaImpl as boolean | undefined;
   const derivedTier = resolveImplementationTier({ complexity, altaImpl });
@@ -256,11 +256,11 @@ export const runCardExecutionJob = async (
 
   let stateMachineContext = stateMachineContextIn;
   // Rework admission (F4 #157): a fresh rework job enters the machine at
-  // rework_preparacao, not preparacao. A persisted (crash-resume) context
+  // rework_preparation, not preparation. A persisted (crash-resume) context
   // above always wins — it already points at the right state.
   if (!stateMachineContext && payload?.rework === true) {
-    stateMachineContext = { currentState: "rework_preparacao", outputs: {} };
-    console.log(`[Queue] card-execution ${executionId} is a rework round — starting at rework_preparacao`);
+    stateMachineContext = { currentState: "rework_preparation", outputs: {} };
+    console.log(`[Queue] card-execution ${executionId} is a rework round — starting at rework_preparation`);
   }
 
   // runStateMachine never itself transitions executions.status to 'running'
@@ -287,16 +287,16 @@ export const runCardExecutionJob = async (
       // H9b: a pre-LLM script block (this card never reached its tier's LLM
       // call at all) must not charge that tier a failure it never had a
       // chance at. blockReason lives at metadata.stateMachineContext.
-      // outputs.bloqueado (same path morning-report.ts reads); the two
-      // pre-LLM blocks are "sem-branch-protection" (preparacao) and
-      // "orcamento" (budget denial, state-machine.ts) — anything blocked
-      // LATER (verify/security/revisao/...) did reach the tier, so it stays
+      // outputs.blocked (same path morning-report.ts reads); the two
+      // pre-LLM blocks are "no-branch-protection" (preparation) and
+      // "budget" (budget denial, state-machine.ts) — anything blocked
+      // LATER (verify/security/review/...) did reach the tier, so it stays
       // chargeable.
       const finished = await deps.persistence.findById(executionId);
-      const bloqueado = (
-        finished?.metadata as { stateMachineContext?: { outputs?: { bloqueado?: { blockReason?: string } } } } | undefined
-      )?.stateMachineContext?.outputs?.bloqueado;
-      const preLlmBlock = bloqueado?.blockReason === "sem-branch-protection" || bloqueado?.blockReason === "orcamento";
+      const blocked = (
+        finished?.metadata as { stateMachineContext?: { outputs?: { blocked?: { blockReason?: string } } } } | undefined
+      )?.stateMachineContext?.outputs?.blocked;
+      const preLlmBlock = blocked?.blockReason === "no-branch-protection" || blocked?.blockReason === "budget";
       if (!preLlmBlock) {
         // H9a: for a rework round the pr_link ALWAYS pre-exists (rework only
         // ever starts from one), so "shipped" can't be "a link exists" — it
@@ -603,9 +603,9 @@ export const createApp = async (config: AppConfig) => {
     // the legacy git-worktree tools (create/remove worktree, run_shell) stay
     // behind OPENROUTINES_LEGACY_TOOLS: they carry real destructive power
     // (force-delete a branch by name/path) and predate the F1 per-state tool
-    // allowlist. card-to-pr's implementacao state declares only `git_commit`
+    // allowlist. card-to-pr's implementation state declares only `git_commit`
     // in its own `tools:` list anyway — its worktree is created by the
-    // deterministic preparacao script, never by an LLM tool call.
+    // deterministic preparation script, never by an LLM tool call.
     const gitCommitTool = makeGitWorktreeTools().find((t) => t.definition.name === "git_commit");
     if (gitCommitTool) {
       toolRegistry.registerMany([gitCommitTool]);
@@ -651,8 +651,8 @@ export const createApp = async (config: AppConfig) => {
       }
 
       // One action ledger shared by every pipeline that fires idempotent
-      // external effects (card-to-pr PR/push/handoff, card-pesquisa delivery,
-      // card-mapeamento pr_docs). Keyed by (executionId, actionKey) so a single
+      // external effects (card-to-pr PR/push/handoff, card-research delivery,
+      // card-mapping pr_docs). Keyed by (executionId, actionKey) so a single
       // instance never collides across pipelines.
       const actionLedger = pgPool ? makePostgresActionLedgerRepository(pgPool) : makeInMemoryActionLedgerRepository();
 
@@ -678,24 +678,24 @@ export const createApp = async (config: AppConfig) => {
       });
       console.log("[App] Registered card-to-pr script handlers");
 
-      registerPesquisaHandlers(scriptRegistry, {
+      registerResearchHandlers(scriptRegistry, {
         registry: repoRegistry,
         githubToken: config.githubToken,
         worktreeBase: process.env.WORKTREE_BASE ?? "/tmp/or-worktrees",
         taskSourceFor: (sourceId) => cardTaskSources?.get(sourceId),
         claudeApiKey: config.anthropicApiKey ?? "",
-        // F5 #162 hardening: makes entrega's issue/milestone creation idempotent
+        // F5 #162 hardening: makes delivery's issue/milestone creation idempotent
         // (a crash mid-delivery + resume no longer duplicates GitHub issues).
         ledger: actionLedger,
       });
-      console.log("[App] Registered card-pesquisa script handlers");
+      console.log("[App] Registered card-research script handlers");
 
-      // card-mapeamento (F5 #162): read-broad survey -> docs-only PR
-      // (REPO-PROFILE.md + visual profile). varredura runs on Sonnet CLI;
-      // captura_visual reuses card-to-pr's Kimi-with-Playwright-MCP provider and
+      // card-mapping (F5 #162): read-broad survey -> docs-only PR
+      // (REPO-PROFILE.md + visual profile). scan runs on Sonnet CLI;
+      // visual_capture reuses card-to-pr's Kimi-with-Playwright-MCP provider and
       // the shared compose-lifecycle. Wired whenever card-to-pr is (same
       // GITHUB_TOKEN + repos.yaml gate).
-      registerMapeamentoHandlers(scriptRegistry, {
+      registerMappingHandlers(scriptRegistry, {
         registry: repoRegistry,
         githubToken: config.githubToken,
         worktreeBase: process.env.WORKTREE_BASE ?? "/tmp/or-worktrees",
@@ -705,7 +705,7 @@ export const createApp = async (config: AppConfig) => {
           agentProvider: providerRegistry.resolve("kimi-cli", "kimi-k2.6"),
         },
       });
-      console.log("[App] Registered card-mapeamento script handlers");
+      console.log("[App] Registered card-mapping script handlers");
 
       // The night-run coordinator dispatches card-execution jobs by calling
       // runStateMachine directly (queueHandler §6) rather than engine.execute():
@@ -727,16 +727,16 @@ export const createApp = async (config: AppConfig) => {
             toolRegistry,
             budgetGate,
             // budgetSettle intentionally omitted — see the effort-unit note above.
-            // Named `type: fanout` aggregators (F4 #153) — card-to-pr's `revisao`
-            // state declares `aggregate: aggregateRevisao`; without this the
+            // Named `type: fanout` aggregators (F4 #153) — card-to-pr's `review`
+            // state declares `aggregate: aggregateReview`; without this the
             // runner fails that state (fanoutAggregators lookup miss). Cast:
-            // aggregateRevisao's return type is the named RevisaoOutput (no
+            // aggregateReview's return type is the named ReviewOutput (no
             // index signature) rather than FanoutAggregator's generic
             // Record<string, unknown> — same values at runtime, TS just wants
             // an index signature on the nominal type; not modifying
             // src/review/aggregate.ts's own return type for this.
             fanoutAggregators: cardToPrFanoutAggregators as unknown as StateMachineConfig["fanoutAggregators"],
-            // F4 #185 (D9): routes implementacao's provider/model by the
+            // F4 #185 (D9): routes implementation's provider/model by the
             // card's complexity/altaImpl (falls back to the YAML's static
             // claude-cli/claude-sonnet-5 for every other state, unchanged).
             resolveDynamicProvider: resolveCardToPrDynamicProvider,
@@ -869,7 +869,7 @@ export const createApp = async (config: AppConfig) => {
 
     // Daytime triage tick (F5 #170): the routine's schedule is live, but its
     // `card-triage` skill is an F2 deliverable that does not exist yet, and no
-    // runtime dispatcher routes a research card into card-pesquisa. Intercept
+    // runtime dispatcher routes a research card into card-research. Intercept
     // it here (same pattern as night-run) so the cron is a harmless no-op
     // instead of failing to load a missing skill every 30 minutes. Swap this
     // for the real classify -> checkProfileAndBlock (#163) / dispatchResearch-

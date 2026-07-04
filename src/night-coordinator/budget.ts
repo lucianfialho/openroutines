@@ -26,7 +26,7 @@ export type BudgetTier = keyof typeof BUDGET_UNIT_WEIGHTS;
 /**
  * The runner passes `tier = routedModel ?? routedProvider ?? "default"`
  * (state-machine.ts) as the budget-gate lookup key. Since F4 #185, a
- * dynamically-routed `implementacao` state passes the actual MODEL ID
+ * dynamically-routed `implementation` state passes the actual MODEL ID
  * (e.g. "claude-opus-4-8", "kimi-k2.6"), which doesn't match
  * BUDGET_UNIT_WEIGHTS' keys verbatim (dots vs. hyphens, "kimi-k2.6" vs.
  * "kimi") — this is the one normalization point, so a routed Opus call is

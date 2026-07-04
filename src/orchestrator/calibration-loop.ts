@@ -23,7 +23,7 @@
  *                  sees the proposed rules + current docs + applicable raizes-docs
  *                  slugs and returns `{ approved, contradictions[] }`.
  *   - `openCalibrationPr` : clone + edit ONLY CLAUDE.md / docs/REPO-PROFILE.md +
- *                  `gh pr create` (mirror src/pipeline/mapeamento/pr-docs.ts's
+ *                  `gh pr create` (mirror src/pipeline/mapping/pr-docs.ts's
  *                  docs-only, argv-safe git mechanics).
  * Wiring those here now would be dead code (nothing calls this until the F6
  * cron), so they stay seams — the pure decision logic (occurrence filter, 5-rule

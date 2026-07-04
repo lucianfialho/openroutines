@@ -7,9 +7,9 @@
  * injected as closures, one seam per external effect so tests never need a
  * real Postgres/Trello.
  *
- *   coletar_dados     -> resolves today's night_runs row, calls gatherMorningReportData
- *   montar_relatorio  -> calls renderMorningReportCard
- *   publicar_card     -> creates (once/day, guarded by night_runs.report_card_id)
+ *   collect_data     -> resolves today's night_runs row, calls gatherMorningReportData
+ *   build_report  -> calls renderMorningReportCard
+ *   publish_card     -> creates (once/day, guarded by night_runs.report_card_id)
  *                        or reuses the digest card, posts the body as a comment
  */
 import { Effect } from "effect";
@@ -44,12 +44,12 @@ export interface MorningReportDeps {
   now?: () => Date;
 }
 
-interface ColetarDadosOutput {
+interface CollectDataOutput {
   nightId: string | null;
   data?: MorningReportData;
 }
 
-export const makeColetarDados = (deps: MorningReportDeps): ScriptHandler => async () => {
+export const makeCollectData = (deps: MorningReportDeps): ScriptHandler => async () => {
   const now = deps.now ?? (() => new Date());
   const date = dateInTz(now(), deps.tz);
   const { rows } = await deps.pool.query(`SELECT id FROM night_runs WHERE date = $1`, [date]);
@@ -63,17 +63,17 @@ export const makeColetarDados = (deps: MorningReportDeps): ScriptHandler => asyn
 
 const NO_NIGHT_BODY = `${MORNING_REPORT_PREFIX}\n\nNenhuma execução noturna encontrada para hoje (a rotina de 01:00 não rodou ou ainda não terminou).`;
 
-export const makeMontarRelatorio = (): ScriptHandler => async (ctx) => {
-  const coletado = ctx.outputs.coletar_dados as ColetarDadosOutput;
+export const makeBuildReport = (): ScriptHandler => async (ctx) => {
+  const coletado = ctx.outputs.collect_data as CollectDataOutput;
   if (!coletado.nightId || !coletado.data) {
     return { title: "📊 Relatório matinal", body: NO_NIGHT_BODY };
   }
   return renderMorningReportCard(coletado.data);
 };
 
-export const makePublicarCard = (deps: MorningReportDeps): ScriptHandler => async (ctx) => {
-  const montado = ctx.outputs.montar_relatorio as { title: string; body: string };
-  const coletado = ctx.outputs.coletar_dados as ColetarDadosOutput;
+export const makePublishCard = (deps: MorningReportDeps): ScriptHandler => async (ctx) => {
+  const montado = ctx.outputs.build_report as { title: string; body: string };
+  const coletado = ctx.outputs.collect_data as CollectDataOutput;
 
   // Idempotency guard: night_runs.report_card_id is set at most once per
   // night (re-running the routine the same day reuses the same card instead
@@ -109,7 +109,7 @@ export const makePublicarCard = (deps: MorningReportDeps): ScriptHandler => asyn
 };
 
 export const registerMorningReportHandlers = (reg: ScriptRegistry, deps: MorningReportDeps): void => {
-  reg.register("morning-report-coletar-dados", makeColetarDados(deps));
-  reg.register("morning-report-montar-relatorio", makeMontarRelatorio());
-  reg.register("morning-report-publicar-card", makePublicarCard(deps));
+  reg.register("morning-report-collect-data", makeCollectData(deps));
+  reg.register("morning-report-build-report", makeBuildReport());
+  reg.register("morning-report-publish-card", makePublishCard(deps));
 };

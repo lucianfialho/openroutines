@@ -108,8 +108,8 @@ const planSummary = async (
 ): Promise<string | undefined> => {
   try {
     const states = await runStates.findByExecution(executionId);
-    const plano = states.find((s) => s.stateId === "plano");
-    const summary = (plano?.output as { summary?: unknown } | undefined)?.summary;
+    const plan = states.find((s) => s.stateId === "plan");
+    const summary = (plan?.output as { summary?: unknown } | undefined)?.summary;
     return typeof summary === "string" && summary.length > 0 ? summary : undefined;
   } catch {
     return undefined; // best-effort flavor; a precedent still carries title + link
