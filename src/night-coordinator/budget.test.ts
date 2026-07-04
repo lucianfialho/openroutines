@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from "vitest";
-import { reserveBudget, settleBudget, BUDGET_UNIT_WEIGHTS } from "./budget.js";
+import { reserveBudget, settleBudget, BUDGET_UNIT_WEIGHTS, normalizeBudgetTier } from "./budget.js";
 import { acquireNightLock } from "./lock.js";
 import { hasTestDb, makeTestPool, ensureSchema, uniqueDate, insertExecution, cleanupNight } from "../persistence/db.test-helpers.js";
 
@@ -8,6 +8,31 @@ describe("BUDGET_UNIT_WEIGHTS", () => {
     expect(BUDGET_UNIT_WEIGHTS.kimi).toBeLessThan(BUDGET_UNIT_WEIGHTS["claude-sonnet-5"]);
     expect(BUDGET_UNIT_WEIGHTS["claude-sonnet-5"]).toBeLessThan(BUDGET_UNIT_WEIGHTS["claude-opus-4.8"]);
     expect(BUDGET_UNIT_WEIGHTS["claude-opus-4.8"]).toBeLessThan(BUDGET_UNIT_WEIGHTS["fable-5"]);
+  });
+});
+
+describe("normalizeBudgetTier (F4 #185: dynamically-routed model id -> budget key)", () => {
+  it("maps a routed opus model id to the claude-opus-4.8 key — weighed 4, not the sonnet default of 1", () => {
+    const tier = normalizeBudgetTier("claude-opus-4-8");
+    expect(tier).toBe("claude-opus-4.8");
+    expect(BUDGET_UNIT_WEIGHTS[tier]).toBe(4);
+  });
+
+  it("maps a routed kimi model id to the kimi key", () => {
+    expect(normalizeBudgetTier("kimi-k2.6")).toBe("kimi");
+  });
+
+  it("maps a routed fable model id to the fable-5 key", () => {
+    expect(normalizeBudgetTier("claude-fable-5")).toBe("fable-5");
+  });
+
+  it("passes an already-valid BUDGET_UNIT_WEIGHTS key straight through", () => {
+    expect(normalizeBudgetTier("claude-sonnet-5")).toBe("claude-sonnet-5");
+  });
+
+  it("falls back to claude-sonnet-5 for an unrecognized tier (e.g. a static state's provider name)", () => {
+    expect(normalizeBudgetTier("claude-cli")).toBe("claude-sonnet-5");
+    expect(normalizeBudgetTier("default")).toBe("claude-sonnet-5");
   });
 });
 

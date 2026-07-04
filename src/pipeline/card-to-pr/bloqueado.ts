@@ -48,7 +48,12 @@ export const makeBloqueado = (deps: CardToPrDeps): ScriptHandler => async (ctx) 
         ? "seguranca-divergente"
         : "seguranca"
       : undefined;
-  const blockReason = preparacao?.blockReason ?? verify?.blockReason ?? securityBlockReason ?? "desconhecido";
+  // F4 #185: gate_plano refuted twice escapes via on_exhausted (state-machine.ts
+  // marks outputs.gate_plano.exhausted=true and routes here instead of failing).
+  const gatePlano = ctx.outputs.gate_plano as { exhausted?: boolean } | undefined;
+  const gatePlanoBlockReason = gatePlano?.exhausted === true ? "plano-refutado-2x" : undefined;
+  const blockReason =
+    preparacao?.blockReason ?? verify?.blockReason ?? securityBlockReason ?? gatePlanoBlockReason ?? "desconhecido";
   const sourceId = String(ctx.inputs.source_id);
   const taskId = String(ctx.inputs.task_id);
 

@@ -107,6 +107,37 @@ describe("makeBloqueado", () => {
     expect(r).toEqual({ blocked: true, blockReason: "desconhecido" });
   });
 
+  it("F4 #185: derives blockReason 'plano-refutado-2x' from outputs.gate_plano.exhausted", async () => {
+    const { deps } = makeDeps();
+    const outputs = { preparacao: { branchProtected: true }, gate_plano: { verdict: "refutado", exhausted: true } };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "plano-refutado-2x" });
+  });
+
+  it("F4 #185: a non-exhausted gate_plano output never derives a blockReason from it", async () => {
+    const { deps } = makeDeps();
+    const outputs = { preparacao: { branchProtected: true }, gate_plano: { verdict: "refutado" } };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "desconhecido" });
+  });
+
+  it("F4 #185: preparacao/verify/security blockReason still win over gate_plano.exhausted (order preserved)", async () => {
+    const { deps } = makeDeps();
+    const outputs = {
+      preparacao: { branchProtected: true },
+      verify: { passed: false, blockReason: "verify-falhou" },
+      gate_plano: { verdict: "refutado", exhausted: true },
+    };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "verify-falhou" });
+  });
+
   it("AC3: defaults blockReason to 'desconhecido' (unmapped detail) when neither preparacao nor verify carry one", async () => {
     const { deps, comment } = makeDeps();
 
