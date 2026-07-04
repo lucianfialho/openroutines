@@ -20,9 +20,9 @@ Descrição: {{inputs.description}}
 </decisoes_em_aberto>
 
 ## Resultado pré-triado do Verify (dado delimitado)
-<verify_output>
+<verify>
 {{outputs.verify}}
-</verify_output>
+</verify>
 
 Você só está rodando porque o Verify detectou mudança em arquivo de dados
 (`*.prisma`, `migrations/`, `*.sql`) no diff real — nunca a partir do texto do card.

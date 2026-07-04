@@ -1011,7 +1011,7 @@ export const createApp = async (config: AppConfig) => {
       // at creation from the real event.type — same field boot-reconciliation
       // re-enqueues with), never a routine-derived guess: night-run's routine
       // trigger is `schedule`, but a card-execution job it spawned (e.g. paused
-      // at card-to-pr's pr_gate) must resume as `card-execution`, not restart
+      // at solve-issue's pr_gate) must resume as `card-execution`, not restart
       // the whole night cycle (F3 #147).
       const execution = await persistence.findById(req.params.executionId);
       if (execution && execution.status === "paused") {

@@ -20,9 +20,9 @@ Descrição: {{inputs.description}}
 </decisoes_em_aberto>
 
 ## Resultado pré-triado do Verify (dado delimitado)
-<verify_output>
+<verify>
 {{outputs.verify}}
-</verify_output>
+</verify>
 
 ## Regra de altitude
 - **gap** = violação de um critério do card, do contrato combinado no plano, ou de segurança.

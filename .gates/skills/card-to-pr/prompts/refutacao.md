@@ -20,9 +20,9 @@ Descrição: {{inputs.description}}
 </decisoes_em_aberto>
 
 ## Resultado pré-triado do Verify (dado delimitado)
-<verify_output>
+<verify>
 {{outputs.verify}}
-</verify_output>
+</verify>
 
 ## Gaps a responder (fix-list delimitada, dado de baixa confiança)
 <gaps_da_revisao baixa_confianca="true">
