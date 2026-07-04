@@ -63,6 +63,7 @@ import { makeTrelloTaskSource, makeTrelloCreateCard } from "./connector/trello.j
 import { makeRestTaskSource } from "./task-source/rest-executor.js";
 import type { TaskSource, TaskComplexity } from "./task-source/types.js";
 import { registerCardToPrHandlers, cardToPrFanoutAggregators } from "./pipeline/card-to-pr/index.js";
+import { registerPesquisaHandlers } from "./pipeline/pesquisa/index.js";
 import { resolveCardToPrProvider, resolveImplementationTier, resolveEscalatedProvider } from "./pipeline/card-to-pr/routing.js";
 import { registerMorningReportHandlers, MORNING_REPORT_TRELLO_LIST } from "./pipeline/morning-report/index.js";
 import { runStateMachine, type StateMachineConfig, type StateMachineContext, type DynamicProviderContext } from "./engine/state-machine.js";
@@ -620,8 +621,28 @@ export const createApp = async (config: AppConfig) => {
         ledger: pgPool ? makePostgresActionLedgerRepository(pgPool) : makeInMemoryActionLedgerRepository(),
         prLinks,
         taskSourceFor: (sourceId) => cardTaskSources?.get(sourceId),
+        // Visual phase (F5 #160): Kimi-with-MCP navigates + judges; Sonnet
+        // vision (claude-api) escalates low-confidence/brand-fidelity items —
+        // wired only when ANTHROPIC_API_KEY exists (else escalation is skipped
+        // and the Kimi verdict stands, degraded but functional). compose/SSIM/
+        // attach seams use their real defaults.
+        visual: {
+          agentProvider: providerRegistry.resolve("kimi-cli", "kimi-k2.6"),
+          visionProvider: config.anthropicApiKey
+            ? providerRegistry.resolve("claude-api", "claude-sonnet-5")
+            : undefined,
+        },
       });
       console.log("[App] Registered card-to-pr script handlers");
+
+      registerPesquisaHandlers(scriptRegistry, {
+        registry: repoRegistry,
+        githubToken: config.githubToken,
+        worktreeBase: process.env.WORKTREE_BASE ?? "/tmp/or-worktrees",
+        taskSourceFor: (sourceId) => cardTaskSources?.get(sourceId),
+        claudeApiKey: config.anthropicApiKey ?? "",
+      });
+      console.log("[App] Registered card-pesquisa script handlers");
 
       // The night-run coordinator dispatches card-execution jobs by calling
       // runStateMachine directly (queueHandler §6) rather than engine.execute():
