@@ -138,6 +138,29 @@ describe("makePostgresRepository", () => {
     expect(lastQuery).toContain("WHERE id = $1");
   });
 
+  it("H7: maps night_id -> nightId on read (set once by the night-coordinator's raw INSERT), but save() never writes it back", async () => {
+    mockRows = [
+      {
+        id: "exec-1",
+        routine_id: "routine-a",
+        trigger_type: "card-execution",
+        skill_name: "card-to-pr",
+        status: "running",
+        started_at: new Date("2024-01-01"),
+        night_id: "night-42",
+      },
+    ];
+
+    const repo = makePostgresRepository({
+      connectionString: "postgresql://test:test@localhost/test",
+    });
+    const result = await repo.findById("exec-1");
+    expect(result?.nightId).toBe("night-42");
+
+    await repo.save({ ...result!, status: "completed" });
+    expect(lastQuery).not.toContain("night_id"); // save()'s INSERT/UPDATE column lists omit it on purpose
+  });
+
   it("should return undefined for unknown id", async () => {
     mockRows = [];
     const repo = makePostgresRepository({
