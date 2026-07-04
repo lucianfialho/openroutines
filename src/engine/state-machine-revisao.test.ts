@@ -233,7 +233,7 @@ describe("revisao/refutacao flow (#153)", () => {
       "kimi-cli:kimi-k2.6": approvedCorrectness,
       "security-judge:claude-opus-4-8": JSON.stringify({
         approved: true, // not yet reproved — an "open" finding alone must never flip this before adjudication
-        findings: [{ description: "possible SSRF", status: "open", confidence: 9 }],
+        findings: [{ description: "possible SSRF", status: "open", confidence: 9, blocking: true }],
         criticalArea: false,
       }),
     });

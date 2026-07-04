@@ -208,7 +208,14 @@ const requestText = (request: CompletionRequest): string => {
   return [fromMessages, request.prompt ?? ""].filter((s) => s.length > 0).join("\n\n");
 };
 
-/** Contested security gaps from the <contestacao_refutacao> block; [] => normal mode. */
+/**
+ * Contested security gaps from the <contestacao_refutacao> block; [] => normal
+ * mode. Two accepted forms:
+ *  - per-item: {lens:"security", status:"contestado", evidencia, finding}
+ *  - batch (what the lens template renders): {refutacao:{status:"contestado",
+ *    evidencia}, gaps:[LensGap...]} — or flat top-level status/evidencia — the
+ *    single batch evidencia applies to every security gap of the contested round.
+ */
 const parseContestedGaps = (text: string): ContestedGap[] => {
   const body = lastBlock(CONTESTACAO_RE, text)?.trim();
   if (!body) return [];
@@ -218,18 +225,23 @@ const parseContestedGaps = (text: string): ContestedGap[] => {
   } catch {
     return [];
   }
+  const root = asRecord(parsed);
+  const batch = asRecord(root?.refutacao) ?? root;
+  const batchEvidencia = batch?.status === "contestado" ? (asString(batch.evidencia) ?? "") : undefined;
   const items: unknown[] = Array.isArray(parsed)
     ? parsed
-    : Array.isArray(asRecord(parsed)?.gaps)
-      ? (asRecord(parsed)!.gaps as unknown[])
-      : asRecord(parsed)
+    : Array.isArray(root?.gaps)
+      ? (root!.gaps as unknown[])
+      : root
         ? [parsed]
         : [];
   const contested: ContestedGap[] = [];
   for (const [i, item] of items.entries()) {
     const rec = asRecord(item);
     if (!rec) continue;
-    if (rec.lens !== "security" || rec.status !== "contestado") continue;
+    if (rec.lens !== "security") continue;
+    const evidencia = rec.status === "contestado" ? (asString(rec.evidencia) ?? "") : batchEvidencia;
+    if (evidencia === undefined) continue; // neither this item nor the batch contested it
     const src = asRecord(rec.finding) ?? rec;
     const line = typeof src.line === "number" ? Math.round(src.line) : undefined;
     contested.push({
@@ -243,7 +255,7 @@ const parseContestedGaps = (text: string): ContestedGap[] => {
         blocking: true, // it was contested precisely because it blocked
         status: "open",
       },
-      evidencia: asString(rec.evidencia) ?? "",
+      evidencia,
     });
   }
   return contested;
@@ -359,7 +371,9 @@ export const makeSecurityJudgeProvider = (config: SecurityJudgeConfig): Provider
 
   /**
    * One judge call with the anti-bypass check: the response's reported model
-   * must be EXACTLY the requested one — no fallback model ever judges security.
+   * must be the requested one — or a versioned alias of it (the API echoes
+   * e.g. "claude-opus-4-8-20260101" for "claude-opus-4-8"). A DIFFERENT model
+   * never judges security.
    */
   const completeChecked = (
     adapter: ProviderAdapter,
@@ -368,7 +382,7 @@ export const makeSecurityJudgeProvider = (config: SecurityJudgeConfig): Provider
   ): Effect.Effect<CompletionResponse, Error> =>
     adapter.complete(request).pipe(
       Effect.flatMap((resp) =>
-        resp.model === expectedModel
+        resp.model === expectedModel || resp.model.startsWith(`${expectedModel}-`)
           ? Effect.succeed(resp)
           : Effect.fail(
               new Error(
@@ -525,7 +539,9 @@ export const makeSecurityJudgeProvider = (config: SecurityJudgeConfig): Provider
           { concurrency: "unbounded" }
         );
 
-        const diverged = secondFindings !== undefined ? judgesDiverge(verified, secondFindings) : false;
+        // Divergence compares SYMMETRIC round-1 outputs (both post-FP-file):
+        // a finding legitimately demoted by round 2 must not read as divergence.
+        const diverged = secondFindings !== undefined ? judgesDiverge(primaryFindings, secondFindings) : false;
         verdict = {
           model,
           // Fresh findings stay status:"open" and do NOT flip approved — the

@@ -1,11 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { Effect } from "effect";
-import { mkdirSync, mkdtempSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import type { CompletionRequest, CompletionResponse } from "./types.js";
 import type { ProviderAdapter } from "./registry.js";
 import { makeProviderRegistry } from "./registry.js";
+import { renderTemplate } from "../engine/template.js";
 import {
   makeSecurityJudgeProvider,
   judgesDiverge,
@@ -263,6 +264,20 @@ describe("security-judge — critical area (second judge)", () => {
     expect(verdict.approved).toBe(false);
   });
 
+  it("a finding demoted by round 2 does NOT diverge — divergence compares symmetric round-1 outputs (M5)", async () => {
+    const calls: RecordedCall[] = [];
+    // Both judges find the same blocking finding in round 1; Opus's round 2 demotes it as FP.
+    const { run } = makeJudge(
+      (c) => (isRound2(c) ? falsePositive : round1([finding({ confidence: 9 })])),
+      calls
+    );
+    const verdict = await run(CRITICAL_PROMPT);
+
+    expect(verdict.findings[0].blocking).toBe(false); // demoted in round 2
+    expect(verdict.secondJudge!.diverged).toBe(false); // round-1 vs round-1: same blocking set
+    expect(verdict.approved).toBe(true);
+  });
+
   it("non-critical diff never spawns the second judge", async () => {
     const calls: RecordedCall[] = [];
     const { run } = makeJudge(() => round1([]), calls);
@@ -396,9 +411,126 @@ describe("security-judge — adjudication mode", () => {
   });
 });
 
+// --- real lens template (H1/H2 — the parsers must consume the real render) ---------
+
+const LENS_TEMPLATE = readFileSync(".gates/skills/card-to-pr/prompts/revisao-seguranca.md", "utf-8");
+
+/** Realistic verify output (src/pipeline/card-to-pr/verify.ts shape). */
+const realVerify = (changedFiles: string[]): Record<string, unknown> => ({
+  passed: true,
+  changedFiles,
+  dataChanges: false,
+  secretsFound: [],
+  semgrepFindings: [],
+  dependencyAudit: { vulnerable: [] },
+  retryable: false,
+});
+
+const renderLensPrompt = (outputs: Record<string, unknown>): string =>
+  renderTemplate(LENS_TEMPLATE, {
+    inputs: { title: "Adicionar filtro de busca", description: "Filtro por status na listagem" },
+    outputs: {
+      plano: { summary: "Adicionar filtro", files: ["src/list.ts"] },
+      implementacao: { openDecisions: [] },
+      ...outputs,
+    },
+  });
+
+describe("security-judge — real revisao-seguranca.md render", () => {
+  it("parses changedFiles from the real render: src/auth/* marks the area critical and spawns the second judge (H1)", async () => {
+    const calls: RecordedCall[] = [];
+    const { run } = makeJudge(() => round1([]), calls);
+    const verdict = await run(renderLensPrompt({ verify: realVerify(["src/auth/login.ts"]) }));
+
+    expect(verdict.criticalArea).toBe(true);
+    expect(verdict.secondJudge).toBeDefined();
+    expect(calls.filter((c) => c.model === DEFAULT_SECOND_JUDGE_MODEL)).toHaveLength(1);
+  });
+
+  it("non-critical changedFiles in the real render stay non-critical (files really parsed, not defaulted)", async () => {
+    const calls: RecordedCall[] = [];
+    const { run } = makeJudge(() => round1([]), calls);
+    const verdict = await run(renderLensPrompt({ verify: realVerify(["src/report/render.ts"]) }));
+
+    expect(verdict.criticalArea).toBe(false);
+    expect(verdict.secondJudge).toBeUndefined();
+    // Round 1 (unreplaced refutacao/revisao placeholders) is normal mode.
+    expect(calls.filter(isRound1)).toHaveLength(1);
+    expect(calls.filter(isAdjudication)).toHaveLength(0);
+  });
+
+  it("batch-contested render ({{outputs.refutacao}} + {{outputs.revisao.gaps}}) enters adjudication with the adjudication system prompt (H2)", async () => {
+    const calls: RecordedCall[] = [];
+    const { run } = makeJudge(
+      () => JSON.stringify({ decision: "adjudicado-libera", reasoning: "evidência procede" }),
+      calls
+    );
+    const verdict = await run(
+      renderLensPrompt({
+        verify: realVerify(["src/db/query.ts"]),
+        refutacao: {
+          status: "contestado",
+          evidencia: "EVIDENCIA_MARKER: input sanitizado em src/db/sanitize.ts linha 4",
+          correcoes: [],
+        },
+        revisao: {
+          approved: true,
+          gaps: [
+            { lens: "security", description: "SQL injection via card title", file: "src/db/query.ts", line: 12, contestable: true },
+            { lens: "correctness", description: "missing AC", contestable: true },
+          ],
+          securityVerdict: null,
+        },
+      })
+    );
+
+    // Only the SECURITY gap is adjudicated — one fresh call, adjudication system prompt.
+    expect(calls).toHaveLength(1);
+    expect(isAdjudication(calls[0])).toBe(true);
+    expect(calls[0].request.system).toContain("tribunal de segurança");
+    expect(calls[0].text).toContain("EVIDENCIA_MARKER");
+    expect(calls[0].text).toContain("SQL injection via card title");
+    expect(verdict.findings).toHaveLength(1);
+    expect(verdict.findings[0].status).toBe("adjudicado-libera");
+    expect(verdict.findings[0].file).toBe("src/db/query.ts");
+    expect(verdict.approved).toBe(true);
+  });
+
+  it("batch status 'corrigir' does NOT enter adjudication — the re-review runs in normal mode", async () => {
+    const calls: RecordedCall[] = [];
+    const { run } = makeJudge(() => round1([]), calls);
+    await run(
+      renderLensPrompt({
+        verify: realVerify(["src/db/query.ts"]),
+        refutacao: { status: "corrigir", correcoes: ["escapar input"] },
+        revisao: {
+          approved: true,
+          gaps: [{ lens: "security", description: "SQL injection via card title", contestable: true }],
+          securityVerdict: null,
+        },
+      })
+    );
+    expect(calls.filter(isAdjudication)).toHaveLength(0);
+    expect(calls.filter(isRound1)).toHaveLength(1);
+  });
+});
+
 // --- anti-bypass -------------------------------------------------------------------
 
 describe("security-judge — model anti-bypass", () => {
+  it("accepts a versioned alias echo of the requested model (M1: 'claude-opus-4-8-20260101')", async () => {
+    const calls: RecordedCall[] = [];
+    const { run } = makeJudge(
+      (c) => ({
+        content: isRound1(c) ? round1([finding({ confidence: 9 })]) : genuine,
+        model: `${c.model}-20260101`,
+      }),
+      calls
+    );
+    const verdict = await run(BASE_PROMPT);
+    expect(verdict.findings[0].blocking).toBe(true); // round 1 AND round 2 both accepted
+  });
+
   it("rejects a round-1 response answered by a different (weaker) model", async () => {
     const calls: RecordedCall[] = [];
     const { judge } = makeJudge(() => ({ content: round1([]), model: "claude-haiku-4" }), calls);

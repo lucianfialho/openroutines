@@ -115,6 +115,20 @@ describe("architecture-judge — escalate:true (handoff to Fable)", () => {
 });
 
 describe("architecture-judge — model anti-bypass", () => {
+  it("accepts a versioned alias echo of the requested model on both hops (M1)", async () => {
+    const calls: RecordedCall[] = [];
+    const { run } = makeJudge(
+      (c) =>
+        c.model === DEFAULT_JUDGE_MODEL
+          ? { content: verdict({ escalate: true }), model: "claude-opus-4-8-20260101" }
+          : { content: verdict({ verdict: "aprovado" }), model: "claude-fable-5-20260301" },
+      calls
+    );
+    const out = await run(PLAN_PROMPT);
+    expect(calls).toHaveLength(2);
+    expect(out.verdict).toBe("aprovado");
+  });
+
   it("rejects an Opus response answered by a different (weaker) model", async () => {
     const calls: RecordedCall[] = [];
     const { judge } = makeJudge(() => ({ content: verdict(), model: "claude-haiku-4" }), calls);

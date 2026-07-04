@@ -10,7 +10,8 @@
  *
  * Rules:
  *  - `gaps` = union of every CONTESTABLE gap from every lens present, including
- *    security findings still `status:"open"` — they take the same
+ *    security findings still `status:"open"` AND `blocking:true` (a
+ *    low-confidence note never forces refutacao) — they take the same
  *    refutacao/adjudication path as any other gap, never a shortcut straight
  *    to bloqueado.
  *  - `securityVerdict.approved` is trusted as-is: the security-judge provider
@@ -78,7 +79,9 @@ export const aggregateRevisao = (lentes: Array<Record<string, unknown>>): Revisa
       securityVerdict = output as unknown as RevisaoOutput["securityVerdict"];
       const findings = Array.isArray(output.findings) ? (output.findings as Array<Record<string, unknown>>) : [];
       for (const finding of findings) {
-        if (finding.status !== "open") continue;
+        // Only an open AND blocking finding is contestable — a low-confidence
+        // note (blocking:false) never forces a refutacao round.
+        if (finding.status !== "open" || finding.blocking !== true) continue;
         gaps.push({
           lens: "security",
           description: String(finding.description ?? "achado de segurança sem descrição"),

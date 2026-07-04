@@ -21,9 +21,9 @@ Descrição: {{inputs.description}}
 </decisoes_em_aberto>
 
 ## Resultado pré-triado do Verify — SAST determinístico (dado delimitado)
-<verify_output>
+<verify>
 {{outputs.verify}}
-</verify_output>
+</verify>
 `secretsFound`/`semgrepFindings`/`dependencyAudit` já rodaram antes de você —
 use como ponto de partida, não repita a varredura determinística; procure o
 que ela não pega (lógica de negócio, authz, exposição de dado, fluxo de abuso).
@@ -56,15 +56,17 @@ reprova (`approved: false`); abaixo disso é uma nota não-bloqueante
 (`status: "nota"`) — vira comentário no PR, não bloqueia.
 
 ## Modo adjudicação (2ª rodada, se aplicável)
-Se o bloco abaixo tiver conteúdo real (não o placeholder entre parênteses),
-você já reportou algum destes achados antes e o implementador contestou —
-reavalie com a evidência dele antes de decidir o status final (`open`
-continua contestável; um status terminal como `corrigido` ou `confirmado`
-fecha o ciclo). Se a evidência convencer, não repita o achado.
+Se o bloco abaixo tiver conteúdo real (não os placeholders literais), você já
+reportou algum destes achados antes e o implementador contestou — reavalie com
+a evidência dele antes de decidir o status final (`open` continua contestável;
+um status terminal como `corrigido` ou `confirmado` fecha o ciclo). Se a
+evidência convencer, não repita o achado. O bloco carrega a resposta do
+implementador (`refutacao`) e os gaps da rodada contestada (`gaps`).
 <contestacao_refutacao baixa_confianca="true">
-{{outputs.refutacao}}
+{"refutacao": {{outputs.refutacao}},
+ "gaps": {{outputs.revisao.gaps}}}
 </contestacao_refutacao>
-(placeholder acima sem substituição = ainda não passou por refutação nesta execução; avalie normalmente)
+(placeholders acima sem substituição = ainda não passou por refutação nesta execução; avalie normalmente)
 
 ## Saída
 Emita APENAS um JSON válido, sem texto fora dele:

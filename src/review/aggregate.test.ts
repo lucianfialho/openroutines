@@ -34,20 +34,36 @@ describe("aggregateRevisao", () => {
     expect(out.gaps).toEqual([]);
   });
 
-  it("an 'open' security finding becomes a contestable gap WITHOUT flipping approved (that's the terminal verdict's job)", () => {
+  it("an 'open' BLOCKING security finding becomes a contestable gap WITHOUT flipping approved (that's the terminal verdict's job)", () => {
     const out = aggregateRevisao([
       approvedCorrectness,
       {
         name: "security",
         output: {
           approved: true, // not yet adjudicated — an "open" finding alone must never flip this
-          findings: [{ description: "possible SSRF", status: "open", confidence: 9 }],
+          findings: [{ description: "possible SSRF", status: "open", confidence: 9, blocking: true }],
           criticalArea: false,
         },
       },
     ]);
     expect(out.approved).toBe(true);
     expect(out.gaps).toEqual([{ lens: "security", description: "possible SSRF", contestable: true }]);
+  });
+
+  it("an 'open' NON-blocking security finding (low-confidence note) never becomes a gap — no refutacao round for notes (H2)", () => {
+    const out = aggregateRevisao([
+      approvedCorrectness,
+      {
+        name: "security",
+        output: {
+          approved: true,
+          findings: [{ description: "speculative input concern", status: "open", confidence: 1, blocking: false }],
+          criticalArea: false,
+        },
+      },
+    ]);
+    expect(out.approved).toBe(true);
+    expect(out.gaps).toEqual([]);
   });
 
   it("a terminal (non-open) reproved security verdict flips approved without adding a gap for it", () => {

@@ -62,8 +62,9 @@ export const makeArchitectureJudgeProvider = (config: ArchitectureJudgeConfig): 
 
   /**
    * One judge call with the anti-bypass check: the response's reported model
-   * must be EXACTLY the requested one — no fallback model ever judges
-   * architecture.
+   * must be the requested one — or a versioned alias of it (the API echoes
+   * e.g. "claude-opus-4-8-20260101" for "claude-opus-4-8"). A DIFFERENT model
+   * never judges architecture.
    */
   const completeChecked = (
     adapter: ProviderAdapter,
@@ -72,7 +73,7 @@ export const makeArchitectureJudgeProvider = (config: ArchitectureJudgeConfig): 
   ): Effect.Effect<CompletionResponse, Error> =>
     adapter.complete(request).pipe(
       Effect.flatMap((resp) =>
-        resp.model === expectedModel
+        resp.model === expectedModel || resp.model.startsWith(`${expectedModel}-`)
           ? Effect.succeed(resp)
           : Effect.fail(
               new Error(
