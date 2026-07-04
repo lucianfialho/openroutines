@@ -326,4 +326,60 @@ describe("makePostgresRepository", () => {
     expect(lastParams).toContain(null);
     expect(lastParams[0]).toBe("exec-legacy");
   });
+
+  it("F5 #167: saves realized_complexity/alta_impl_escalated and round-trips them on read", async () => {
+    const repo = makePostgresRepository({
+      connectionString: "postgresql://test:test@localhost/test",
+    });
+    const record: ExecutionRecord = {
+      id: "exec-1",
+      routineId: "routine-a",
+      triggerType: "task_source",
+      skillName: "solve-issue",
+      status: "completed",
+      realizedComplexity: "alta",
+      altaImplEscalated: true,
+      startedAt: new Date("2024-01-01T00:00:00Z"),
+    };
+
+    await repo.save(record);
+
+    expect(lastQuery).toContain("realized_complexity");
+    expect(lastQuery).toContain("alta_impl_escalated");
+    expect(lastParams).toContain("alta");
+    expect(lastParams).toContain(true);
+
+    mockRows = [
+      {
+        id: "exec-1",
+        routine_id: "routine-a",
+        trigger_type: "task_source",
+        skill_name: "solve-issue",
+        status: "completed",
+        started_at: new Date("2024-01-01"),
+        realized_complexity: "alta",
+        alta_impl_escalated: true,
+      },
+    ];
+    const found = await repo.findById("exec-1");
+    expect(found?.realizedComplexity).toBe("alta");
+    expect(found?.altaImplEscalated).toBe(true);
+  });
+
+  it("F5 #167: a save() with neither field (succeed()/fail()'s shape) COALESCEs, never nulling out a previously-persisted value", async () => {
+    const repo = makePostgresRepository({
+      connectionString: "postgresql://test:test@localhost/test",
+    });
+    await repo.save({
+      id: "exec-1",
+      routineId: "routine-a",
+      triggerType: "task_source",
+      skillName: "solve-issue",
+      status: "completed",
+      startedAt: new Date("2024-01-01T00:00:00Z"),
+    });
+
+    expect(lastQuery).toContain("realized_complexity = COALESCE(EXCLUDED.realized_complexity, executions.realized_complexity)");
+    expect(lastQuery).toContain("alta_impl_escalated = COALESCE(EXCLUDED.alta_impl_escalated, executions.alta_impl_escalated)");
+  });
 });

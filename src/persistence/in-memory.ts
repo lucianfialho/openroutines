@@ -15,8 +15,15 @@ export const makeInMemoryRepository = (): ExecutionRepository => {
       // `metadata` at all — mirror postgres.ts's `COALESCE(EXCLUDED.metadata,
       // executions.metadata)` so an absent metadata never nulls out what an
       // earlier persistStateContext() call already stored for this id.
+      // realizedComplexity/altaImplEscalated (F5 #167) hit the same hazard —
+      // succeed()/fail() don't carry them either — so preserve them the same way.
       const existing = store.get(record.id);
-      store.set(record.id, { ...record, metadata: record.metadata ?? existing?.metadata });
+      store.set(record.id, {
+        ...record,
+        metadata: record.metadata ?? existing?.metadata,
+        realizedComplexity: record.realizedComplexity ?? existing?.realizedComplexity,
+        altaImplEscalated: record.altaImplEscalated ?? existing?.altaImplEscalated,
+      });
     },
     findById: async (id) => store.get(id),
     findByRoutine: async (routineId) =>
