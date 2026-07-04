@@ -15,6 +15,9 @@ version: 1
 night:
   max_prs_per_night: 5
   circuit_breaker_failure_rate: 0.6
+  # Declared + bounds-checked, but NOT enforced yet: there is no per-night
+  # call-count gate today (spend is capped by budget_usd). Enforcement lands
+  # with the F6 budget wiring; until then these two are inert on purpose.
   max_opus_calls_per_night: 12
   max_fable_calls_per_night: 3
   # Effort-unit ceiling for the whole night (historical "_usd" name — under

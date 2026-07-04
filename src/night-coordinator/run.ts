@@ -61,6 +61,8 @@ export interface RunNightCycleDeps {
   nightPrCap: number;
   /** Per-repo open-PR cap (F5 #168, policy.yaml backpressure.max_open_prs_per_repo). */
   perRepoOpenPrCap?: number;
+  /** Tier circuit-breaker failure rate (F5 #168, policy.yaml night.circuit_breaker_failure_rate). */
+  circuitBreakerFailureRate?: number;
   nightParallelism: number;
   tz: string;
   /**
@@ -515,7 +517,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
         // its attempts.
         const originalTier = tierForComplexity(card.complexity);
         let tier = originalTier;
-        if (await isTierOpen(deps.pool, nightId, originalTier)) {
+        if (await isTierOpen(deps.pool, nightId, originalTier, deps.circuitBreakerFailureRate)) {
           const escalated = nextTier(originalTier);
           if (!escalated) {
             // Same "don't re-claim this cycle" fence as the PR-cap/backpressure

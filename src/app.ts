@@ -63,6 +63,7 @@ import { makeInMemoryTaskRepository } from "./persistence/task-in-memory.js";
 import { makeInMemoryRepoLearningRepository } from "./persistence/repo-learnings-in-memory.js";
 import { makePostgresRepoLearningRepository } from "./persistence/repo-learnings-postgres.js";
 import { makeSimilarCards } from "./orchestrator/tactical-memory.js";
+import { makePostgresPrFeedbackRepository } from "./persistence/pr-feedback-postgres.js";
 import { loadTaskSources, type ResolvedTaskSource } from "./task-source/loader.js";
 import { makeTrelloTaskSource, makeTrelloCreateCard, makeTrelloLinkCards, makeTrelloReadComments, makeTrelloReadLinkedCards } from "./connector/trello.js";
 import { runSteeringPoll, type SteeringPollDeps } from "./orchestrator/steering.js";
@@ -866,6 +867,18 @@ export const createApp = async (config: AppConfig) => {
       return;
     }
 
+    // Daytime triage tick (F5 #170): the routine's schedule is live, but its
+    // `card-triage` skill is an F2 deliverable that does not exist yet, and no
+    // runtime dispatcher routes a research card into card-pesquisa. Intercept
+    // it here (same pattern as night-run) so the cron is a harmless no-op
+    // instead of failing to load a missing skill every 30 minutes. Swap this
+    // for the real classify -> checkProfileAndBlock (#163) / dispatchResearch-
+    // IfEligible (#170) call once the triage classifier lands.
+    if (job.routineId === "card-triage" && job.trigger.type === "schedule") {
+      console.log("[Queue] card-triage tick: dispatch deferred (F2 triage skill not yet implemented)");
+      return;
+    }
+
     // Night hard-stop cron tick (F3 #147): kill anything still running past the
     // window and close the night. runNightCycle can't do this itself (it drains
     // and returns at 01:00), so it lives in its own scheduled tick.
@@ -981,6 +994,7 @@ export const createApp = async (config: AppConfig) => {
       nightBudgetUsd,
       nightPrCap,
       perRepoOpenPrCap,
+      circuitBreakerFailureRate: policy.night.circuit_breaker_failure_rate,
       nightParallelism,
       tz: nightTz,
       // Ingest these sources' queued cards into `tasks` at cycle start (F2's
@@ -995,6 +1009,10 @@ export const createApp = async (config: AppConfig) => {
       registry: repoRegistry,
       githubToken: config.githubToken,
       taskSourceFor: (id) => cardTaskSources?.get(id),
+      // F5 #165: mine review comments into pr_feedback on merge so the weekly
+      // calibration loop has data. computeHumanDelta (the agent-commit..merge
+      // diff) is a deferred F6 seam — comment mining runs without it.
+      prFeedback: makePostgresPrFeedbackRepository(pgPool),
     };
     console.log("[App] Night coordinator wired (POST /trigger/night-run, cron 0 1 * * *)");
     console.log("[App] PR-review poller wired (cron */30 8-22 * * *)");
