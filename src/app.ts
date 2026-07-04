@@ -194,6 +194,10 @@ export const runCardExecutionJob = async (
     rework?: boolean;
   } | null;
 
+  // The execution is loaded once, up front, and reused below both for the H7
+  // guard's fallback and the "mark running" step — one lookup, not two.
+  const executionRecord = await deps.persistence.findById(executionId);
+
   // H7: a job can survive in Redis past its night's window — the 06:30
   // hard-stop only kills executions already `running` (enforceHardStop's
   // `WHERE status='running'`); anything still queued in BullMQ (backlog past
@@ -202,7 +206,12 @@ export const runCardExecutionJob = async (
   // kill frees a worker slot. Manual executions (no night_id) are untouched.
   // Same blockReason vocabulary as enforceHardStop (hard-stop.ts) so the
   // morning report reads a dropped night job identically either way.
-  const nightId = payload?.night_id;
+  // payload.night_id is ALWAYS absent on a resumed job (boot reconciliation,
+  // the human gate, /executions/:id/resume all re-enqueue with `payload: {}`)
+  // — executionRecord.nightId (persisted once at night-coordinator INSERT
+  // time, never overwritten) is the fallback that actually covers those
+  // paths; the payload wins when both are present (it's a fresh dispatch).
+  const nightId = payload?.night_id ?? executionRecord?.nightId;
   if (nightId) {
     const now = deps.now ?? (() => new Date());
     let stale = !isWithinWindow(now(), deps.nightWindowStart, deps.nightWindowEnd, deps.nightTz);
@@ -211,14 +220,13 @@ export const runCardExecutionJob = async (
       stale = rows[0]?.finished_at != null;
     }
     if (stale) {
-      const existing = await deps.persistence.findById(executionId);
-      if (existing) {
+      if (executionRecord) {
         await deps.persistence.save({
-          ...existing,
+          ...executionRecord,
           status: "failed",
           finishedAt: new Date(),
-          error: existing.error ?? "night window closed before this job could run",
-          metadata: { ...(existing.metadata ?? {}), blockReason: "timeout" },
+          error: executionRecord.error ?? "night window closed before this job could run",
+          metadata: { ...(executionRecord.metadata ?? {}), blockReason: "timeout" },
         });
       }
       if (deps.pgPool && payload?.source_id && payload?.task_id) {
@@ -247,10 +255,9 @@ export const runCardExecutionJob = async (
   // (only fail/succeed/pause) — mark it here (fresh start or resume alike)
   // so enforceHardStop's `WHERE status='running'` query (and boot
   // reconciliation) can actually find this execution while in flight.
-  // save() never touches night_id/repo (not on ExecutionRecord), so they
-  // survive untouched.
-  const pending = await deps.persistence.findById(executionId);
-  if (pending) await deps.persistence.save({ ...pending, status: "running" });
+  // save() never writes night_id/repo back (postgres.ts's INSERT/UPDATE
+  // column lists omit them on purpose), so they survive untouched here.
+  if (executionRecord) await deps.persistence.save({ ...executionRecord, status: "running" });
   const event: TriggerEvent = { type: "card-execution", payload: job.trigger.payload, executionId };
   const syntheticRoutine: Routine = { id: "night-run", triggers: [{ type: "schedule", cron: "0 1 * * *" }], pipeline: { skill: "card-to-pr" } };
   const run = deps.runStateMachine ?? runStateMachine;

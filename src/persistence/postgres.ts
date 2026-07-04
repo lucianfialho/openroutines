@@ -151,6 +151,9 @@ const rowToRecord = (row: Record<string, unknown>): ExecutionRecord => ({
   providerBreakdown: (row.provider_breakdown as Record<string, number>) ?? undefined,
   sourceId: (row.source_id as string) ?? undefined,
   taskId: (row.task_id as string) ?? undefined,
+  // Set once by the night-coordinator's raw INSERT (run.ts), never by save()
+  // (its INSERT/UPDATE column lists omit night_id on purpose) — read-only here.
+  nightId: (row.night_id as string) ?? undefined,
   startedAt: row.started_at as Date,
   finishedAt: (row.finished_at as Date) ?? undefined,
 });

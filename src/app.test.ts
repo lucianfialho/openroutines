@@ -251,7 +251,8 @@ describe("runCardExecutionJob", () => {
   const seedExecution = async (
     persistence: CardExecutionJobDeps["persistence"],
     id: string,
-    metadata?: Record<string, unknown>
+    metadata?: Record<string, unknown>,
+    nightId?: string
   ) => {
     await persistence.save({
       id,
@@ -261,6 +262,7 @@ describe("runCardExecutionJob", () => {
       status: "pending",
       startedAt: new Date(),
       ...(metadata ? { metadata } : {}),
+      ...(nightId ? { nightId } : {}),
     });
   };
 
@@ -318,6 +320,34 @@ describe("runCardExecutionJob", () => {
     it("a manual execution (no night_id) is never blocked by the window guard, even outside it", async () => {
       const { deps, fakeRun } = makeDeps({ now: () => new Date("2026-01-01T07:00:00Z") }); // past window
       await seedExecution(deps.persistence, "exec-1");
+      const job = { trigger: { type: "card-execution", executionId: "exec-1", payload: {} } };
+
+      await runCardExecutionJob(deps, job, undefined);
+
+      expect(fakeRun).toHaveBeenCalledTimes(1);
+    });
+
+    // H7 bypass fix: boot-reconciliation (and the human-gate/`/resume` paths)
+    // ALWAYS re-enqueue an orphaned execution with `payload: {}` — night_id
+    // only lives on the persisted execution record. Before the fix, `nightId`
+    // read `payload?.night_id` alone, so this exact payload made the guard
+    // above see "no night_id" and skip straight to running the full pipeline.
+    it("orphaned resume (payload {}, night_id only on the persisted record) delivered OUTSIDE the window: still dropped via the registry fallback", async () => {
+      const { deps, fakeRun } = makeDeps({ now: () => new Date("2026-01-01T07:00:00Z") }); // past 06:30
+      await seedExecution(deps.persistence, "exec-1", undefined, "night-1");
+      const job = { trigger: { type: "card-execution", executionId: "exec-1", payload: {} } };
+
+      await runCardExecutionJob(deps, job, undefined);
+
+      const saved = await deps.persistence.findById("exec-1");
+      expect(saved?.status).toBe("failed");
+      expect(saved?.metadata?.blockReason).toBe("timeout");
+      expect(fakeRun).not.toHaveBeenCalled();
+    });
+
+    it("same orphaned resume (payload {}) delivered WITHIN the window, night still open: runs normally — the fallback never blocks a legitimate resume", async () => {
+      const { deps, fakeRun } = makeDeps();
+      await seedExecution(deps.persistence, "exec-1", undefined, "night-1");
       const job = { trigger: { type: "card-execution", executionId: "exec-1", payload: {} } };
 
       await runCardExecutionJob(deps, job, undefined);

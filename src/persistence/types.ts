@@ -25,6 +25,13 @@ export interface ExecutionRecord {
   /** Originating task, composite key (never a bare card id) — undefined for schedule/github triggers (F2 #144). */
   sourceId?: string;
   taskId?: string;
+  /**
+   * Night this execution was dispatched under (F3 #147's night-coordinator
+   * INSERTs it directly; read-only here — `save()` never writes it back, see
+   * postgres.ts). H7's window guard falls back to this when a resumed job's
+   * payload lost `night_id` (every resume path re-enqueues with `payload: {}`).
+   */
+  nightId?: string;
   startedAt: Date;
   finishedAt?: Date;
 }
