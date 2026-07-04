@@ -299,6 +299,11 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
       // feedback. Verified against the real REST endpoint (single JSON array
       // response) that --paginate concatenates every page into one array, so
       // the JSON.parse below is unaffected.
+      // ACCEPTED FOLLOW-UP (M9, second half): comments from already-resolved
+      // review threads are still returned and re-enter the rework fix-list,
+      // so an agent can burn a rework round re-addressing settled feedback.
+      // The REST endpoint has no isResolved; filtering needs the GraphQL
+      // reviewThreads API (or a created_at > last agent push cutoff).
       const output = yield* execGh(["api", `repos/{owner}/{repo}/pulls/${number}/comments`, "--paginate"]);
       const parsed = JSON.parse(output) as Array<{
         path?: string;

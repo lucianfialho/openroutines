@@ -8,6 +8,14 @@
  * again. Bookkeeping lives in tier_circuit_state (migration 016); this module
  * is a thin, pure-SQL wrapper over it, mirroring night-coordinator/budget.ts's
  * shape (pool-first functions, no class/singleton state).
+ *
+ * TIMING LIMITATION (accepted, F4 review follow-up): isTierOpen is only
+ * consulted during the 01:00 drain — a single synchronous pass that finishes
+ * in seconds — while recordTierOutcome lands only after each card's whole
+ * pipeline ends, minutes/hours later. tier_circuit_state therefore starts
+ * empty for the current night_id and the breaker effectively protects the
+ * FOLLOWING nights, never the one in flight. Re-evaluating isTierOpen in
+ * successive drain batches within the window is the known upgrade path.
  */
 import type { Pool } from "pg";
 import type { TaskComplexity } from "../task-source/types.js";

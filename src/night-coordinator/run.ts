@@ -411,13 +411,13 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
 
         // F4 #159 circuit breaker: a tier with >60% failure this night (over
         // a minimum sample) stops receiving new cards. If a next tier exists,
-        // this card proceeds — attributed to the ESCALATED tier for
-        // recordTierOutcome bookkeeping (card-to-pr's states don't yet route
-        // per-card dynamically at the ceiling, #185; this is the honest
-        // partial today: the failing tier stops being CHARGED for it). With
-        // no next tier (already at opus), there is nowhere safe to escalate —
-        // defer the card to a future night instead of retrying a tier that is
-        // already failing >60% of its attempts.
+        // this card proceeds attributed to the ESCALATED tier — both for
+        // recordTierOutcome bookkeeping AND for the actual route: app.ts's
+        // resolveCardToPrDynamicProvider honors payload.tier when it outranks
+        // the complexity-derived tier. With no next tier (already at opus),
+        // there is nowhere safe to escalate — defer the card to a future
+        // night instead of retrying a tier that is already failing >60% of
+        // its attempts.
         const originalTier = tierForComplexity(card.complexity);
         let tier = originalTier;
         if (await isTierOpen(deps.pool, nightId, originalTier)) {
