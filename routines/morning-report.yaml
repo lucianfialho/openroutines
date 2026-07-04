@@ -1,0 +1,10 @@
+# Morning report (F4 #159): 07:30 digest, 1 card único por dia. Unlike
+# night-run/night-hard-stop, this dispatches through the normal engine
+# (routineId-forced resolution, src/routine/matcher.ts) — every state is
+# type:script, so no queueHandler interception is needed.
+id: morning-report
+triggers:
+  - type: schedule
+    cron: "30 7 * * *"
+pipeline:
+  skill: morning-report

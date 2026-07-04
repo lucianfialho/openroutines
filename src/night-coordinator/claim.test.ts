@@ -133,4 +133,19 @@ describe.skipIf(!hasTestDb())("claimReadyCards (real DB, atomic)", () => {
     });
     expect(claimed[0].taskId).toBe("ord-high");
   });
+
+  it("carries the raw complexity through for tier routing (F4 #159), undefined when unset/invalid", async () => {
+    const src = `s-${crypto.randomUUID()}`;
+    sources.push(src);
+    await insertQueuedTask(pool, src, "cx-lowest", { complexity: "lowest" });
+    await insertQueuedTask(pool, src, "cx-none");
+    await insertQueuedTask(pool, src, "cx-bogus", { complexity: "not-a-real-value" });
+    const nightId = await newNight();
+
+    const claimed = await claimReadyCards(pool, nightId, 3, { resolveRepo: (t) => t.taskId });
+    const byId = Object.fromEntries(claimed.map((c) => [c.taskId, c.complexity]));
+    expect(byId["cx-lowest"]).toBe("lowest");
+    expect(byId["cx-none"]).toBeUndefined();
+    expect(byId["cx-bogus"]).toBeUndefined();
+  });
 });

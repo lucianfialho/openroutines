@@ -26,6 +26,8 @@ import { makeGitHubConnector } from "../connector/github.js";
 import { defaultRunGit } from "../pipeline/card-to-pr/index.js";
 import { cleanupZombieProcesses } from "../provider/process-cleanup.js";
 import { sendTelegramAlert } from "../notify/telegram.js";
+import { isTierOpen, tierForComplexity } from "../engine/circuit-breaker.js";
+import { nextTier } from "../engine/retry-classifier.js";
 import type { RepoRegistry } from "../repo-registry/schema.js";
 import type { ExecutionRepository, ExecutionProcessRepository, PrLinkRepository, TaskRepository } from "../persistence/types.js";
 import type { TaskSource } from "../task-source/types.js";
@@ -72,8 +74,12 @@ export interface RunNightCycleDeps {
   sendAlert?: typeof sendTelegramAlert;
 }
 
-/** "YYYY-MM-DD" of `now`'s wall-clock date in `tz` — the night_runs.date lock key. */
-const dateInTz = (now: Date, tz: string): string =>
+/**
+ * "YYYY-MM-DD" of `now`'s wall-clock date in `tz` — the night_runs.date lock
+ * key. Exported so the morning-report pipeline (F4 #159, 07:30 same calendar
+ * day) can resolve the SAME night_runs row without re-deriving this logic.
+ */
+export const dateInTz = (now: Date, tz: string): string =>
   new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
 
 const matchRegistryKey = (registry: RepoRegistry, candidate: string): string | undefined => {
@@ -279,6 +285,40 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
           continue;
         }
 
+        // F4 #159 circuit breaker: a tier with >60% failure this night (over
+        // a minimum sample) stops receiving new cards. If a next tier exists,
+        // this card proceeds — attributed to the ESCALATED tier for
+        // recordTierOutcome bookkeeping (card-to-pr's states don't yet route
+        // per-card dynamically at the ceiling, #185; this is the honest
+        // partial today: the failing tier stops being CHARGED for it). With
+        // no next tier (already at opus), there is nowhere safe to escalate —
+        // defer the card to a future night instead of retrying a tier that is
+        // already failing >60% of its attempts.
+        const originalTier = tierForComplexity(card.complexity);
+        let tier = originalTier;
+        if (await isTierOpen(deps.pool, nightId, originalTier)) {
+          const escalated = nextTier(originalTier);
+          if (!escalated) {
+            // Same "don't re-claim this cycle" fence as the PR-cap/backpressure
+            // denial above — without it, unclaiming here would let the very
+            // next claimReadyCards() call re-pick this same card into a
+            // defer-loop for the rest of the cycle.
+            blockedRepos.add(card.repo);
+            await deps.pool.query(
+              `UPDATE tasks SET claimed_by_night_id = NULL WHERE source_id = $1 AND task_id = $2 AND claimed_by_night_id = $3`,
+              [card.sourceId, card.taskId, nightId]
+            );
+            console.log(
+              `[NightCoordinator] card ${card.sourceId}/${card.taskId} deferred (tier '${originalTier}' circuit open, no next tier) — retry next night`
+            );
+            continue;
+          }
+          console.log(
+            `[NightCoordinator] card ${card.sourceId}/${card.taskId} escalated ${originalTier} -> ${escalated} (tier '${originalTier}' circuit open this night)`
+          );
+          tier = escalated;
+        }
+
         const { title, description } = await getTaskContent(deps.pool, card.sourceId, card.taskId);
         const executionId = generateId();
         await insertPendingExecution(deps.pool, {
@@ -302,6 +342,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
               night_id: nightId,
               executionId,
               skill: "card-to-pr",
+              tier,
             },
           },
         });

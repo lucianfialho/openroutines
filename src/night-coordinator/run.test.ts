@@ -36,6 +36,7 @@ interface MockTask {
   task_id: string;
   body: string;
   labels: string[];
+  complexity?: string;
 }
 
 const makeMockPool = (opts: {
@@ -45,6 +46,8 @@ const makeMockPool = (opts: {
   taskContent?: Record<string, { title: string; body: string }>;
   /** D22/F4 #186: simulate a mid-cycle crash — claimReadyCards' own SELECT throws. */
   claimThrows?: Error;
+  /** F4 #159: canned tier_circuit_state rows, keyed by tier. */
+  tierCircuitState?: Record<string, { cards_attempted: number; cards_failed: number }>;
 }) => {
   const queuedTasks = opts.queuedTasks ?? [];
   const claimedKeys = new Set<string>();
@@ -82,6 +85,11 @@ const makeMockPool = (opts: {
     if (text.startsWith("SELECT id FROM executions WHERE status")) {
       hardStopQueried = true;
       return { rows: [] };
+    }
+    if (text.startsWith("SELECT cards_attempted, cards_failed FROM tier_circuit_state")) {
+      const [, tier] = params as [string, string];
+      const row = opts.tierCircuitState?.[tier];
+      return { rows: row ? [row] : [] };
     }
     return { rows: [] };
   });
@@ -331,6 +339,74 @@ describe("runNightCycle", () => {
 
     expect(summary.cardsSynced).toBe(2);
     expect(saved.map((t) => t.id)).toEqual(["c1", "c2"]);
+  });
+});
+
+describe("runNightCycle — F4 #159 circuit breaker by tier", () => {
+  it("enqueues at the card's own tier when its circuit is closed", async () => {
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [{ source_id: "trello-main", task_id: "card1", body: cardBody("acme-widgets"), labels: [], complexity: "lowest" }],
+    });
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.cardsEnqueued).toBe(1);
+    expect(queue.jobs[0].trigger.payload).toMatchObject({ tier: "kimi" });
+  });
+
+  it("escalates to the next tier (and still enqueues) when the original tier's circuit is open", async () => {
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [{ source_id: "trello-main", task_id: "card1", body: cardBody("acme-widgets"), labels: [], complexity: "lowest" }],
+      tierCircuitState: { kimi: { cards_attempted: 3, cards_failed: 3 } }, // 100% > 60%, kimi open
+    });
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.cardsEnqueued).toBe(1);
+    expect(queue.jobs[0].trigger.payload).toMatchObject({ tier: "sonnet" });
+  });
+
+  it("defers the card (never enqueues, unclaims it) when its tier is open with no next tier (opus at the ceiling)", async () => {
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [{ source_id: "trello-main", task_id: "card1", body: cardBody("acme-widgets"), labels: [], complexity: "highest" }],
+      tierCircuitState: { opus: { cards_attempted: 3, cards_failed: 3 } },
+    });
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.cardsClaimed).toBe(1); // the atomic claim happened...
+    expect(summary.cardsEnqueued).toBe(0); // ...but the ceiling tier is failing hard, so it's deferred
+    expect(queue.jobs).toHaveLength(0);
+    // Same UPDATE-release call the PR-cap/backpressure denial test above
+    // issues — the mock's claimedKeys tracker doesn't model the release's
+    // real effect (see that test's identical assertion), it only proves the
+    // release UPDATE was attempted (query call count) rather than a re-claim.
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining("claimed_by_night_id = NULL"),
+      expect.arrayContaining(["trello-main", "card1"])
+    );
+  });
+
+  it("defaults an unclassified card to the sonnet tier (D9 fallback)", async () => {
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [{ source_id: "trello-main", task_id: "card1", body: cardBody("acme-widgets"), labels: [] }], // no complexity
+    });
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue });
+
+    await runNightCycle(deps);
+
+    expect(queue.jobs[0].trigger.payload).toMatchObject({ tier: "sonnet" });
   });
 });
 

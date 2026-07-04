@@ -62,8 +62,10 @@ import { loadTaskSources, type ResolvedTaskSource } from "./task-source/loader.j
 import { makeTrelloTaskSource } from "./connector/trello.js";
 import { makeRestTaskSource } from "./task-source/rest-executor.js";
 import type { TaskSource } from "./task-source/types.js";
-import { registerCardToPrHandlers } from "./pipeline/card-to-pr/index.js";
+import { registerCardToPrHandlers, cardToPrFanoutAggregators } from "./pipeline/card-to-pr/index.js";
+import { registerMorningReportHandlers, makeTrelloCreateCard, MORNING_REPORT_TRELLO_LIST } from "./pipeline/morning-report/index.js";
 import { runStateMachine, type StateMachineConfig, type StateMachineContext } from "./engine/state-machine.js";
+import { recordTierOutcome, type Tier } from "./engine/circuit-breaker.js";
 import type { SkillStateMachine } from "./skill/schema.js";
 import type { TriggerEvent } from "./routine/matcher.js";
 import { reserveBudget, BUDGET_UNIT_WEIGHTS, type BudgetTier } from "./night-coordinator/budget.js";
@@ -430,6 +432,15 @@ export const createApp = async (config: AppConfig) => {
             toolRegistry,
             budgetGate,
             // budgetSettle intentionally omitted — see the effort-unit note above.
+            // Named `type: fanout` aggregators (F4 #153) — card-to-pr's `revisao`
+            // state declares `aggregate: aggregateRevisao`; without this the
+            // runner fails that state (fanoutAggregators lookup miss). Cast:
+            // aggregateRevisao's return type is the named RevisaoOutput (no
+            // index signature) rather than FanoutAggregator's generic
+            // Record<string, unknown> — same values at runtime, TS just wants
+            // an index signature on the nominal type; not modifying
+            // src/review/aggregate.ts's own return type for this.
+            fanoutAggregators: cardToPrFanoutAggregators as unknown as StateMachineConfig["fanoutAggregators"],
           };
         }
       } catch (err) {
@@ -437,6 +448,33 @@ export const createApp = async (config: AppConfig) => {
           "[App] card-to-pr skill.yaml not loaded, night-run card dispatch disabled:",
           err instanceof Error ? err.message : err
         );
+      }
+
+      // 4c. Morning-report script handlers (F4 #159, 07:30 digest) — reuses
+      // this same pgPool/cardTaskSources/repoRegistry. Dispatches as a NORMAL
+      // routine (routineId-forced resolution, src/routine/matcher.ts), not a
+      // queueHandler interception: every state is type:script, so the shared
+      // `engine` (step 5 below) already runs it end to end.
+      if (pgPool) {
+        const trelloEntry = resolvedSources.find((s) => s.entry.type === "trello");
+        const trelloBoardId = trelloEntry?.entry.containers.board;
+        const trelloApiKey = trelloEntry?.entry.auth.key ? process.env[trelloEntry.entry.auth.key] : undefined;
+        const trelloApiToken = trelloEntry?.entry.auth.token ? process.env[trelloEntry.entry.auth.token] : undefined;
+        const createCard =
+          trelloBoardId && trelloApiKey && trelloApiToken
+            ? makeTrelloCreateCard({ boardId: trelloBoardId, listName: MORNING_REPORT_TRELLO_LIST, apiKey: trelloApiKey, apiToken: trelloApiToken })
+            : async () => {
+                throw new Error("morning-report: no Trello source configured (need a 'trello' entry in task-sources.yaml)");
+              };
+        registerMorningReportHandlers(scriptRegistry, {
+          pool: pgPool,
+          tz: nightTz,
+          taskSourceFor: (sourceId) => cardTaskSources?.get(sourceId),
+          sourceId: trelloEntry?.entry.id ?? "trello-main",
+          createCard,
+          resolveGithubRepo: (slug) => repoRegistry?.repos[slug]?.githubRepo,
+        });
+        console.log("[App] Registered morning-report script handlers");
       }
     }
   } else {
@@ -536,6 +574,25 @@ export const createApp = async (config: AppConfig) => {
         runStateMachine(cardToPrStateMachineConfig)(cardToPrSkill, syntheticRoutine, event, executionId, stateMachineContext)
       );
       console.log(`[Queue] card-execution job completed: success=${result.success}`);
+
+      // F4 #159 circuit breaker: record this card's tier outcome for the
+      // night. The outcome is only observable HERE (runNightCycle enqueues
+      // and returns long before the job actually runs) — `tier` and
+      // `night_id` ride along on the payload run.ts already built. A
+      // script-path block (bloqueado) still returns result.success=true (the
+      // execution didn't crash), so "did the tier actually deliver" is
+      // confirmed by a real pr_links row, not result.success alone.
+      if (pgPool) {
+        const payload = job.trigger.payload as { source_id?: string; task_id?: string; night_id?: string; tier?: Tier };
+        if (payload.night_id && payload.tier && payload.source_id && payload.task_id) {
+          try {
+            const shipped = result.success && (await prLinks.findByTask(payload.source_id, payload.task_id)).length > 0;
+            await recordTierOutcome(pgPool, payload.night_id, payload.tier, shipped ? "success" : "failure");
+          } catch (err) {
+            console.error("[Queue] Failed to record tier outcome:", err);
+          }
+        }
+      }
       return;
     }
 
