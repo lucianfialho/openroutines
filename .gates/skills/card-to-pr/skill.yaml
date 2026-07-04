@@ -124,9 +124,19 @@ states:
     type: script
     script: card-to-pr-verify
     transitions:
+      # Ordered — first true `when` wins (condition.ts has no '&&'). A retryable
+      # failure in the REWORK flow (output.rework_preparacao only exists there)
+      # must re-enter `rework`, whose prompt interpolates rework_preparacao.* —
+      # re-entering implementacao there would leave {{outputs.plano}}/
+      # {{outputs.preparacao.*}} as literal placeholders (blind agent). Both
+      # retry edges carry max_retries so tier escalation (F4 #159) grants ONE
+      # escalated attempt on exhaustion before on_exhausted -> bloqueado;
+      # verify.ts's own attempt<=2 cap still sends the 3rd failure to bloqueado
+      # via the retryable != true edge.
       - { to: revisao, when: "output.verify.passed == true" }
-      - { to: implementacao, when: "output.verify.retryable == true" }
-      - { to: bloqueado }
+      - { to: bloqueado, when: "output.verify.retryable != true" }
+      - { to: rework, when: "output.rework_preparacao.worktree.path", max_retries: 1, on_exhausted: bloqueado }
+      - { to: implementacao, max_retries: 1, on_exhausted: bloqueado }
 
   revisao:
     description: >
@@ -188,8 +198,16 @@ states:
       - read_file
       - emit_output
     transitions:
-      - { to: implementacao, when: "output.refutacao.status == 'corrigir'" }
+      # Ordered — first true `when` wins (condition.ts has no '&&'):
+      # 'contestado' goes back to revisao in BOTH flows, so it is checked
+      # FIRST; then the rework-flow marker (output.rework_preparacao only
+      # exists in the rework flow) routes the remaining status — 'corrigir',
+      # the only other value refutacao.schema.json admits — to `rework`
+      # (whose prompt has the flow's real context); the last edge is the
+      # normal flow's 'corrigir' -> implementacao.
       - { to: revisao, when: "output.refutacao.status == 'contestado'" }
+      - { to: rework, when: "output.rework_preparacao.worktree.path" }
+      - { to: implementacao, when: "output.refutacao.status == 'corrigir'" }
 
   # ---- Rework loop (F4 #157, D24): PR got CHANGES_REQUESTED, the card came
   # back for corrections ON THE SAME BRANCH. Entered directly (the queue

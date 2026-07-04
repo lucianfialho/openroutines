@@ -7,6 +7,7 @@ import { Effect } from "effect";
 import { runStateMachine, type StateMachineContext } from "./state-machine.js";
 import type { SkillStateMachine } from "../skill/schema.js";
 import type { CompletionResponse } from "../provider/types.js";
+import type { ProviderRegistry } from "../provider/registry.js";
 import type { Routine } from "../routine/types.js";
 import type { TriggerEvent } from "../routine/matcher.js";
 import type { ExecutionRecord } from "../persistence/types.js";
@@ -143,5 +144,101 @@ describe("F3 Wave D — budget hook", () => {
     // No blockReason path taken -> fail() never reads/merges metadata; final persisted
     // metadata is whatever persistStateContext already wrote for this state.
     expect((repo.get("exec1")!.metadata as { blockReason?: string } | undefined)?.blockReason).toBeUndefined();
+  });
+});
+
+describe("F4 H6 — budget hook inside fanout (per-lens reservation)", () => {
+  // `approvedWhen` doubles as the assert on the aggregated envelope: the run
+  // only reaches `done` (success) when output.revisao.approved matches it.
+  const fanoutSkill = (approvedWhen: string): SkillStateMachine =>
+    ({
+      id: "t",
+      initial_state: "revisao",
+      states: {
+        revisao: {
+          type: "fanout",
+          lenses: [
+            { name: "correctness", provider: "kimi-cli", model: "kimi-k2.6", agent_prompt: "lens A" },
+            // No model: the reservation tier must fall back to the provider name.
+            { name: "security", provider: "security-judge", agent_prompt: "lens B" },
+          ],
+          transitions: [{ to: "done", when: approvedWhen }],
+        },
+        done: { terminal: true },
+      },
+    }) as unknown as SkillStateMachine;
+
+  const makeFanoutRegistry = () => {
+    const completes: Record<string, ReturnType<typeof vi.fn>> = {};
+    const registry = {
+      resolve: (name: string) => {
+        const complete = (completes[name] ??= vi.fn(() =>
+          Effect.succeed(resp({ content: JSON.stringify({ ok: true }), costUsd: name === "kimi-cli" ? 0.1 : 0.7 }))
+        ));
+        return { complete };
+      },
+    } as unknown as ProviderRegistry;
+    return { registry, completes };
+  };
+
+  it("reserves 1 call per lens (tier = lens.model ?? lens.provider) and settles each with the actual cost", async () => {
+    const { registry, completes } = makeFanoutRegistry();
+    const budgetGate = vi.fn(async ({ tier }: { tier: string }) => ({ granted: true, reservationId: `res-${tier}` }));
+    const budgetSettle = vi.fn(async () => {});
+
+    const r = await Effect.runPromise(
+      runStateMachine({
+        provider: { complete: () => Effect.succeed(resp()) },
+        providerRegistry: registry,
+        repository: makeRepo().repo,
+        budgetGate,
+        budgetSettle,
+      })(fanoutSkill("output.revisao.approved == true"), routine, event, "exec1")
+    );
+
+    expect(r.success).toBe(true); // approved:true — no lens errored
+    expect(budgetGate).toHaveBeenCalledTimes(2);
+    expect(budgetGate).toHaveBeenCalledWith({ phase: "revisao", tier: "kimi-k2.6", executionId: "exec1" });
+    expect(budgetGate).toHaveBeenCalledWith({ phase: "revisao", tier: "security-judge", executionId: "exec1" });
+    expect(completes["kimi-cli"]).toHaveBeenCalledOnce();
+    expect(completes["security-judge"]).toHaveBeenCalledOnce();
+    expect(budgetSettle).toHaveBeenCalledWith("res-kimi-k2.6", 0.1);
+    expect(budgetSettle).toHaveBeenCalledWith("res-security-judge", 0.7);
+  });
+
+  it("a denied reservation fails ONLY that lens (provider never called) and the fail-closed aggregation still resolves the state", async () => {
+    const { registry, completes } = makeFanoutRegistry();
+    const budgetGate = vi.fn(async ({ tier }: { tier: string }) => ({ granted: tier !== "kimi-k2.6" }));
+
+    const r = await Effect.runPromise(
+      runStateMachine({
+        provider: { complete: () => Effect.succeed(resp()) },
+        providerRegistry: registry,
+        repository: makeRepo().repo,
+        budgetGate,
+      })(fanoutSkill("output.revisao.approved == false"), routine, event, "exec1")
+    );
+
+    // approved:false (denied lens carries {error}) and the machine still
+    // transitioned — the state resolved instead of collapsing the execution.
+    expect(r.success).toBe(true);
+    expect(completes["kimi-cli"]).not.toHaveBeenCalled(); // reservation denied BEFORE any call
+    expect(completes["security-judge"]).toHaveBeenCalledOnce();
+  });
+
+  it("without a budgetGate configured, fanout lenses run ungated exactly as before", async () => {
+    const { registry, completes } = makeFanoutRegistry();
+
+    const r = await Effect.runPromise(
+      runStateMachine({
+        provider: { complete: () => Effect.succeed(resp()) },
+        providerRegistry: registry,
+        repository: makeRepo().repo,
+      })(fanoutSkill("output.revisao.approved == true"), routine, event, "exec1")
+    );
+
+    expect(r.success).toBe(true);
+    expect(completes["kimi-cli"]).toHaveBeenCalledOnce();
+    expect(completes["security-judge"]).toHaveBeenCalledOnce();
   });
 });

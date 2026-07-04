@@ -16,7 +16,7 @@ import type { PrLinkRepository } from "../persistence/types.js";
 import { makePostgresPrLinkRepository } from "../persistence/pr-links-postgres.js";
 import { isSecurityBlockReason } from "../notify/telegram.js";
 import { buildGreenLaneBlock } from "./risk-score.js";
-import { MIN_SAMPLE_SIZE, FAILURE_RATE_THRESHOLD, type Tier } from "../engine/circuit-breaker.js";
+import { MIN_SAMPLE_SIZE, FAILURE_RATE_THRESHOLD } from "../engine/circuit-breaker.js";
 
 export const MORNING_REPORT_PREFIX = "📊 [Relatório]";
 /** Card body budget (02-FLUXO-TRELLO.md, "comentários abaixo de ~8.000 caracteres"). */
@@ -40,17 +40,24 @@ export interface GatherMorningReportDeps {
   resolveGithubRepo?: (slug: string) => string | undefined;
 }
 
-// executions.provider_breakdown (F1 #007) is keyed by PROVIDER NAME, not tier —
-// card-to-pr's skill.yaml today only ever pairs claude-cli with the sonnet
-// model and security-judge/claude-api with opus, so this static map is
-// accurate for the current routing table (D9). Revisit if a provider ever
-// serves more than one tier.
-const PROVIDER_TO_TIER: Record<string, Tier> = {
+// executions.provider_breakdown is keyed by MODEL first (H11:
+// state-machine.ts keys costByProvider by `routedModel ?? routedProvider`,
+// because one provider serves several tiers — claude-cli runs sonnet AND
+// opus per D9 routing). Bare provider names stay as fallback for nights
+// persisted before H11 and for fanout lenses (keyed by lens provider).
+const PROVIDER_TO_TIER: Record<string, keyof MorningReportData["costsByTier"]> = {
+  // model keys (current writes)
+  "kimi-k2.6": "kimi",
+  "claude-sonnet-5": "sonnet",
+  "claude-opus-4-8": "opus",
+  "claude-fable-5": "fable",
+  // provider-name fallbacks (pre-H11 rows and fanout lens keys)
   "kimi-cli": "kimi",
   "kimi-coding-api": "kimi",
   "claude-cli": "sonnet",
   "claude-api": "opus",
   "security-judge": "opus",
+  "architecture-judge": "opus",
 };
 
 // ponytail: pr_links persists only the final risk_score (#158), not the raw

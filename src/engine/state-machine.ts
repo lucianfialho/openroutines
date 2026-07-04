@@ -341,7 +341,12 @@ export const runStateMachine = (
         yield* persistStateContext(repository, executionId, snapshotContext(stateId));
       } else if (state.type === "fanout") {
         // N provider calls in parallel inside one state; aggregate into {lentes, approved}.
-        const fanout = yield* runFanout(state, inputs, outputs, templateOutputPath, providerRegistry, provider, executionId, worktreePath, config.fanoutAggregators);
+        // The budget gate reserves per LENS inside runFanout (F3 #147 / H6) —
+        // the most expensive state must not run with zero reservation.
+        const fanout = yield* runFanout(
+          state, inputs, outputs, templateOutputPath, providerRegistry, provider, executionId, worktreePath, config.fanoutAggregators,
+          config.budgetGate ? { phase: stateId, gate: config.budgetGate, settle: config.budgetSettle } : undefined
+        );
         if (fanout.error) {
           return yield* fail(`Fanout state ${stateId} failed: ${fanout.error}`);
         }
@@ -444,6 +449,9 @@ export const runStateMachine = (
           // in the provider) get TRANSIENT_RETRY_CAP retries. Neither consumes
           // the declarative logic cap on transitions. Anything else fails as
           // before. Every real invocation passes the budget gate (F3 #147).
+          // ponytail: a composite judge provider (architecture-judge escalating
+          // to Fable) makes its extra internal call under this ONE reservation —
+          // accepted, no per-hop re-reserve.
           const tier = routedModel ?? routedProvider ?? "default";
           let formatRetriesUsed = 0;
           let transientRetriesUsed = 0;
@@ -474,11 +482,13 @@ export const runStateMachine = (
             }
 
             // Accumulate real USD cost summed across the tool loop (claude-cli reports it; others → 0).
+            // Keyed by `tier` (routedModel ?? routedProvider): one provider can
+            // serve several tiers (claude-cli runs sonnet AND opus), so keying
+            // by provider alone misattributed Opus spend to Sonnet (H11).
             const invocationCost = step.costUsd;
             totalCostUsd += invocationCost;
             stateCostUsd += invocationCost;
-            const providerKey = routedProvider ?? "default";
-            costByProvider[providerKey] = (costByProvider[providerKey] ?? 0) + invocationCost;
+            costByProvider[tier] = (costByProvider[tier] ?? 0) + invocationCost;
             if (config.budgetSettle && budgetReservationId) {
               yield* Effect.promise(() => config.budgetSettle!(budgetReservationId!, invocationCost)).pipe(Effect.ignore);
             }
@@ -779,6 +789,13 @@ export interface FanoutResult {
 
 type LensOutcome = { name: string; provider: string; output?: unknown; error?: string; costUsd: number };
 
+/** Per-lens money gate for runFanout (H6): 1 reservation per lens, tier = lens.model ?? lens.provider. */
+export interface FanoutBudget {
+  phase: string;
+  gate: NonNullable<StateMachineConfig["budgetGate"]>;
+  settle?: StateMachineConfig["budgetSettle"];
+}
+
 /**
  * Run all lenses of a `type: fanout` state in parallel (Effect.all, unbounded).
  * Each lens is a single provider call (no tool loop — judge lenses don't write).
@@ -802,7 +819,8 @@ export const runFanout = (
   defaultProvider: Provider,
   executionId: string,
   worktreePath: string | undefined,
-  aggregators?: Record<string, FanoutAggregator>
+  aggregators?: Record<string, FanoutAggregator>,
+  budget?: FanoutBudget
 ): Effect.Effect<FanoutResult, never> =>
   Effect.gen(function* () {
     // A declared-but-unregistered aggregator must fail loudly BEFORE spending
@@ -842,6 +860,19 @@ export const runFanout = (
           }
         }
         const lensPrompt = renderTemplate(promptTemplate, ctx);
+        // Money gate (H6): reserve 1 call per lens BEFORE invoking it. A denied
+        // reservation fails only THIS lens ({error}); the aggregation is
+        // fail-closed on an errored lens, so the state still resolves.
+        let budgetReservationId: string | undefined;
+        if (budget) {
+          const grant = yield* Effect.promise(() =>
+            budget.gate({ phase: budget.phase, tier: lens.model ?? lens.provider, executionId })
+          );
+          if (!grant.granted) {
+            return { name: lens.name, provider: lens.provider, error: `orcamento: budget reservation denied for lens ${lens.name}`, costUsd: 0 };
+          }
+          budgetReservationId = grant.reservationId;
+        }
         const res: { ok: true; resp: CompletionResponse } | { ok: false; error: string } = yield* lensProvider
           .complete({
             messages: [{ role: "user", content: lensPrompt }],
@@ -862,6 +893,9 @@ export const runFanout = (
         }
         const resp = res.resp;
         const cost = resp.costUsd ?? 0;
+        if (budget?.settle && budgetReservationId) {
+          yield* Effect.promise(() => budget.settle!(budgetReservationId, cost)).pipe(Effect.ignore);
+        }
         let lensOutput: unknown;
         try {
           lensOutput = extractOutput(resp.content);

@@ -125,14 +125,17 @@ describe("gatherMorningReportData (mocked pool, synthetic data)", () => {
         {
           task_id: "card-verify-falhou",
           metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "verify-falhou" } } } },
-          provider_breakdown: null,
+          // Legacy pre-H11 row: bare provider keys must still map via fallback.
+          provider_breakdown: { "kimi-cli": 0.02 },
           title: "Card com verify falhando",
           url: "https://trello.com/c/vf",
         },
         {
           task_id: "card-b",
           metadata: null,
-          provider_breakdown: { "claude-cli": 1.23, "kimi-cli": 0.05 },
+          // H11: model-keyed costs — claude-opus-4-8 must land on opus (never
+          // sonnet) and the architecture-judge composite maps to opus too.
+          provider_breakdown: { "claude-sonnet-5": 1.23, "kimi-k2.6": 0.03, "claude-opus-4-8": 0.5, "architecture-judge": 0.25 },
           title: null,
           url: null,
         },
@@ -161,7 +164,7 @@ describe("gatherMorningReportData (mocked pool, synthetic data)", () => {
     expect(data.cardsBlocked).toBe(2);
     expect(data.cardsCompleted).toBe(2); // === prs.length
 
-    expect(data.costsByTier).toEqual({ kimi: 0.05, sonnet: 1.23, opus: 0, fable: 0 });
+    expect(data.costsByTier).toEqual({ kimi: 0.05, sonnet: 1.23, opus: 0.75, fable: 0 });
     expect(data.circuitBreakersTriggered).toEqual([{ tier: "kimi" }]); // 3/3 > 0.6; sonnet 1/3 stays closed
   });
 
@@ -223,7 +226,7 @@ describe.skipIf(!hasTestDb())("gatherMorningReportData (real DB)", () => {
     await pool.query(
       `INSERT INTO executions (id, routine_id, trigger_type, skill_name, status, started_at, night_id, source_id, task_id, provider_breakdown)
        VALUES (gen_random_uuid(), 'night-run', 'card-execution', 'card-to-pr', 'completed', NOW(), $1, $2, 'card-shipped', $3::jsonb)`,
-      [nightId, sourceId, JSON.stringify({ "claude-cli": 2, "security-judge": 1 })]
+      [nightId, sourceId, JSON.stringify({ "claude-cli": 2, "security-judge": 1, "claude-opus-4-8": 4 })]
     );
     // findForNight JOINs pr_links to executions on (source_id, task_id) filtered
     // by night_id — every PR needs its own execution row too, not just card-shipped.
@@ -254,8 +257,8 @@ describe.skipIf(!hasTestDb())("gatherMorningReportData (real DB)", () => {
     expect(data.prs[0].riskScore).toBe(40); // ordered DESC
     expect(data.securityBlocks).toHaveLength(1);
     expect(data.securityBlocks[0]).toMatchObject({ cardId: "card-sec", blockReason: "seguranca-divergente" });
-    expect(data.costsByTier.sonnet).toBe(2);
-    expect(data.costsByTier.opus).toBe(1);
+    expect(data.costsByTier.sonnet).toBe(2); // legacy provider-key fallback
+    expect(data.costsByTier.opus).toBe(5); // security-judge (1) + model-keyed opus (4)
     expect(data.circuitBreakersTriggered).toEqual([{ tier: "kimi" }]);
 
     const { body } = renderMorningReportCard(data);
