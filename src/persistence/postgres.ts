@@ -43,8 +43,8 @@ export const makePostgresRepository = (
         id, routine_id, trigger_type, skill_name, status,
         output, error, prompt_tokens, completion_tokens, total_tokens,
         started_at, finished_at, metadata, cost_usd, provider_breakdown,
-        source_id, task_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        source_id, task_id, realized_complexity, alta_impl_escalated
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
       ON CONFLICT (id) DO UPDATE SET
         status = EXCLUDED.status,
         output = EXCLUDED.output,
@@ -57,7 +57,9 @@ export const makePostgresRepository = (
         cost_usd = EXCLUDED.cost_usd,
         provider_breakdown = EXCLUDED.provider_breakdown,
         source_id = EXCLUDED.source_id,
-        task_id = EXCLUDED.task_id`,
+        task_id = EXCLUDED.task_id,
+        realized_complexity = COALESCE(EXCLUDED.realized_complexity, executions.realized_complexity),
+        alta_impl_escalated = COALESCE(EXCLUDED.alta_impl_escalated, executions.alta_impl_escalated)`,
       [
         record.id,
         record.routineId,
@@ -76,6 +78,8 @@ export const makePostgresRepository = (
         record.providerBreakdown ? JSON.stringify(record.providerBreakdown) : null,
         record.sourceId ?? null,
         record.taskId ?? null,
+        record.realizedComplexity ?? null,
+        record.altaImplEscalated ?? null,
       ]
     );
   };
@@ -154,6 +158,8 @@ const rowToRecord = (row: Record<string, unknown>): ExecutionRecord => ({
   // Set once by the night-coordinator's raw INSERT (run.ts), never by save()
   // (its INSERT/UPDATE column lists omit night_id on purpose) — read-only here.
   nightId: (row.night_id as string) ?? undefined,
+  realizedComplexity: (row.realized_complexity as string) ?? undefined,
+  altaImplEscalated: row.alta_impl_escalated != null ? Boolean(row.alta_impl_escalated) : undefined,
   startedAt: row.started_at as Date,
   finishedAt: (row.finished_at as Date) ?? undefined,
 });

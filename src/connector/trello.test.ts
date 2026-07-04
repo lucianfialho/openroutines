@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { readFileSync } from "fs";
 import { Effect } from "effect";
-import { makeTrelloTaskSource } from "./trello.js";
+import { makeTrelloTaskSource, makeTrelloCreateCard, makeTrelloLinkCards, makeTrelloReadComments } from "./trello.js";
 import type { TrelloConfig } from "./trello.js";
 import { parseConnectorManifest } from "../task-source/parser.js";
 
@@ -49,6 +49,7 @@ const jsonResponse = (status: number, body: unknown) => ({
   ok: status >= 200 && status < 300,
   status,
   text: async () => JSON.stringify(body),
+  json: async () => body,
 });
 
 const callUrl = (fetchMock: ReturnType<typeof vi.fn>, index: number): URL =>
@@ -398,6 +399,90 @@ describe("makeTrelloTaskSource — watchNew", () => {
   });
 });
 
+describe("makeTrelloCreateCard", () => {
+  const cfg = { boardId: "board-1", apiKey: "key123", apiToken: "token456" };
+
+  it("resolves the list by name and POSTs idList+name", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, [{ id: "list-fila", name: "OpenRoutines — Fila" }]))
+      .mockResolvedValueOnce(jsonResponse(200, { id: "new-card", shortUrl: "https://trello.com/c/new" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const createCard = makeTrelloCreateCard(cfg);
+    const result = await createCard({ listName: "OpenRoutines — Fila", title: "New task" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(callUrl(fetchMock, 0).pathname).toBe("/1/boards/board-1/lists");
+    expect(callUrl(fetchMock, 0).searchParams.get("filter")).toBe("open");
+    expect(callUrl(fetchMock, 1).pathname).toBe("/1/cards");
+    expect(callUrl(fetchMock, 1).searchParams.get("idList")).toBe("list-fila");
+    expect(callUrl(fetchMock, 1).searchParams.get("name")).toBe("New task");
+    expect(callUrl(fetchMock, 1).searchParams.has("desc")).toBe(false);
+    expect(callInit(fetchMock, 1).method).toBe("POST");
+    expect(result).toEqual({ cardId: "new-card", url: "https://trello.com/c/new" });
+  });
+
+  it("includes description and resolved label ids when provided, dropping unresolvable names", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, [{ id: "list-backlog", name: "Backlog" }]))
+      .mockResolvedValueOnce(
+        jsonResponse(200, [{ id: "label-mapping", name: "OpenRoutines: Mapeamento" }, { id: "label-other", name: "Other" }])
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { id: "new-card", shortUrl: "https://trello.com/c/new" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const createCard = makeTrelloCreateCard(cfg);
+    await createCard({
+      listName: "Backlog",
+      title: "Map repo X",
+      description: "why this card exists",
+      labels: ["OpenRoutines: Mapeamento", "Does Not Exist"],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(callUrl(fetchMock, 2).searchParams.get("desc")).toBe("why this card exists");
+    expect(callUrl(fetchMock, 2).searchParams.get("idLabels")).toBe("label-mapping");
+  });
+
+  it("throws when the list is not found on the board (no card POST attempted)", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(200, []));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const createCard = makeTrelloCreateCard(cfg);
+    await expect(createCard({ listName: "Nope", title: "x" })).rejects.toThrow("list 'Nope' not found");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("makeTrelloLinkCards", () => {
+  it("attaches each card's url onto the other, in both directions", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const linkCards = makeTrelloLinkCards({ apiKey: "key123", apiToken: "token456" });
+    await linkCards({ id: "card-a", url: "https://trello.com/c/a" }, { id: "card-b", url: "https://trello.com/c/b" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(callUrl(fetchMock, 0).pathname).toBe("/1/cards/card-a/attachments");
+    expect(callUrl(fetchMock, 0).searchParams.get("url")).toBe("https://trello.com/c/b");
+    expect(callInit(fetchMock, 0).method).toBe("POST");
+    expect(callUrl(fetchMock, 1).pathname).toBe("/1/cards/card-b/attachments");
+    expect(callUrl(fetchMock, 1).searchParams.get("url")).toBe("https://trello.com/c/a");
+  });
+
+  it("throws when an attachment POST fails", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(422, {}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const linkCards = makeTrelloLinkCards({ apiKey: "key123", apiToken: "token456" });
+    await expect(linkCards({ id: "card-a", url: "https://trello.com/c/a" }, { id: "card-b", url: "https://trello.com/c/b" })).rejects.toThrow(
+      "attach link on card card-a"
+    );
+  });
+});
+
 describe("connector.yaml", () => {
   it("the real .gates/connectors/trello/connector.yaml is valid per parseConnectorManifest", () => {
     const yaml = readFileSync(new URL("../../.gates/connectors/trello/connector.yaml", import.meta.url), "utf-8");
@@ -424,5 +509,52 @@ describe("connector.yaml", () => {
     expect(manifest.classification?.complexity).toEqual({ field: "Complexidade" });
     expect(manifest.classification?.priority).toEqual({ field: "Prioridade" });
     expect(manifest.capabilities).toEqual(["customFields", "twoStepClassification"]);
+  });
+});
+
+describe("makeTrelloReadComments (F5 #169)", () => {
+  const cfg = { boardId: "board-1", apiKey: "key123", apiToken: "token456" };
+
+  it("null cursor seeds to now and reads nothing (no historical 🧭 replay, no fetch)", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const read = makeTrelloReadComments(cfg);
+    const result = await read(null);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.comments).toEqual([]);
+    expect(new Date(result.cursor).toString()).not.toBe("Invalid Date");
+  });
+
+  it("reads commentCard actions since the cursor, oldest-first, cursor -> newest action id", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse(200, [
+        { id: "a3", idMemberCreator: "m1", date: "2026-01-03", data: { text: "🧭 newest", card: { id: "card-9" } }, memberCreator: { username: "henrik" } },
+        { id: "a2", idMemberCreator: "m2", date: "2026-01-02", data: { text: "not steering", card: { id: "card-8" } } },
+        { id: "a1", idMemberCreator: "m1", date: "2026-01-01", data: { text: "🧭 oldest", card: { id: "card-7" } } },
+      ])
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await makeTrelloReadComments(cfg)("cursor-old");
+
+    const url = callUrl(fetchMock, 0);
+    expect(url.pathname).toBe("/1/boards/board-1/actions");
+    expect(url.searchParams.get("filter")).toBe("commentCard");
+    expect(url.searchParams.get("since")).toBe("cursor-old");
+    // oldest-first, all mapped (including the non-🧭 one — the poll filters those)
+    expect(result.comments.map((c) => c.actionId)).toEqual(["a1", "a2", "a3"]);
+    expect(result.comments[2]).toMatchObject({ cardId: "card-9", text: "🧭 newest", memberId: "m1", memberUsername: "henrik" });
+    expect(result.cursor).toBe("a3");
+  });
+
+  it("with no new actions returns the received cursor unchanged", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(200, []));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await makeTrelloReadComments(cfg)("cursor-old");
+
+    expect(result).toEqual({ comments: [], cursor: "cursor-old" });
   });
 });

@@ -68,7 +68,15 @@ export const recordTierOutcome = async (
 };
 
 /** true = tier is OUT of rotation for this night_id (>=MIN_SAMPLE_SIZE attempts, failure rate > FAILURE_RATE_THRESHOLD). */
-export const isTierOpen = async (pool: Pool, nightId: string, tier: Tier): Promise<boolean> => {
+export const isTierOpen = async (
+  pool: Pool,
+  nightId: string,
+  tier: Tier,
+  // F5 #168: policy.yaml's night.circuit_breaker_failure_rate overrides the
+  // default when the coordinator threads it through; omitted = the compiled
+  // default, so every existing caller/test keeps its behavior.
+  failureRateThreshold: number = FAILURE_RATE_THRESHOLD
+): Promise<boolean> => {
   const { rows } = await pool.query(
     `SELECT cards_attempted, cards_failed FROM tier_circuit_state WHERE night_id = $1 AND tier = $2`,
     [nightId, tier]
@@ -77,5 +85,5 @@ export const isTierOpen = async (pool: Pool, nightId: string, tier: Tier): Promi
   const attempted = Number(rows[0].cards_attempted);
   const failed = Number(rows[0].cards_failed);
   if (attempted < MIN_SAMPLE_SIZE) return false;
-  return failed / attempted > FAILURE_RATE_THRESHOLD;
+  return failed / attempted > failureRateThreshold;
 };

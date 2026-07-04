@@ -427,3 +427,198 @@ export const makeTrelloTaskSource = (config: TrelloConfig): TaskSource => {
 
   return { listQueue, getTask, comment, attachArtifact, moveTo, setClassification, watchNew };
 };
+
+/**
+ * Standalone card-creation / cross-linking primitives (F5 #163/#164/#169).
+ * Unlike makeTrelloTaskSource's methods (Effect-based, act on an EXISTING
+ * card), these mint brand-new cards and cross-reference cards — capabilities
+ * issue #142's original TaskSource contract never covered. Kept as raw
+ * Promise-returning exports rather than new TaskSource methods: growing the
+ * shared interface (task-source/types.ts) would ripple into every other
+ * connector (github.ts) for a Trello-only capability, so this is the
+ * "export avulso" a shared-interface change would otherwise require.
+ * Previously lived ad hoc in pipeline/morning-report/index.ts (title-only,
+ * fixed list) — generalized here to the one createCard every F5 call site
+ * (auto-proposed Backlog cards, Mapping cards, followup cards) shares.
+ */
+
+export interface TrelloAuthConfig {
+  apiKey: string;
+  apiToken: string;
+}
+
+export interface TrelloCreateCardConfig extends TrelloAuthConfig {
+  boardId: string;
+}
+
+export interface CreateCardInput {
+  listName: string; // real Trello list name (e.g. "Backlog", "OpenRoutines — Fila") — caller's choice, not a canonical TaskState
+  title: string;
+  description?: string;
+  labels?: string[]; // label names already on the board; a name not found there is dropped, not fatal (card creation still succeeds)
+}
+
+export interface CreateCardResult {
+  cardId: string;
+  url: string;
+}
+
+export const makeTrelloCreateCard =
+  (cfg: TrelloCreateCardConfig) =>
+  async (input: CreateCardInput): Promise<CreateCardResult> => {
+    const auth = `key=${encodeURIComponent(cfg.apiKey)}&token=${encodeURIComponent(cfg.apiToken)}`;
+    const listsRes = await fetch(
+      `https://api.trello.com/1/boards/${encodeURIComponent(cfg.boardId)}/lists?filter=open&fields=id,name&${auth}`
+    );
+    if (!listsRes.ok) throw new Error(`trello: failed to resolve lists (${listsRes.status})`);
+    const lists = (await listsRes.json()) as Array<{ id: string; name: string }>;
+    const list = lists.find((l) => l.name === input.listName);
+    if (!list) throw new Error(`trello: list '${input.listName}' not found on board ${cfg.boardId}`);
+
+    let idLabels = "";
+    if (input.labels?.length) {
+      const labelsRes = await fetch(
+        `https://api.trello.com/1/boards/${encodeURIComponent(cfg.boardId)}/labels?filter=open&fields=id,name&${auth}`
+      );
+      if (!labelsRes.ok) throw new Error(`trello: failed to resolve labels (${labelsRes.status})`);
+      const boardLabels = (await labelsRes.json()) as Array<{ id: string; name: string }>;
+      idLabels = input.labels
+        .map((name) => boardLabels.find((l) => l.name === name)?.id)
+        .filter((id): id is string => id !== undefined)
+        .join(",");
+    }
+
+    const params = [
+      `idList=${encodeURIComponent(list.id)}`,
+      `name=${encodeURIComponent(input.title)}`,
+      input.description ? `desc=${encodeURIComponent(input.description)}` : "",
+      idLabels ? `idLabels=${encodeURIComponent(idLabels)}` : "",
+      auth,
+    ]
+      .filter(Boolean)
+      .join("&");
+
+    const cardRes = await fetch(`https://api.trello.com/1/cards?${params}`, { method: "POST" });
+    if (!cardRes.ok) throw new Error(`trello: failed to create card (${cardRes.status})`);
+    const card = (await cardRes.json()) as { id: string; shortUrl: string };
+    return { cardId: card.id, url: card.shortUrl };
+  };
+
+export interface LinkedCard {
+  id: string;
+  url: string;
+}
+
+/**
+ * Bidirectional cross-reference between two cards (#163/#169: a Blocked card
+ * <-> the Mapping card raised for it; a Done/report-triggered followup card
+ * <-> its parent) — attaches each card's URL onto the other. Trello's
+ * attachment endpoint accepts a plain `url` for a link-type attachment (a
+ * lighter sibling of attachArtifact's file/Blob upload, which the TaskSource
+ * contract already covers); Trello renders it with its own link preview, no
+ * file involved.
+ */
+export const makeTrelloLinkCards =
+  (cfg: TrelloAuthConfig) =>
+  async (a: LinkedCard, b: LinkedCard): Promise<void> => {
+    const auth = `key=${encodeURIComponent(cfg.apiKey)}&token=${encodeURIComponent(cfg.apiToken)}`;
+    const attach = async (cardId: string, url: string): Promise<void> => {
+      const res = await fetch(
+        `https://api.trello.com/1/cards/${encodeURIComponent(cardId)}/attachments?url=${encodeURIComponent(url)}&${auth}`,
+        { method: "POST" }
+      );
+      if (!res.ok) throw new Error(`trello: failed to attach link on card ${cardId} (${res.status})`);
+    };
+    await attach(a.id, b.url);
+    await attach(b.id, a.url);
+  };
+
+export interface SteeringComment {
+  actionId: string;
+  cardId: string;
+  text: string;
+  memberId: string; // idMemberCreator — the whitelist is matched against this…
+  memberUsername?: string; // …or this (TRELLO_STEERING_WHITELIST accepts either)
+}
+
+export interface TrelloReadCommentsConfig extends TrelloAuthConfig {
+  boardId: string;
+}
+
+/**
+ * Board-wide card-comment reader for async human steering (F5 #169). Unlike
+ * watchNew (which reads card MOVES), this reads `commentCard` actions since a
+ * cursor — a Trello action id OR ISO date (`since` accepts both). A null
+ * cursor SEEDS to "now" and returns nothing: the poller must not replay every
+ * historical 🧭 on first boot. Returns oldest-first so a burst of comments
+ * applies in the order the human wrote them; the next cursor is the newest
+ * action's id (Trello returns them newest-first). Standalone export, not a
+ * TaskSource method, for the same reason createCard/linkCards are — a
+ * Trello-only read the shared interface (github.ts too) never covered.
+ */
+export const makeTrelloReadComments =
+  (cfg: TrelloReadCommentsConfig) =>
+  async (cursor: string | null): Promise<{ comments: SteeringComment[]; cursor: string }> => {
+    if (cursor === null) return { comments: [], cursor: new Date().toISOString() };
+    const auth = `key=${encodeURIComponent(cfg.apiKey)}&token=${encodeURIComponent(cfg.apiToken)}`;
+    const params = [
+      "filter=commentCard",
+      `since=${encodeURIComponent(cursor)}`,
+      "limit=1000",
+      "memberCreator=true",
+      "memberCreator_fields=username",
+      "fields=id,date,data,idMemberCreator",
+      auth,
+    ].join("&");
+    const res = await fetch(
+      `https://api.trello.com/1/boards/${encodeURIComponent(cfg.boardId)}/actions?${params}`
+    );
+    if (!res.ok) throw new Error(`trello: failed to read comments (${res.status})`);
+    const actions = (await res.json()) as Array<{
+      id: string;
+      idMemberCreator: string;
+      data?: { text?: string; card?: { id?: string } };
+      memberCreator?: { username?: string };
+    }>;
+    if (actions.length === 0) return { comments: [], cursor };
+    const comments: SteeringComment[] = [];
+    for (const a of actions) {
+      const cardId = a.data?.card?.id;
+      if (!cardId || typeof a.data?.text !== "string") continue;
+      comments.push({
+        actionId: a.id,
+        cardId,
+        text: a.data.text,
+        memberId: a.idMemberCreator,
+        memberUsername: a.memberCreator?.username,
+      });
+    }
+    comments.reverse(); // newest-first from Trello -> oldest-first for the caller
+    return { comments, cursor: actions[0].id };
+  };
+
+/**
+ * Reads back the ids of cards cross-linked onto `cardId` via makeTrelloLinkCards
+ * (F5 #163's degraded-mode gate: a Blocked card <-> the Mapping card raised for
+ * it) — GET /1/cards/{id}/attachments, keeping only attachments whose `url` is
+ * a Trello card link (`trello.com/c/<shortLink>`), never a screenshot/file
+ * upload. Trello resolves a shortLink exactly like a full card id for every
+ * other call in this file (getTask/comment/moveTo), so the caller never needs
+ * to resolve it further.
+ */
+export const makeTrelloReadLinkedCards =
+  (cfg: TrelloAuthConfig) =>
+  async (cardId: string): Promise<string[]> => {
+    const auth = `key=${encodeURIComponent(cfg.apiKey)}&token=${encodeURIComponent(cfg.apiToken)}`;
+    const res = await fetch(
+      `https://api.trello.com/1/cards/${encodeURIComponent(cardId)}/attachments?fields=url&${auth}`
+    );
+    if (!res.ok) throw new Error(`trello: failed to read attachments on card ${cardId} (${res.status})`);
+    const attachments = (await res.json()) as Array<{ url?: string }>;
+    const ids: string[] = [];
+    for (const a of attachments) {
+      const match = a.url ? /trello\.com\/c\/([a-zA-Z0-9]+)/.exec(a.url) : null;
+      if (match) ids.push(match[1]);
+    }
+    return ids;
+  };

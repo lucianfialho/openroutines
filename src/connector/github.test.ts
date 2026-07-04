@@ -282,6 +282,64 @@ describe("makeGitHubConnector", () => {
     });
   });
 
+  describe("F5 #161: createIssue / createMilestone", () => {
+    it("createMilestone POSTs via gh api and returns {number, url} from html_url", async () => {
+      mockStdout = JSON.stringify({ number: 5, html_url: "https://github.com/owner/repo/milestone/5", title: "Pesquisa: X" });
+      const connector = makeGitHubConnector(config);
+      const result = await Effect.runPromise(connector.createMilestone("Pesquisa: X", "resumo"));
+      expect(result).toEqual({ number: 5, url: "https://github.com/owner/repo/milestone/5" });
+      expect(calls[0].file).toBe("gh");
+      expect(calls[0].args).toEqual([
+        "api", "repos/{owner}/{repo}/milestones", "-X", "POST",
+        "-f", "title=Pesquisa: X", "-f", "description=resumo",
+      ]);
+    });
+
+    it("createMilestone omits description when not given", async () => {
+      mockStdout = JSON.stringify({ number: 6, html_url: "https://github.com/owner/repo/milestone/6" });
+      const connector = makeGitHubConnector(config);
+      await Effect.runPromise(connector.createMilestone("Só título"));
+      expect(calls[0].args).toEqual(["api", "repos/{owner}/{repo}/milestones", "-X", "POST", "-f", "title=Só título"]);
+    });
+
+    it("createIssue links a milestone by NUMBER via -F and returns html_url", async () => {
+      mockStdout = JSON.stringify({ number: 12, html_url: "https://github.com/owner/repo/issues/12" });
+      const connector = makeGitHubConnector(config);
+      const result = await Effect.runPromise(connector.createIssue("Fase 1", "corpo", { milestone: 5 }));
+      expect(result).toEqual({ number: 12, url: "https://github.com/owner/repo/issues/12" });
+      expect(calls[0].args).toEqual([
+        "api", "repos/{owner}/{repo}/issues", "-X", "POST",
+        "-f", "title=Fase 1", "-f", "body=corpo", "-F", "milestone=5",
+      ]);
+    });
+
+    it("createIssue without a milestone emits no -F milestone", async () => {
+      mockStdout = JSON.stringify({ number: 13, html_url: "https://github.com/owner/repo/issues/13" });
+      const connector = makeGitHubConnector(config);
+      await Effect.runPromise(connector.createIssue("solta", "corpo"));
+      expect(calls[0].args).toEqual([
+        "api", "repos/{owner}/{repo}/issues", "-X", "POST", "-f", "title=solta", "-f", "body=corpo",
+      ]);
+    });
+
+    it("createIssue rejects a non-integer milestone before any gh call", async () => {
+      const connector = makeGitHubConnector(config);
+      const exit = await Effect.runPromiseExit(connector.createIssue("t", "b", { milestone: 1.5 }));
+      expect(exit._tag).toBe("Failure");
+      expect(calls).toHaveLength(0);
+    });
+
+    it("passes malicious issue title as a single argv element, never a shell string", async () => {
+      mockStdout = JSON.stringify({ number: 1, html_url: "https://github.com/owner/repo/issues/1" });
+      const payload = '`$(touch /tmp/pwned)`; rm -rf / && echo "';
+      const connector = makeGitHubConnector(config);
+      await Effect.runPromise(connector.createIssue(payload, "b"));
+      // The payload arrives verbatim inside one `-f title=<payload>` argv element.
+      expect(calls[0].args).toContain(`title=${payload}`);
+      expect(calls[0].file).toBe("gh");
+    });
+  });
+
   it("should fail when gh returns error", async () => {
     shouldFail = true;
     mockStderr = "GraphQL: Could not resolve to an Issue with the number of 99.";

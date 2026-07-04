@@ -1,0 +1,111 @@
+id: card-mapeamento
+name: Card Mapeamento
+description: >
+  Repo-mapping pipeline (F5 #162): 1 Trello card `OpenRoutines: Mapeamento` ->
+  1 docs-only PR carrying `docs/REPO-PROFILE.md` (+ `docs/visual/` when the
+  product has a UI). NEVER touches product code — every write is confined to
+  `docs/**`, enforced first by the varredura tool allowlist and again,
+  deterministically, by pr_docs (it stages only `docs/` and aborts on any
+  non-docs path).
+
+  Linear graph: preparacao -> varredura -> [captura_visual?] -> validacao ->
+  pr_docs -> done. captura_visual runs ONLY when varredura detects a front-end
+  framework in package.json. validacao audits the 8-section core; a reprovado
+  loops ONE bounded round back to varredura, then (on a second failure) ends
+  WITHOUT a PR — "PR só abre depois de passar".
+
+  Every state is `type: script` (like card-pesquisa / morning-report): the two
+  LLM phases (varredura on Sonnet 5 CLI, captura_visual on Kimi + Playwright
+  MCP) run inside script handlers, not `type: agent` states, because the runner
+  only wires a per-phase CLI tool allowlist for `fanout` lenses — and varredura
+  REQUIRES a restricted allowlist (Write/Edit confined to docs/**). The
+  handlers own the provider calls, so provider/model live in
+  src/pipeline/mapeamento/, not here.
+
+inputs:
+  required:
+    - { name: source_id, type: string }
+    - { name: task_id, type: string }
+    - { name: repo, type: string }
+    - { name: title, type: string }
+    - { name: description, type: string }
+  optional:
+    - { name: night_id, type: string }
+
+initial_state: preparacao
+
+states:
+  preparacao:
+    description: >
+      Resolve the card's repo and mount a worktree on the docs branch
+      `openroutines/mapeamento-<repo>-<data>` (writes land there; pr_docs
+      commits from it). A mapeamento card REQUIRES a resolvable repo — an
+      unresolvable one fails the state (unlike research, there is nothing to map).
+    type: script
+    script: card-mapeamento-preparacao
+    transitions:
+      - { to: varredura }
+
+  varredura:
+    description: >
+      Sonnet 5 CLI, RESTRICTED allowlist (Read/Glob/Grep, Bash(git log/show),
+      Bash(raizes-docs/ctx7), and Write/Edit CONFINED to docs/**). Fills the 16
+      template sections into docs/REPO-PROFILE.md, detects golden routes by a
+      framework heuristic described IN THE PROMPT (not hardcoded here). The
+      handler deterministically mines exemplars (git log --oneline -200 +
+      change-shape heuristic) and detects a front-end framework from
+      package.json — both added to the output. Output: {profile,
+      coreSectionsComplete, goldenRoutes, exemplars[], hasFrontend}.
+    type: script
+    script: card-mapeamento-varredura
+    transitions:
+      # Front-end repo -> capture the visual profile; otherwise skip straight to
+      # validation (no compose boot, no screenshots).
+      - { to: captura_visual, when: "output.varredura.hasFrontend == true" }
+      - { to: validacao }
+
+  captura_visual:
+    description: >
+      Kimi + Playwright MCP. The handler IS the orchestrator of the sandbox:
+      it REUSES src/orchestrator/compose-lifecycle.ts (up health-gated, down
+      ALWAYS in finally — background processes started inside a `kimi -p` die
+      ~5s after it returns, so the agent can never own the compose lifetime).
+      Kimi captures >=1 screenshot per golden route into docs/visual/NN-<tela>.png
+      and writes docs/visual/README.md. Output: {screenshots[], readmeWritten}.
+    type: script
+    script: card-mapeamento-captura-visual
+    transitions:
+      - { to: validacao }
+
+  validacao:
+    description: >
+      Deterministic audit of the 8-section auditable core: every arquivo-chave
+      path listed in the profile exists in the worktree, and every canonical
+      command references an npm script / Makefile target that exists. (The
+      "golden route responds in the sandbox" probe is the F6 maintenance
+      routine's job per 06-KNOWLEDGE-BASE, not the mapping validacao — see the
+      handler's ponytail note.) Output: {passed, issues[]}.
+    type: script
+    script: card-mapeamento-validacao
+    transitions:
+      # Reprovado loops ONE bounded round back to varredura with the gap list;
+      # a SECOND failure ends the pipeline WITHOUT opening a PR (on_exhausted:
+      # done) — "PR só abre depois de passar".
+      - { to: varredura, when: "output.validacao.passed == false", max_retries: 1, on_exhausted: done }
+      - { to: pr_docs }
+
+  pr_docs:
+    description: >
+      Stamp the profile header with today's date, stage ONLY docs/ (aborting if
+      any staged path escapes docs/**), commit, push the
+      `openroutines/mapeamento-<repo>-<data>` branch, open a docs-only PR
+      (reusing the F3 GitHub PR mechanism), and move the card to Review. Each
+      external effect is idempotent via the action ledger (crash + resume never
+      double-opens the PR). Output: {prUrl, changedFiles[]}.
+    type: script
+    script: card-mapeamento-pr-docs
+    transitions:
+      - { to: done }
+
+  done:
+    terminal: true

@@ -27,6 +27,8 @@ export const RepoConfigSchema = z.object({
   labels: z.array(z.string()).optional(),
   /** F4 #158 (D29): repos exempt from the green lane regardless of how clean the diff is. */
   critical: z.boolean().default(false),
+  /** F5 #164 (D26): product-family grouping (e.g. "whatsapp-agent", "dashboard") — sibling-fix propagation only ever targets repos sharing this value. */
+  family: z.string().optional(),
 });
 
 export const RepoRegistrySchema = z.object({

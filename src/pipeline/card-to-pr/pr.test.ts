@@ -172,6 +172,62 @@ describe("makePr", () => {
     );
   });
 
+  it("F5 #160: fills the PR body 'Visual' section from outputs.visual, and omits it for a non-UI card", async () => {
+    const makeDeps = () => {
+      let body = "";
+      const createPullRequest = vi.fn((_b: string, _t: string, prBody: string) => {
+        body = prBody;
+        return Effect.succeed({ pr: CREATED_PR });
+      });
+      const makeGithub = vi.fn(() => ({
+        getOpenPrByBranch: () => Effect.succeed(undefined),
+        createPullRequest,
+      })) as unknown as CardToPrDeps["makeGithub"];
+      const deps: CardToPrDeps = {
+        registry: { repos: {} },
+        githubToken: "gh_test",
+        worktreeBase: "/tmp/or-pr-test-worktrees",
+        ledger: makeInMemoryActionLedgerRepository(),
+        prLinks: makeInMemoryPrLinkRepository(),
+        taskSourceFor: () => ({ moveTo: () => Effect.succeed(undefined), comment: () => Effect.succeed(undefined) }) as unknown as TaskSource,
+        makeGithub,
+        runGit: makeRiskyRunGit(),
+      };
+      return { deps, body: () => body };
+    };
+
+    // UI card: two assertions, one still failing -> ❌; one screenshot; SSIM ok.
+    const uiVisual = {
+      passed: false,
+      assertions: [
+        { id: "a1", description: "x", verdict: "pass", confidence: 9, judgedBy: "kimi", screenshot: "/x/a1.png" },
+        { id: "a2", description: "y", verdict: "fail", confidence: 8, judgedBy: "kimi", screenshot: "/x/a2.png" },
+      ],
+      screenshots: ["/x/a1.png", "/x/a2.png"],
+      consoleErrors: ["boom"],
+      ssim: [{ route: "/", score: 1, regressed: false }],
+    };
+    const ui = makeDeps();
+    await makePr(ui.deps)({
+      inputs,
+      outputs: { preparacao: preparacaoFixture(), plano: { summary: "s", testStrategy: "t" }, verify: { passed: true, knownFailures: [] }, visual: uiVisual },
+      executionId: "exec-ui",
+      stateId: "pr",
+    });
+    expect(ui.body()).toContain("## Visual");
+    expect(ui.body()).toContain("Visual: 1/2 asserções ❌ · SSIM rotas douradas ✅ · 1 console.error · 2 screenshot(s)");
+
+    // Non-UI card: no outputs.visual -> the section is omitted entirely.
+    const nonUi = makeDeps();
+    await makePr(nonUi.deps)({
+      inputs,
+      outputs: { preparacao: preparacaoFixture(), plano: { summary: "s", testStrategy: "t" }, verify: { passed: true, knownFailures: [] } },
+      executionId: "exec-nonui",
+      stateId: "pr",
+    });
+    expect(nonUi.body()).not.toContain("## Visual");
+  });
+
   describe("F4 #157: rework completion path (D24)", () => {
     const reworkOutputs = () => ({
       rework_preparacao: {

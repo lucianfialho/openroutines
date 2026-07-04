@@ -58,10 +58,13 @@ states:
       Worktree: {{outputs.preparacao.worktree.path}}
 
       Explore o repositório no worktree acima, produza um PLAN.md e emita um JSON com:
-      {summary, files[], estimatedLoc, dataChanges[], testStrategy, needsArchGate, risks[]}.
+      {summary, files[], estimatedLoc, dataChanges[], testStrategy, needsArchGate, risks[], visualAssertions[]}.
       needsArchGate=true se a complexidade for High/Highest OU o plano tocar
       schema/migration/autenticação/pagamento/dado sensível — mesmo em
-      complexidade menor. Não altere código nesta fase — só planeje.
+      complexidade menor. Se o card for de UI, derive visualAssertions[] item a
+      item dos critérios de aceite: {id, description, route?, kind?} — kind
+      "brand-fidelity" para asserções de identidade de marca (F5 #160). Não
+      altere código nesta fase — só planeje.
     transitions:
       - { to: gate_plano, when: "output.plano.needsArchGate == true" }
       - { to: implementacao }
@@ -176,9 +179,41 @@ states:
       # SAME edge — never a direct shortcut to bloqueado.
       - { to: refutacao, when: "output.revisao.gaps.length > 0", max_retries: 2, on_exhausted: bloqueado }
       - { to: bloqueado, when: "output.revisao.securityVerdict.approved == false" }
+      # F5 #160 ValidacaoVisual edge (approved + isUI). condition.ts has no '&&',
+      # so the AND is expressed by ORDER: the two edges above already diverted
+      # every non-approved outcome (any gap -> refutacao; a failed security
+      # verdict -> bloqueado), so reaching here means approved. isUI is the
+      # deterministic diff-derived flag (verify.ts), never the card's text.
+      - { to: visual, when: "output.verify.isUI == true" }
       - { to: pr, when: "output.revisao.approved == true" }
-      # F5 #160 adds the ValidacaoVisual edge here (approved + isUI).
       - { to: bloqueado }
+
+  visual:
+    description: >
+      Visual validation (F5 #160), reached only when revisao approved AND the
+      real diff is UI. The orchestrator (this script, never a CLI agent) owns
+      the sandbox: background processes started inside a kimi -p/claude -p die
+      ~5s after the agent returns, so compose up/down cannot live in the agent.
+      Steps: (1) compose up health-gated; (2) deterministic SSIM vs the repo's
+      golden routes — a regression fails fast with zero LLM spend; (3) Kimi
+      navigates via Playwright MCP and judges each visualAssertion of PLAN.md
+      item-by-item with a numeric confidence; (4) confidence < threshold OR a
+      brand-fidelity assertion escalates to Sonnet vision; (5) on pass,
+      screenshots attach to the card and pr fills the "Visual" section. compose
+      down ALWAYS runs in finally.
+    type: script
+    script: card-to-pr-visual
+    transitions:
+      # Ordered — first true `when` wins (condition.ts has no '&&'):
+      - { to: pr, when: "output.visual.passed == true" }
+      # A failed visual returns to implementacao to fix the divergence — capped
+      # at ONE cycle (max_retries:1 + on_exhausted:bloqueado, the F4 pattern).
+      # In the REWORK flow (output.rework_preparacao exists) it must re-enter
+      # `rework`, not implementacao — same reason verify does: implementacao's
+      # prompt interpolates {{outputs.plano}}/{{outputs.preparacao.*}}, absent
+      # in the rework flow, which would leave a blind agent.
+      - { to: rework, when: "output.rework_preparacao.worktree.path", max_retries: 1, on_exhausted: bloqueado }
+      - { to: implementacao, max_retries: 1, on_exhausted: bloqueado }
 
   refutacao:
     description: >

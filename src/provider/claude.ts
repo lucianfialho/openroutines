@@ -79,6 +79,38 @@ const toAnthropicMessages = (
   });
 };
 
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; source: { type: "base64"; media_type: string; data: string } };
+
+const toImageBlock = (img: { base64: string; mediaType: string }): ContentBlock => ({
+  type: "image",
+  source: { type: "base64", media_type: img.mediaType, data: img.base64 },
+});
+
+/**
+ * Append image blocks to the LAST user turn (F5 #160 vision). The Messages API
+ * takes either a plain string OR a content-block array per turn; a turn with
+ * images becomes `[{text}, {image}...]`. If no user turn exists, synthesize one
+ * carrying just the images.
+ */
+const attachImagesToLastUser = (
+  messages: Array<{ role: string; content: string | ContentBlock[] }>,
+  images: Array<{ base64: string; mediaType: string }>
+): Array<{ role: string; content: string | ContentBlock[] }> => {
+  const imageBlocks = images.map(toImageBlock);
+  const lastUserIdx = messages.map((m) => m.role).lastIndexOf("user");
+  if (lastUserIdx === -1) {
+    return [...messages, { role: "user", content: imageBlocks }];
+  }
+  const target = messages[lastUserIdx];
+  const text = typeof target.content === "string" ? target.content : "";
+  const blocks: ContentBlock[] = [...(text.length > 0 ? [{ type: "text" as const, text }] : []), ...imageBlocks];
+  const copy = messages.slice();
+  copy[lastUserIdx] = { role: "user", content: blocks };
+  return copy;
+};
+
 /** Convert Anthropic tool format to our ToolCall[]. */
 const extractToolCalls = (
   content: Array<{ type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }>
@@ -145,10 +177,12 @@ export const makeClaudeProvider = (config: ClaudeConfig) => {
 
       const { system: systemFromMessages, messages } = buildMessages(request);
       const hasTools = request.tools && request.tools.length > 0;
+      const finalMessages =
+        request.images && request.images.length > 0 ? attachImagesToLastUser(messages, request.images) : messages;
 
       const body: Record<string, unknown> = {
         model,
-        messages,
+        messages: finalMessages,
         max_tokens: request.maxTokens ?? 4096,
         temperature: request.temperature ?? 0.2,
       };

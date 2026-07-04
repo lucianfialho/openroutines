@@ -1,0 +1,31 @@
+# Versioned operational policy (F5 #168, D32).
+#
+# These are the ONLY knobs the weekly calibration loop (D27) is allowed to
+# touch, and only within the bounds compiled into src/config/policy.ts (never
+# in this file — that's what stops the file from loosening its own ceiling).
+# A proposed change lands here as a reviewable 1-line diff, never prose.
+#
+# Safety knobs are explicitly NOT here, by construction: minimum blocking
+# confidence, the dual-judge requirement on critical security surface, and
+# Opus owning the security gate (D14/D32) stay hardcoded in code, never
+# tunable by the autonomous loop. PolicySchema is `.strict()` — adding any of
+# them here (or any other key this file doesn't already declare) fails
+# loadPolicy() with a clear error instead of being silently ignored.
+version: 1
+night:
+  max_prs_per_night: 5
+  circuit_breaker_failure_rate: 0.6
+  # Declared + bounds-checked, but NOT enforced yet: there is no per-night
+  # call-count gate today (spend is capped by budget_usd). Enforcement lands
+  # with the F6 budget wiring; until then these two are inert on purpose.
+  max_opus_calls_per_night: 12
+  max_fable_calls_per_night: 3
+  # Effort-unit ceiling for the whole night (historical "_usd" name — under
+  # subscription login, D3, these are effort units, not real dollars; see
+  # night-coordinator/budget.ts). Was NIGHT_BUDGET_USD in app.ts (F3 #147);
+  # migrated here by F5 #168.
+  budget_usd: 30
+day:
+  max_auto_proposed_cards_per_week: 3
+backpressure:
+  max_open_prs_per_repo: 3

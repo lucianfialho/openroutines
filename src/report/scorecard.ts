@@ -1,0 +1,278 @@
+/**
+ * Weekly triage scorecard (F5 #167, D9/D32 self-calibration loop).
+ *
+ * buildWeeklyScorecard() audits how the triage's PROPOSED classification
+ * (Kimi, F2, `tasks.complexity` + the `altaImpl` label bridge — see
+ * night-coordinator/run.ts's getTaskContent) compares to what execution
+ * actually needed (`executions.realized_complexity`/`alta_impl_escalated`,
+ * migration 021) over a rolling 4-week window — more signal than a single
+ * week at this volume. Read-only: it never changes routing/classification,
+ * only measures it and refreshes the few-shot file the triage prompt can
+ * optionally read back (docs/openroutines/triage-fewshots.md — see
+ * loadTriageFewShotsSection). No dedicated confusion-matrix table: computed
+ * on demand over executions/tasks/run_states, same "don't add a table
+ * nobody audits" call as morning-report.ts/risk-score.ts.
+ *
+ * Nothing writes realized_complexity/alta_impl_escalated in production yet
+ * (only the persistence plumbing exists, F5 onda 1) — until a runner wires
+ * that write-point, every list below is legitimately empty. That's expected,
+ * not a bug in this module.
+ */
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+import type { Pool } from "pg";
+import type { TaskComplexity } from "../task-source/types.js";
+
+/** Relative path of the few-shots file, read back by the F2 triage prompt builder (see loadTriageFewShotsSection). */
+export const TRIAGE_FEWSHOTS_FILE_PATH = "docs/openroutines/triage-fewshots.md";
+
+const WINDOW_DAYS = 28; // 4 weeks — "mais sinal que 1 semana isolada, dado o volume"
+const MIN_RECURRING_OCCURRENCES = 2;
+const TOP_N_FEWSHOTS = 3;
+const MAX_EXAMPLES_PER_PATTERN = 3;
+
+/** Ordinal rank used only to detect under-estimation direction; "not_sure" has no rank and is never compared. */
+const COMPLEXITY_RANK: Partial<Record<TaskComplexity, number>> = {
+  lowest: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  highest: 4,
+};
+
+export interface ConfusionCell {
+  proposedComplexity: string;
+  realizedComplexity: string;
+  count: number;
+}
+
+export interface UnpredictedAltaImpl {
+  sourceId: string;
+  taskId: string;
+  repo: string;
+  proposedComplexity?: string;
+}
+
+export interface RetriedExecution {
+  sourceId: string;
+  taskId: string;
+  proposedComplexity?: string;
+  retries: number;
+}
+
+export interface RecurringError {
+  /** "<repo-prefix>:<task type>", e.g. "eai:implementation". */
+  pattern: string;
+  examples: string[];
+  suggestedFewShot: string;
+}
+
+export interface ScorecardReport {
+  windowStart: Date;
+  windowEnd: Date;
+  confusionMatrix: ConfusionCell[];
+  unpredictedAltaImpl: UnpredictedAltaImpl[];
+  retriedExecutions: RetriedExecution[];
+  recurringErrors: RecurringError[];
+}
+
+export interface BuildScorecardDeps {
+  /** Overrides the few-shots file path (tests point this at a tmp file). Defaults to TRIAGE_FEWSHOTS_FILE_PATH. */
+  fewShotsPath?: string;
+  /** Overrides "now" for the 4-week window (tests). Defaults to `new Date()`. */
+  now?: Date;
+}
+
+interface ExecutionRow {
+  id: string;
+  source_id: string;
+  task_id: string;
+  repo: string | null;
+  realized_complexity: string | null;
+  alta_impl_escalated: boolean | null;
+  started_at: Date;
+  proposed_complexity: string | null;
+  type: string | null;
+  labels: string[] | null;
+}
+
+/** "eai-garcom-agent" -> "eai" — the repo-family glob prefix the recurring-error heuristic groups by (matches the "eai-*" example in 06-KNOWLEDGE-BASE.md). */
+const repoPrefix = (repo: string): string => repo.split("-")[0];
+
+/**
+ * Aggregates executions/tasks/run_states over the last 4 weeks into a
+ * confusion matrix + recurring-error report, and rewrites the few-shots file
+ * with the top-3 most recent recurring errors (idempotent: same dataset ->
+ * byte-identical file, since this always overwrites rather than appends).
+ */
+export const buildWeeklyScorecard = async (pool: Pool, deps: BuildScorecardDeps = {}): Promise<ScorecardReport> => {
+  const windowEnd = deps.now ?? new Date();
+  const windowStart = new Date(windowEnd.getTime() - WINDOW_DAYS * 24 * 60 * 60 * 1000);
+
+  const { rows } = await pool.query(
+    `SELECT e.id, e.source_id, e.task_id, e.repo, e.realized_complexity, e.alta_impl_escalated, e.started_at,
+            t.complexity AS proposed_complexity, t.type, t.labels
+     FROM executions e
+     LEFT JOIN tasks t ON t.source_id = e.source_id AND t.task_id = e.task_id
+     WHERE e.started_at >= $1 AND e.started_at <= $2 AND e.source_id IS NOT NULL AND e.task_id IS NOT NULL`,
+    [windowStart, windowEnd]
+  );
+  const execRows = rows as ExecutionRow[];
+
+  const { rows: retryRows } = await pool.query(
+    `SELECT execution_id, COUNT(*) - COUNT(DISTINCT state_id) AS retries
+     FROM run_states
+     WHERE execution_id IN (SELECT id FROM executions WHERE started_at >= $1 AND started_at <= $2)
+     GROUP BY execution_id
+     HAVING COUNT(*) - COUNT(DISTINCT state_id) > 0`,
+    [windowStart, windowEnd]
+  );
+
+  const confusionMatrix = buildConfusionMatrix(execRows);
+  const unpredictedAltaImpl = buildUnpredictedAltaImpl(execRows);
+  const retriedExecutions = buildRetriedExecutions(execRows, retryRows as Array<{ execution_id: string; retries: string | number }>);
+  const recurringErrors = buildRecurringErrors(execRows);
+
+  writeTriageFewShots(deps.fewShotsPath ?? TRIAGE_FEWSHOTS_FILE_PATH, recurringErrors.slice(0, TOP_N_FEWSHOTS));
+
+  return { windowStart, windowEnd, confusionMatrix, unpredictedAltaImpl, retriedExecutions, recurringErrors };
+};
+
+const buildConfusionMatrix = (rows: ExecutionRow[]): ConfusionCell[] => {
+  const counts = new Map<string, ConfusionCell>();
+  for (const r of rows) {
+    if (!r.proposed_complexity || !r.realized_complexity) continue;
+    const key = `${r.proposed_complexity}::${r.realized_complexity}`;
+    const existing = counts.get(key);
+    if (existing) existing.count++;
+    else counts.set(key, { proposedComplexity: r.proposed_complexity, realizedComplexity: r.realized_complexity, count: 1 });
+  }
+  return [...counts.values()];
+};
+
+const buildUnpredictedAltaImpl = (rows: ExecutionRow[]): UnpredictedAltaImpl[] =>
+  rows
+    .filter((r) => r.alta_impl_escalated === true && !(r.labels ?? []).includes("altaImpl"))
+    .map((r) => ({
+      sourceId: r.source_id,
+      taskId: r.task_id,
+      repo: r.repo ?? "",
+      proposedComplexity: r.proposed_complexity ?? undefined,
+    }));
+
+const buildRetriedExecutions = (
+  rows: ExecutionRow[],
+  retryRows: Array<{ execution_id: string; retries: string | number }>
+): RetriedExecution[] => {
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const out: RetriedExecution[] = [];
+  for (const rr of retryRows) {
+    const exec = byId.get(rr.execution_id);
+    if (!exec) continue; // no matching (source_id, task_id) row — nothing to report against
+    out.push({
+      sourceId: exec.source_id,
+      taskId: exec.task_id,
+      proposedComplexity: exec.proposed_complexity ?? undefined,
+      retries: Number(rr.retries),
+    });
+  }
+  return out;
+};
+
+interface PatternAgg {
+  examples: string[];
+  count: number;
+  latestAt: Date;
+  proposedComplexity: string;
+  realizedComplexity: string;
+  repoPrefix: string;
+  type: string;
+}
+
+/**
+ * Groups underestimated cards (realized complexity ranked higher than
+ * proposed) by repo-prefix + task type; a pattern with >=2 occurrences in
+ * the window becomes a recurring error with ready-to-paste few-shot text.
+ */
+const buildRecurringErrors = (rows: ExecutionRow[]): RecurringError[] => {
+  const patterns = new Map<string, PatternAgg>();
+  for (const r of rows) {
+    if (!r.proposed_complexity || !r.realized_complexity || !r.repo || !r.type) continue;
+    const proposedRank = COMPLEXITY_RANK[r.proposed_complexity as TaskComplexity];
+    const realizedRank = COMPLEXITY_RANK[r.realized_complexity as TaskComplexity];
+    if (proposedRank === undefined || realizedRank === undefined || realizedRank <= proposedRank) continue;
+
+    const prefix = repoPrefix(r.repo);
+    const key = `${prefix}:${r.type}`;
+    const example = `${r.repo}#${r.task_id}: ${r.proposed_complexity} → ${r.realized_complexity}`;
+    const existing = patterns.get(key);
+    if (existing) {
+      existing.count++;
+      if (existing.examples.length < MAX_EXAMPLES_PER_PATTERN) existing.examples.push(example);
+      if (r.started_at > existing.latestAt) existing.latestAt = r.started_at;
+    } else {
+      patterns.set(key, {
+        examples: [example],
+        count: 1,
+        latestAt: r.started_at,
+        proposedComplexity: r.proposed_complexity,
+        realizedComplexity: r.realized_complexity,
+        repoPrefix: prefix,
+        type: r.type,
+      });
+    }
+  }
+
+  return [...patterns.entries()]
+    .filter(([, agg]) => agg.count >= MIN_RECURRING_OCCURRENCES)
+    .sort((a, b) => b[1].latestAt.getTime() - a[1].latestAt.getTime())
+    .map(([key, agg]) => ({
+      pattern: key,
+      examples: agg.examples,
+      suggestedFewShot: `Cards do tipo '${agg.type}' em repos ${agg.repoPrefix}-* raramente são ${agg.proposedComplexity} — nas últimas 4 semanas viraram ${agg.realizedComplexity} (${agg.count}x). Considere propor complexidade mais alta.`,
+    }));
+};
+
+/**
+ * Overwrites (never appends) the few-shots file with the given recurring
+ * errors — a pure function of `errors`, so calling buildWeeklyScorecard()
+ * twice on the same dataset produces byte-identical output (idempotency AC).
+ */
+export const writeTriageFewShots = (path: string, errors: RecurringError[]): void => {
+  const body =
+    errors.length > 0
+      ? errors.map((e) => `- ${e.suggestedFewShot}`).join("\n")
+      : "_Nenhum padrão recorrente de subestimação nas últimas 4 semanas._";
+  const content = [
+    "# Few-shots de erros recorrentes de triagem",
+    "",
+    "Gerado por `buildWeeklyScorecard()` (F5 #167) — não editar à mão; reescrito",
+    "a cada execução com os padrões de subestimação mais recentes.",
+    "",
+    body,
+    "",
+  ].join("\n");
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, content, "utf-8");
+};
+
+/**
+ * Wraps the few-shots file's content (if present) in the
+ * `<few_shots_erros_recorrentes>` section the F2 triage prompt builder reads.
+ * A missing file (first week, or before the first scorecard run) returns ""
+ * — never throws — so a triage prompt built before any scorecard run is
+ * unaffected. NOTE: as of F5 #167 there is no dedicated triage prompt-builder
+ * module in this codebase yet (F2's classification skill isn't implemented —
+ * see orchestrator/steering.ts's own "the engine/triage skill is out of this
+ * poll's scope" note); wire this into that builder's prompt assembly once it
+ * ships.
+ */
+export const loadTriageFewShotsSection = (path: string = TRIAGE_FEWSHOTS_FILE_PATH): string => {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf-8");
+  } catch {
+    return "";
+  }
+  return `<few_shots_erros_recorrentes>\n${raw.trim()}\n</few_shots_erros_recorrentes>`;
+};

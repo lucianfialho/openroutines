@@ -28,8 +28,9 @@ import { cleanupZombieProcesses } from "../provider/process-cleanup.js";
 import { sendTelegramAlert } from "../notify/telegram.js";
 import { isTierOpen, tierForComplexity } from "../engine/circuit-breaker.js";
 import { nextTier } from "../engine/retry-classifier.js";
+import { steeringPromptBlock, RESUME_BLOCKED_EFFECT } from "../orchestrator/steering.js";
 import type { RepoRegistry } from "../repo-registry/schema.js";
-import type { ExecutionRepository, ExecutionProcessRepository, PrLink, PrLinkRepository, TaskRepository } from "../persistence/types.js";
+import type { CardSteeringRepository, ExecutionRepository, ExecutionProcessRepository, PrLink, PrLinkRepository, TaskRepository } from "../persistence/types.js";
 import type { TaskSource, TaskComplexity } from "../task-source/types.js";
 import type { JobQueue } from "../queue/types.js";
 
@@ -42,6 +43,8 @@ export interface NightSummary {
   cardsEnqueued?: number;
   /** Rework rounds admitted this night (F4 #157, D24). */
   reworkAdmitted?: number;
+  /** Blocked cards resumed by human steering this night (F5 #169, D25). */
+  blockedResumed?: number;
 }
 
 export interface RunNightCycleDeps {
@@ -56,6 +59,10 @@ export interface RunNightCycleDeps {
   nightWindowEnd: string; // "HH:MM"
   nightBudgetUsd: number;
   nightPrCap: number;
+  /** Per-repo open-PR cap (F5 #168, policy.yaml backpressure.max_open_prs_per_repo). */
+  perRepoOpenPrCap?: number;
+  /** Tier circuit-breaker failure rate (F5 #168, policy.yaml night.circuit_breaker_failure_rate). */
+  circuitBreakerFailureRate?: number;
   nightParallelism: number;
   tz: string;
   /**
@@ -67,6 +74,8 @@ export interface RunNightCycleDeps {
   sources?: string[];
   taskSourceFor?: (sourceId: string) => TaskSource | undefined;
   taskRepo?: TaskRepository;
+  /** Human-steering store (F5 #169) — Blocked cards with a pending 🧭 are resumed here. */
+  cardSteering?: CardSteeringRepository;
   /** Injectable seams for tests; default to the real implementations. */
   runGit?: (args: string[], cwd: string) => Promise<{ stdout: string; stderr: string }>;
   makeGithub?: (cfg: { token: string; repo: string }) => ReturnType<typeof makeGitHubConnector>;
@@ -298,6 +307,86 @@ const admitReworkCards = async (deps: RunNightCycleDeps, nightId: string, genera
   return admitted;
 };
 
+/**
+ * Blocked-resume admission (F5 #169, D25) — a whitelisted human's 🧭 on a
+ * Blocked card was persisted by the steering poll as an unapplied
+ * `resume-blocked` row; here the card is re-claimed and re-enqueued as a normal
+ * card-execution, with the steering text injected as a DELIMITED DATA block
+ * (steeringPromptBlock) appended to inputs.description. The card leaves Blocked
+ * only now (when the coordinator actually resumes), never at the poll. Same
+ * same-repo-in-series + PR-cap + atomic-per-night-claim fences as the claim
+ * loop; markApplied closes the loop so a resumed card is never re-admitted.
+ */
+const admitSteeredBlockedCards = async (
+  deps: RunNightCycleDeps,
+  nightId: string,
+  generateId: () => string
+): Promise<number> => {
+  if (!deps.cardSteering) return 0;
+  const pending = (await deps.cardSteering.findUnapplied()).filter((s) => s.effectType === RESUME_BLOCKED_EFFECT);
+  if (pending.length === 0) return 0;
+  const busyRepos = await getBusyRepos(deps.pool, nightId);
+  let resumed = 0;
+  for (const steering of pending) {
+    if ((await deps.prLinks.countOpenForNight(nightId)) >= deps.nightPrCap) break; // global cap — retry next night
+    const { rows } = await deps.pool.query(
+      `SELECT title, body, labels, complexity FROM tasks WHERE source_id = $1 AND task_id = $2`,
+      [steering.sourceId, steering.taskId]
+    );
+    if (rows.length === 0) continue;
+    const body = String(rows[0].body ?? "");
+    const labels = ((rows[0].labels as string[]) ?? []) as string[];
+    const repo = resolveRepoForClaim(deps.registry)({ sourceId: steering.sourceId, taskId: steering.taskId, body, labels });
+    if (!repo) continue; // unresolvable — leave unapplied, retry once the card names a repo
+    if (busyRepos.has(repo)) continue; // same-repo-in-series
+    // Atomic per-night claim (same as rework): the card keeps its ORIGINAL
+    // night's claimed_by_night_id, so "not this night" means claimable.
+    const claim = await deps.pool.query(
+      `UPDATE tasks SET claimed_by_night_id = $1
+       WHERE source_id = $2 AND task_id = $3 AND (claimed_by_night_id IS NULL OR claimed_by_night_id != $1)
+       RETURNING task_id`,
+      [nightId, steering.sourceId, steering.taskId]
+    );
+    if (claim.rows.length === 0) continue; // already re-claimed tonight
+    busyRepos.add(repo);
+
+    const complexity = (rows[0].complexity as TaskComplexity | null) ?? undefined;
+    const executionId = generateId();
+    await insertPendingExecution(deps.pool, {
+      executionId,
+      nightId,
+      repo,
+      sourceId: steering.sourceId,
+      taskId: steering.taskId,
+    });
+    await deps.queue.enqueue({
+      id: executionId,
+      trigger: {
+        type: "card-execution",
+        executionId,
+        payload: {
+          source_id: steering.sourceId,
+          task_id: steering.taskId,
+          repo,
+          title: String(rows[0].title ?? ""),
+          // The security boundary: human text enters ONLY as delimited data
+          // appended to the card description — never a system instruction.
+          description: `${body}\n\n${steeringPromptBlock(steering.text)}`,
+          night_id: nightId,
+          executionId,
+          skill: "card-to-pr",
+          tier: tierForComplexity(complexity),
+          ...(complexity ? { complexity } : {}),
+          ...(labels.includes("altaImpl") ? { altaImpl: true } : {}),
+        },
+      },
+    });
+    if (steering.id) await deps.cardSteering.markApplied(steering.id, RESUME_BLOCKED_EFFECT);
+    resumed++;
+  }
+  return resumed;
+};
+
 export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSummary> => {
   const now = deps.now ?? (() => new Date());
   const generateId = deps.generateId ?? randomUUID;
@@ -347,6 +436,13 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
       ? await admitReworkCards(deps, nightId, generateId)
       : 0;
 
+    // 3d. Blocked-resume admission (F5 #169, D25) — a human's 🧭 on a Blocked
+    // card, persisted by the steering poll, is resumed here BEFORE the normal
+    // claim loop (human intent outranks fresh backlog). Window-guarded like rework.
+    const blockedResumed = isWithinWindow(now(), deps.nightWindowStart, deps.nightWindowEnd, deps.tz)
+      ? await admitSteeredBlockedCards(deps, nightId, generateId)
+      : 0;
+
     // 4. Baseline pre-warm: OPTIONAL for this wave, skipped by choice. Each
     // card's preparacao computes its repo's baseline lazily and idempotently
     // (getOrCreateBaseline, ON CONFLICT DO NOTHING), so the first card of a
@@ -387,6 +483,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
           {
             prLinks: deps.prLinks,
             nightPrCap: deps.nightPrCap,
+            perRepoOpenPrCap: deps.perRepoOpenPrCap,
             githubToken: deps.githubToken,
             registry: deps.registry,
             makeGithub: deps.makeGithub,
@@ -420,7 +517,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
         // its attempts.
         const originalTier = tierForComplexity(card.complexity);
         let tier = originalTier;
-        if (await isTierOpen(deps.pool, nightId, originalTier)) {
+        if (await isTierOpen(deps.pool, nightId, originalTier, deps.circuitBreakerFailureRate)) {
           const escalated = nextTier(originalTier);
           if (!escalated) {
             // Same "don't re-claim this cycle" fence as the PR-cap/backpressure
@@ -491,7 +588,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
       });
     }
 
-    return { started: true, nightId, cardsSynced, cardsClaimed, cardsEnqueued, reworkAdmitted };
+    return { started: true, nightId, cardsSynced, cardsClaimed, cardsEnqueued, reworkAdmitted, blockedResumed };
   } catch (err) {
     console.error(`[NightCoordinator] night cycle ${date} failed:`, err);
     await sendAlert(`🔥 night-run ${date} falhou: ${err instanceof Error ? err.message : String(err)}`);

@@ -361,6 +361,48 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
       return parsed;
     });
 
+  // createIssue/createMilestone (F5 #161): the research pipeline's delivery
+  // needs to MINT issues/milestones, not just read them. Both go through
+  // `gh api` (not `gh issue create`) so the milestone is linked by NUMBER
+  // (-F milestone=N) rather than gh's fragile title match, and both return the
+  // REST html_url directly in one call — same argv-only discipline as
+  // requestReview's `gh api ... -f 'reviewers[]=...'`. The {owner}/{repo}
+  // placeholders resolve from GH_REPO in this connector's env; title/body/labels
+  // are distinct argv elements, so card-derived text never reaches a shell.
+  const createMilestone = (
+    title: string,
+    description?: string
+  ): Effect.Effect<{ number: number; url: string }, GitHubCliError> =>
+    Effect.gen(function* () {
+      yield* Effect.log(`[GitHub] Creating milestone: ${title}`);
+      const args = ["api", "repos/{owner}/{repo}/milestones", "-X", "POST", "-f", `title=${title}`];
+      if (description !== undefined) args.push("-f", `description=${description}`);
+      const output = yield* execGh(args);
+      const parsed = JSON.parse(output) as { number: number; html_url: string };
+      return { number: parsed.number, url: parsed.html_url };
+    });
+
+  const createIssue = (
+    title: string,
+    body: string,
+    opts?: { milestone?: number; labels?: string[] }
+  ): Effect.Effect<{ number: number; url: string }, GitHubCliError> =>
+    Effect.gen(function* () {
+      // `-F` (not `-f`) sends milestone as a JSON number, which the REST API
+      // requires — a stringified `-f milestone=42` is rejected as a bad type.
+      if (opts?.milestone !== undefined) yield* ensureNumber(opts.milestone);
+      yield* Effect.log(`[GitHub] Creating issue: ${title}`);
+      const args = [
+        "api", "repos/{owner}/{repo}/issues", "-X", "POST",
+        "-f", `title=${title}`, "-f", `body=${body}`,
+      ];
+      if (opts?.milestone !== undefined) args.push("-F", `milestone=${opts.milestone}`);
+      for (const label of opts?.labels ?? []) args.push("-f", `labels[]=${label}`);
+      const output = yield* execGh(args);
+      const parsed = JSON.parse(output) as { number: number; html_url: string };
+      return { number: parsed.number, url: parsed.html_url };
+    });
+
   return {
     fetchIssue,
     listIssues,
@@ -368,6 +410,8 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
     getOpenPrByBranch,
     getPullRequest,
     createPullRequest,
+    createIssue,
+    createMilestone,
     addComment,
     commentOnPullRequest,
     listPullRequestReviews,

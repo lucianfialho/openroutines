@@ -53,18 +53,30 @@ import {
   dismissImprovement,
 } from "./observability/feedback-loop.js";
 import { loadRepoRegistry } from "./repo-registry/registry.js";
+import { loadPolicy } from "./config/policy.js";
 import { makeInMemoryActionLedgerRepository } from "./persistence/action-ledger-in-memory.js";
 import { makePostgresActionLedgerRepository } from "./persistence/action-ledger-postgres.js";
 import { makeInMemoryPrLinkRepository } from "./persistence/pr-links-in-memory.js";
 import { makePostgresPrLinkRepository } from "./persistence/pr-links-postgres.js";
 import { makePostgresTaskRepository } from "./persistence/task-postgres.js";
+import { makeInMemoryTaskRepository } from "./persistence/task-in-memory.js";
+import { makeInMemoryRepoLearningRepository } from "./persistence/repo-learnings-in-memory.js";
+import { makePostgresRepoLearningRepository } from "./persistence/repo-learnings-postgres.js";
+import { makeSimilarCards } from "./orchestrator/tactical-memory.js";
+import { makePostgresPrFeedbackRepository } from "./persistence/pr-feedback-postgres.js";
 import { loadTaskSources, type ResolvedTaskSource } from "./task-source/loader.js";
-import { makeTrelloTaskSource } from "./connector/trello.js";
+import { makeTrelloTaskSource, makeTrelloCreateCard, makeTrelloLinkCards, makeTrelloReadComments, makeTrelloReadLinkedCards } from "./connector/trello.js";
+import { runSteeringPoll, type SteeringPollDeps } from "./orchestrator/steering.js";
+import { runDegradedModeUnblockPoll, type DegradedModeUnblockDeps } from "./orchestrator/degraded-mode.js";
+import { makePostgresPollStateRepository } from "./persistence/poll-state-postgres.js";
+import { makePostgresCardSteeringRepository } from "./persistence/card-steering-postgres.js";
 import { makeRestTaskSource } from "./task-source/rest-executor.js";
 import type { TaskSource, TaskComplexity } from "./task-source/types.js";
 import { registerCardToPrHandlers, cardToPrFanoutAggregators } from "./pipeline/card-to-pr/index.js";
+import { registerPesquisaHandlers } from "./pipeline/pesquisa/index.js";
+import { registerMapeamentoHandlers } from "./pipeline/mapeamento/index.js";
 import { resolveCardToPrProvider, resolveImplementationTier, resolveEscalatedProvider } from "./pipeline/card-to-pr/routing.js";
-import { registerMorningReportHandlers, makeTrelloCreateCard, MORNING_REPORT_TRELLO_LIST } from "./pipeline/morning-report/index.js";
+import { registerMorningReportHandlers, MORNING_REPORT_TRELLO_LIST } from "./pipeline/morning-report/index.js";
 import { runStateMachine, type StateMachineConfig, type StateMachineContext, type DynamicProviderContext } from "./engine/state-machine.js";
 import { recordTierOutcome, type Tier } from "./engine/circuit-breaker.js";
 import type { SkillStateMachine } from "./skill/schema.js";
@@ -409,8 +421,13 @@ export const createApp = async (config: AppConfig) => {
   // worker concurrency below and by the night-coordinator deps further down.
   const nightWindowStart = process.env.NIGHT_WINDOW_START ?? "01:00";
   const nightWindowEnd = process.env.NIGHT_WINDOW_END ?? "06:30";
-  const nightBudgetUsd = Number(process.env.NIGHT_BUDGET_USD ?? "30") || 30;
-  const nightPrCap = parseInt(process.env.NIGHT_PR_CAP ?? "6", 10) || 6;
+  // F5 #168 (D32): operational caps come from the versioned, bounds-checked
+  // policy.yaml — no env fallback. A missing/invalid file fails boot loud and
+  // clear here rather than silently applying a hardcoded default.
+  const policy = loadPolicy(process.env.POLICY_PATH ?? "policy.yaml");
+  const nightBudgetUsd = policy.night.budget_usd;
+  const nightPrCap = policy.night.max_prs_per_night;
+  const perRepoOpenPrCap = policy.backpressure.max_open_prs_per_repo;
   const nightParallelism = Math.max(1, Math.min(3, parseInt(process.env.NIGHT_PARALLELISM ?? "2", 10) || 2));
   const nightTz = process.env.TZ ?? "America/Sao_Paulo";
 
@@ -474,6 +491,11 @@ export const createApp = async (config: AppConfig) => {
   // card <-> PR linkage (F3 #146/#147) — one instance shared by the card-to-pr
   // script handlers and the night-coordinator's PR-cap check below.
   const prLinks = pgPool ? makePostgresPrLinkRepository(pgPool) : makeInMemoryPrLinkRepository();
+
+  // F5 #166 tactical memory — optional StateMachineConfig deps; absent keeps
+  // the engine behavior identical, so constructing them unconditionally is safe.
+  const repoLearnings = pgPool ? makePostgresRepoLearningRepository(pgPool) : makeInMemoryRepoLearningRepository();
+  const tacticalTasks = pgPool ? makePostgresTaskRepository(pgPool) : makeInMemoryTaskRepository();
 
   // 3. Setup provider(s)
   // Default provider — used by markdown/ReAct skills and by state-machine states
@@ -570,6 +592,10 @@ export const createApp = async (config: AppConfig) => {
   // Hoisted so the night-coordinator (which syncs these sources' queues into
   // `tasks`) can reuse the same live TaskSource instances built below.
   let cardTaskSources: Map<string, TaskSource> | undefined;
+  // Hoisted resolved Trello auth (F5 #169) — the steering poll wiring below
+  // (outside the `if (config.githubToken)` block where resolvedSources lives)
+  // needs board + key + token + sourceId to read comments and seed cards.
+  let trelloSteeringConfig: { boardId: string; apiKey: string; apiToken: string; sourceId: string } | undefined;
 
   if (config.githubToken) {
     // git_commit is commit-only (no push — D13, the orchestrator owns the
@@ -612,16 +638,74 @@ export const createApp = async (config: AppConfig) => {
         }
       }
 
+      const trelloEntry = resolvedSources.find((s) => s.entry.type === "trello");
+      const trelloKey = trelloEntry?.entry.auth.key ? process.env[trelloEntry.entry.auth.key] : undefined;
+      const trelloToken = trelloEntry?.entry.auth.token ? process.env[trelloEntry.entry.auth.token] : undefined;
+      if (trelloEntry?.entry.containers.board && trelloKey && trelloToken) {
+        trelloSteeringConfig = {
+          boardId: trelloEntry.entry.containers.board,
+          apiKey: trelloKey,
+          apiToken: trelloToken,
+          sourceId: trelloEntry.entry.id,
+        };
+      }
+
+      // One action ledger shared by every pipeline that fires idempotent
+      // external effects (card-to-pr PR/push/handoff, card-pesquisa delivery,
+      // card-mapeamento pr_docs). Keyed by (executionId, actionKey) so a single
+      // instance never collides across pipelines.
+      const actionLedger = pgPool ? makePostgresActionLedgerRepository(pgPool) : makeInMemoryActionLedgerRepository();
+
       registerCardToPrHandlers(scriptRegistry, {
         pool: pgPool,
         registry: repoRegistry,
         githubToken: config.githubToken,
         worktreeBase: process.env.WORKTREE_BASE ?? "/tmp/or-worktrees",
-        ledger: pgPool ? makePostgresActionLedgerRepository(pgPool) : makeInMemoryActionLedgerRepository(),
+        ledger: actionLedger,
         prLinks,
         taskSourceFor: (sourceId) => cardTaskSources?.get(sourceId),
+        // Visual phase (F5 #160): Kimi-with-MCP navigates + judges; Sonnet
+        // vision (claude-api) escalates low-confidence/brand-fidelity items —
+        // wired only when ANTHROPIC_API_KEY exists (else escalation is skipped
+        // and the Kimi verdict stands, degraded but functional). compose/SSIM/
+        // attach seams use their real defaults.
+        visual: {
+          agentProvider: providerRegistry.resolve("kimi-cli", "kimi-k2.6"),
+          visionProvider: config.anthropicApiKey
+            ? providerRegistry.resolve("claude-api", "claude-sonnet-5")
+            : undefined,
+        },
       });
       console.log("[App] Registered card-to-pr script handlers");
+
+      registerPesquisaHandlers(scriptRegistry, {
+        registry: repoRegistry,
+        githubToken: config.githubToken,
+        worktreeBase: process.env.WORKTREE_BASE ?? "/tmp/or-worktrees",
+        taskSourceFor: (sourceId) => cardTaskSources?.get(sourceId),
+        claudeApiKey: config.anthropicApiKey ?? "",
+        // F5 #162 hardening: makes entrega's issue/milestone creation idempotent
+        // (a crash mid-delivery + resume no longer duplicates GitHub issues).
+        ledger: actionLedger,
+      });
+      console.log("[App] Registered card-pesquisa script handlers");
+
+      // card-mapeamento (F5 #162): read-broad survey -> docs-only PR
+      // (REPO-PROFILE.md + visual profile). varredura runs on Sonnet CLI;
+      // captura_visual reuses card-to-pr's Kimi-with-Playwright-MCP provider and
+      // the shared compose-lifecycle. Wired whenever card-to-pr is (same
+      // GITHUB_TOKEN + repos.yaml gate).
+      registerMapeamentoHandlers(scriptRegistry, {
+        registry: repoRegistry,
+        githubToken: config.githubToken,
+        worktreeBase: process.env.WORKTREE_BASE ?? "/tmp/or-worktrees",
+        ledger: actionLedger,
+        taskSourceFor: (sourceId) => cardTaskSources?.get(sourceId),
+        visual: {
+          agentProvider: providerRegistry.resolve("kimi-cli", "kimi-k2.6"),
+        },
+      });
+      console.log("[App] Registered card-mapeamento script handlers");
 
       // The night-run coordinator dispatches card-execution jobs by calling
       // runStateMachine directly (queueHandler §6) rather than engine.execute():
@@ -656,6 +740,13 @@ export const createApp = async (config: AppConfig) => {
             // card's complexity/altaImpl (falls back to the YAML's static
             // claude-cli/claude-sonnet-5 for every other state, unchanged).
             resolveDynamicProvider: resolveCardToPrDynamicProvider,
+            repoLearnings,
+            similarCards: makeSimilarCards({
+              executions: persistence,
+              prLinks,
+              tasks: tacticalTasks,
+              runStates: runStateRepository,
+            }),
           };
         }
       } catch (err) {
@@ -675,12 +766,22 @@ export const createApp = async (config: AppConfig) => {
         const trelloBoardId = trelloEntry?.entry.containers.board;
         const trelloApiKey = trelloEntry?.entry.auth.key ? process.env[trelloEntry.entry.auth.key] : undefined;
         const trelloApiToken = trelloEntry?.entry.auth.token ? process.env[trelloEntry.entry.auth.token] : undefined;
-        const createCard =
+        // makeTrelloCreateCard (connector/trello.ts) creates in an arbitrary
+        // list and returns {cardId,url}; morning-report only ever wants
+        // MORNING_REPORT_TRELLO_LIST and its deps.createCard predates that
+        // general shape, so adapt here rather than changing MorningReportDeps.
+        const trelloCreateCard =
           trelloBoardId && trelloApiKey && trelloApiToken
-            ? makeTrelloCreateCard({ boardId: trelloBoardId, listName: MORNING_REPORT_TRELLO_LIST, apiKey: trelloApiKey, apiToken: trelloApiToken })
-            : async () => {
-                throw new Error("morning-report: no Trello source configured (need a 'trello' entry in task-sources.yaml)");
-              };
+            ? makeTrelloCreateCard({ boardId: trelloBoardId, apiKey: trelloApiKey, apiToken: trelloApiToken })
+            : undefined;
+        const createCard = trelloCreateCard
+          ? async (title: string) => {
+              const { cardId, url } = await trelloCreateCard({ listName: MORNING_REPORT_TRELLO_LIST, title });
+              return { id: cardId, url };
+            }
+          : async () => {
+              throw new Error("morning-report: no Trello source configured (need a 'trello' entry in task-sources.yaml)");
+            };
         registerMorningReportHandlers(scriptRegistry, {
           pool: pgPool,
           tz: nightTz,
@@ -719,6 +820,10 @@ export const createApp = async (config: AppConfig) => {
   let nightCoordinatorDeps: RunNightCycleDeps | undefined;
   // PR-review poller deps (F4 #157) — same gating/lifecycle as the coordinator.
   let prReviewPollDeps: PrReviewPollDeps | undefined;
+  // Steering poller deps (F5 #169) — runs on the same daytime tick as PR-review.
+  let steeringPollDeps: SteeringPollDeps | undefined;
+  // Degraded-mode unblock poller deps (F5 #163) — same daytime tick, Trello-only.
+  let degradedModeUnblockDeps: DegradedModeUnblockDeps | undefined;
 
   // 6. Setup queue (connects to engine)
   const queueHandler = async (job: { id?: string; routineId?: string; trigger: { type: string; payload: unknown; executionId?: string } }) => {
@@ -739,12 +844,38 @@ export const createApp = async (config: AppConfig) => {
     // transitions (CHANGES_REQUESTED -> card back to Working, merged/closed ->
     // link closed). Same interception pattern as night-run.
     if (job.routineId === "pr-review-poll" && job.trigger.type === "schedule") {
-      if (!prReviewPollDeps) {
+      // Two independent sweeps share this daytime tick: the GitHub PR-review
+      // poll (F4 #157) and the Trello human-steering poll (F5 #169). Each runs
+      // if wired; neither gates the other (steering needs no GitHub token).
+      if (prReviewPollDeps) {
+        const summary = await runPrReviewPoll(prReviewPollDeps);
+        console.log(`[Queue] PR review poll: ${JSON.stringify(summary)}`);
+      } else {
         console.warn("[Queue] pr-review-poll cron fired but the poller is not wired (need DATABASE_URL + GITHUB_TOKEN + repos.yaml)");
-        return;
       }
-      const summary = await runPrReviewPoll(prReviewPollDeps);
-      console.log(`[Queue] PR review poll: ${JSON.stringify(summary)}`);
+      if (steeringPollDeps) {
+        const summary = await runSteeringPoll(steeringPollDeps);
+        console.log(`[Queue] Steering poll: ${JSON.stringify(summary)}`);
+      }
+      // Degraded-mode unblock sweep (F5 #163): a Mapping card reaching Done ->
+      // its linked Blocked cards return to the queue. Independent of the two
+      // sweeps above (Trello-only, no GitHub token needed).
+      if (degradedModeUnblockDeps) {
+        const summary = await runDegradedModeUnblockPoll(degradedModeUnblockDeps);
+        console.log(`[Queue] Degraded-mode unblock poll: ${JSON.stringify(summary)}`);
+      }
+      return;
+    }
+
+    // Daytime triage tick (F5 #170): the routine's schedule is live, but its
+    // `card-triage` skill is an F2 deliverable that does not exist yet, and no
+    // runtime dispatcher routes a research card into card-pesquisa. Intercept
+    // it here (same pattern as night-run) so the cron is a harmless no-op
+    // instead of failing to load a missing skill every 30 minutes. Swap this
+    // for the real classify -> checkProfileAndBlock (#163) / dispatchResearch-
+    // IfEligible (#170) call once the triage classifier lands.
+    if (job.routineId === "card-triage" && job.trigger.type === "schedule") {
+      console.log("[Queue] card-triage tick: dispatch deferred (F2 triage skill not yet implemented)");
       return;
     }
 
@@ -844,6 +975,10 @@ export const createApp = async (config: AppConfig) => {
   // queueHandler and /trigger/night-run above/below via closure, both of which
   // only fire well after createApp has returned.
   if (pgPool && repoRegistry && config.githubToken) {
+    // Shared across the coordinator and the steering poll (F5 #169): the
+    // Blocked-resume admission reads what the poll persists.
+    const cardSteeringRepo = makePostgresCardSteeringRepository(pgPool);
+    const nightTaskRepo = makePostgresTaskRepository(pgPool);
     nightCoordinatorDeps = {
       pool: pgPool,
       registry: repoRegistry,
@@ -858,22 +993,68 @@ export const createApp = async (config: AppConfig) => {
       nightWindowEnd,
       nightBudgetUsd,
       nightPrCap,
+      perRepoOpenPrCap,
+      circuitBreakerFailureRate: policy.night.circuit_breaker_failure_rate,
       nightParallelism,
       tz: nightTz,
       // Ingest these sources' queued cards into `tasks` at cycle start (F2's
       // poller runtime is unwired) so the claim loop has rows to claim.
       sources: cardTaskSources ? [...cardTaskSources.keys()] : [],
       taskSourceFor: (id) => cardTaskSources?.get(id),
-      taskRepo: makePostgresTaskRepository(pgPool),
+      taskRepo: nightTaskRepo,
+      cardSteering: cardSteeringRepo,
     };
     prReviewPollDeps = {
       prLinks,
       registry: repoRegistry,
       githubToken: config.githubToken,
       taskSourceFor: (id) => cardTaskSources?.get(id),
+      // F5 #165: mine review comments into pr_feedback on merge so the weekly
+      // calibration loop has data. computeHumanDelta (the agent-commit..merge
+      // diff) is a deferred F6 seam — comment mining runs without it.
+      prFeedback: makePostgresPrFeedbackRepository(pgPool),
     };
     console.log("[App] Night coordinator wired (POST /trigger/night-run, cron 0 1 * * *)");
     console.log("[App] PR-review poller wired (cron */30 8-22 * * *)");
+
+    // Steering poll (F5 #169): whitelisted humans steer via 🧭 comments. Needs
+    // a resolved Trello source (board/key/token) and a live TaskSource for it.
+    const steeringTaskSource = trelloSteeringConfig ? cardTaskSources?.get(trelloSteeringConfig.sourceId) : undefined;
+    if (trelloSteeringConfig && steeringTaskSource) {
+      const whitelist = (process.env.TRELLO_STEERING_WHITELIST ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      steeringPollDeps = {
+        sourceId: trelloSteeringConfig.sourceId,
+        taskSource: steeringTaskSource,
+        cardSteering: cardSteeringRepo,
+        pollState: makePostgresPollStateRepository(pgPool),
+        prLinks,
+        taskRepo: nightTaskRepo,
+        readComments: makeTrelloReadComments(trelloSteeringConfig),
+        createCard: makeTrelloCreateCard(trelloSteeringConfig),
+        linkCards: makeTrelloLinkCards(trelloSteeringConfig),
+        whitelist,
+      };
+      console.log(
+        `[App] Steering poller wired (cron */30 8-22 * * *, whitelist: ${whitelist.length} member(s))`
+      );
+    } else {
+      console.log("[App] Steering poller not wired (need a 'trello' task source with key+token)");
+    }
+
+    // Degraded-mode unblock poll (F5 #163): same Trello source as steering, no
+    // GitHub token needed — reacts to a Mapping card reaching Done.
+    if (trelloSteeringConfig && steeringTaskSource) {
+      degradedModeUnblockDeps = {
+        sourceId: trelloSteeringConfig.sourceId,
+        taskSource: steeringTaskSource,
+        pollState: makePostgresPollStateRepository(pgPool),
+        readLinkedCards: makeTrelloReadLinkedCards(trelloSteeringConfig),
+      };
+      console.log("[App] Degraded-mode unblock poller wired (cron */30 8-22 * * *)");
+    }
   } else {
     console.log("[App] Night coordinator not wired (need DATABASE_URL + GITHUB_TOKEN + repos.yaml)");
   }

@@ -35,6 +35,11 @@ const SCHEMA_MIGRATIONS = [
   "014_pr_links_rework.sql",
   "015_pr_links_risk.sql",
   "016_tier_circuit_state.sql",
+  "017_pr_feedback.sql",
+  "018_repo_learnings.sql",
+  "019_card_steering.sql",
+  "020_day_budget.sql",
+  "021_execution_complexity_fields.sql",
 ];
 
 export const ensureSchema = async (pool: Pool): Promise<void> => {

@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "card-pesquisa julgamento_arquitetura output",
+  "type": "object",
+  "required": ["verdict", "corrections", "securityOpinion"],
+  "properties": {
+    "verdict": { "enum": ["aprovado", "refutado", "escalate"] },
+    "corrections": { "type": "array", "items": { "type": "string" } },
+    "securityOpinion": {
+      "type": "object",
+      "required": ["exposesNewSurface", "notes"],
+      "properties": {
+        "exposesNewSurface": { "type": "boolean" },
+        "notes": { "type": "string" }
+      }
+    },
+    "escalateReason": { "type": "string" }
+  }
+}

@@ -32,6 +32,10 @@ export interface ExecutionRecord {
    * payload lost `night_id` (every resume path re-enqueues with `payload: {}`).
    */
   nightId?: string;
+  /** Complexity the implementation actually turned out to need, vs the card's declared complexity (F5 #167, D9 routing). */
+  realizedComplexity?: string;
+  /** Whether an 'alta'-complexity implementation had to escalate tier mid-run (F5 #167). */
+  altaImplEscalated?: boolean;
   startedAt: Date;
   finishedAt?: Date;
 }
@@ -240,6 +244,71 @@ export interface ExecutionProcessRepository {
   markFinished: (id: string, finishedAt: Date) => Promise<void>;
   /** Rows with finished_at IS NULL — used by boot zombie cleanup. */
   findRunning: () => Promise<ExecutionProcess[]>;
+}
+
+/** One mined signal of how a human reacted to an agent's PR (F5 #165). Feeds a later mining pass into RepoLearning. */
+export interface PrFeedback {
+  id?: string;
+  repo: string;
+  /** Nullable: a 'steering' comment can land before any PR exists. */
+  prNumber?: number;
+  sourceId: string;
+  taskId: string;
+  kind: "human-delta" | "review-comment" | "steering";
+  content: string;
+  createdAt?: Date;
+}
+
+export interface PrFeedbackRepository {
+  save: (feedback: PrFeedback) => Promise<void>;
+  findSince: (since: Date) => Promise<PrFeedback[]>;
+  findByRepo: (repo: string) => Promise<PrFeedback[]>;
+}
+
+/** A mined, repeat-sighted fact about a repo (F5 #166) — dedupe key is (repo, normalized fato). */
+export interface RepoLearning {
+  id?: string;
+  repo: string;
+  fato: string;
+  evidencia?: string;
+  escopo?: string;
+  vistoEm: Date[];
+  freq: number;
+  promotedToProfile: boolean;
+}
+
+export interface RepoLearningRepository {
+  /**
+   * Upsert by (repo, normalized fato) — dedupe on lowercase+trim, no
+   * embeddings. A repeat sighting increments freq and appends to vistoEm;
+   * evidencia/escopo refresh only when the caller actually supplies a new
+   * value (mirrors ExecutionRecord.metadata's COALESCE-preserve pattern).
+   */
+  upsertByFato: (repo: string, input: { fato: string; evidencia?: string; escopo?: string }) => Promise<void>;
+  findTopByRepo: (repo: string, n: number) => Promise<RepoLearning[]>;
+  /** freq >= 3 and not yet promoted — candidates for the repo's persistent profile. */
+  findPromotable: () => Promise<RepoLearning[]>;
+  markPromoted: (id: string) => Promise<void>;
+}
+
+/** A human steering comment on a card mid-pipeline (F5 #169, D33) — keyed to tasks by (sourceId, taskId). */
+export interface CardSteering {
+  id?: string;
+  sourceId: string;
+  taskId: string;
+  authorTrelloId: string;
+  text: string;
+  createdAt?: Date;
+  applied: boolean;
+  /** What the pipeline did in response, set alongside `applied` by markApplied. */
+  effectType?: string;
+}
+
+export interface CardSteeringRepository {
+  save: (steering: CardSteering) => Promise<void>;
+  /** Unapplied rows, optionally scoped to a task. Omit both for every unapplied row across all cards. */
+  findUnapplied: (sourceId?: string, taskId?: string) => Promise<CardSteering[]>;
+  markApplied: (id: string, effectType: string) => Promise<void>;
 }
 
 /** Cursor + dedupe state for TaskSourcePoller, keyed per source (F2 #143). */

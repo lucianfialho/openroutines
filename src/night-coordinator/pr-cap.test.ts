@@ -18,6 +18,7 @@ const registry: RepoRegistry = {
 const baseDeps = (overrides: Partial<CanOpenPrDeps> = {}): CanOpenPrDeps => ({
   prLinks: makeInMemoryPrLinkRepository(),
   nightPrCap: 6,
+  perRepoOpenPrCap: 3,
   githubToken: "gh_test",
   registry,
   ...overrides,
@@ -79,6 +80,31 @@ describe("canOpenPr", () => {
     const deps = baseDeps();
     const ok = await canOpenPr(deps, { nightId: "night-1", repo: "unknown-repo" });
     expect(ok).toBe(false);
+  });
+
+  it("respects a custom perRepoOpenPrCap sourced from policy.yaml (F5 #168) — 1 open PR already denies under cap=1", async () => {
+    const openPrs = [{ number: 1, title: "a", url: "u1", state: "OPEN", headRefName: "openroutines/card-a" }];
+    const makeGithub = vi.fn(() => ({ listPullRequests: () => Effect.succeed(openPrs) })) as unknown as CanOpenPrDeps["makeGithub"];
+    const deps = baseDeps({ makeGithub, perRepoOpenPrCap: 1 });
+
+    const ok = await canOpenPr(deps, { nightId: "night-1", repo: "acme-widgets" });
+
+    expect(ok).toBe(false); // same 1-PR fixture that "allows when under both caps" (cap=3) permits
+  });
+
+  it("falls back to the pre-#168 default (3) when perRepoOpenPrCap is omitted, for callers not yet wired to policy", async () => {
+    const openPrs = [
+      { number: 1, title: "a", url: "u1", state: "OPEN", headRefName: "openroutines/card-a" },
+      { number: 2, title: "b", url: "u2", state: "OPEN", headRefName: "openroutines/card-b" },
+    ];
+    const makeGithub = vi.fn(() => ({ listPullRequests: () => Effect.succeed(openPrs) })) as unknown as CanOpenPrDeps["makeGithub"];
+    // Built directly (not via baseDeps, which always sets perRepoOpenPrCap) so
+    // the field is genuinely absent, matching a caller not yet wired to policy.
+    const deps: CanOpenPrDeps = { prLinks: makeInMemoryPrLinkRepository(), nightPrCap: 6, githubToken: "gh_test", registry, makeGithub };
+
+    const ok = await canOpenPr(deps, { nightId: "night-1", repo: "acme-widgets" });
+
+    expect(ok).toBe(true); // 2 < default 3
   });
 
   it("denies (fail-closed) when the GitHub API call errors", async () => {

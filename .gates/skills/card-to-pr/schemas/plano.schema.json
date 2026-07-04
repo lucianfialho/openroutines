@@ -10,6 +10,19 @@
     "dataChanges": { "type": "array", "items": { "type": "string" } },
     "testStrategy": { "type": "string" },
     "needsArchGate": { "type": "boolean" },
-    "risks": { "type": "array", "items": { "type": "string" } }
+    "risks": { "type": "array", "items": { "type": "string" } },
+    "visualAssertions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "description"],
+        "properties": {
+          "id": { "type": "string" },
+          "description": { "type": "string" },
+          "route": { "type": "string" },
+          "kind": { "type": "string" }
+        }
+      }
+    }
   }
 }

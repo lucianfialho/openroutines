@@ -34,6 +34,13 @@ export interface CompletionRequest {
    * call; providers without native tool gating ignore it.
    */
   allowedTools?: string[];
+  /**
+   * Image blocks for a vision call (F5 #160: the visual phase escalates a
+   * low-confidence assertion to Sonnet vision with the screenshot). Appended to
+   * the final user turn as base64 image content by the claude provider;
+   * text-only providers ignore it.
+   */
+  images?: Array<{ base64: string; mediaType: string }>;
 }
 
 export interface CompletionResponse {

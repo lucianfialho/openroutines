@@ -145,4 +145,34 @@ describe("makeInMemoryRepository", () => {
 
     expect((await repo.findById("exec-1"))?.metadata).toEqual({ blockReason: "new" });
   });
+
+  it("F5 #167: a save() with neither field (succeed()/fail()'s shape) preserves a previously-persisted realizedComplexity/altaImplEscalated", async () => {
+    const repo = makeInMemoryRepository();
+    const withComplexity: ExecutionRecord = {
+      id: "exec-1",
+      routineId: "routine-a",
+      triggerType: "task_source",
+      skillName: "solve-issue",
+      status: "running",
+      realizedComplexity: "alta",
+      altaImplEscalated: true,
+      startedAt: new Date("2024-01-01"),
+    };
+    await repo.save(withComplexity);
+
+    // succeed() persists a fresh record with these fields entirely absent.
+    await repo.save({
+      id: "exec-1",
+      routineId: "routine-a",
+      triggerType: "task_source",
+      skillName: "solve-issue",
+      status: "completed",
+      startedAt: new Date("2024-01-01"),
+    });
+
+    const found = await repo.findById("exec-1");
+    expect(found?.status).toBe("completed");
+    expect(found?.realizedComplexity).toBe("alta");
+    expect(found?.altaImplEscalated).toBe(true);
+  });
 });

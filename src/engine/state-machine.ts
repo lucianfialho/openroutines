@@ -24,8 +24,10 @@ import type {
   ExecutionRepository,
   RunStateRepository,
   FileMetadataRepository,
+  RepoLearningRepository,
 } from "../persistence/types.js";
 import { renderTemplate, type TemplateContext } from "./template.js";
+import { buildTacticalMemoryPrompt, parseLearnings, validateOutputLearnings, type SimilarCardsFn } from "./learnings.js";
 import { extractOutput } from "./output.js";
 import { evaluateCondition } from "./condition.js";
 import { validate, type JsonSchema } from "./schema-validate.js";
@@ -70,6 +72,20 @@ export interface StateMachineConfig {
   resolveDynamicProvider?: (ctx: DynamicProviderContext) => { provider: string; model?: string } | undefined;
   /** Named custom aggregators for `type: fanout` states declaring `aggregate:` (F4 #153). */
   fanoutAggregators?: Record<string, FanoutAggregator>;
+  /**
+   * Tactical memory across nights (F5 #166): read to reinject a repo's prior
+   * learnings into every agent/lens prompt, and written (upsertByFato) with the
+   * `learnings[]` any agent phase emits — but only when the card's `repo` input
+   * is known. Absent → no injection and no persistence (behavior identical to
+   * before this feature; every existing test passes unchanged).
+   */
+  repoLearnings?: RepoLearningRepository;
+  /**
+   * Precedent injection for the plan phase (F5 #166): up to 2 merged similar
+   * cards reinjected as few-shot into the `plano` state prompt. Absent → no
+   * precedent block.
+   */
+  similarCards?: SimilarCardsFn;
 }
 
 export interface DynamicProviderContext {
@@ -155,6 +171,10 @@ export const runStateMachine = (
 
     // Build inputs from event payload, or restore from resumed context
     const inputs = (context?.inputs as Record<string, unknown>) ?? (event.payload as Record<string, unknown>) ?? {};
+
+    // The card's repo keys tactical memory (F5 #166): absent (e.g. solve-issue,
+    // schedule triggers) → no learnings injection/persistence at all.
+    const cardRepo = typeof inputs.repo === "string" && inputs.repo.length > 0 ? inputs.repo : undefined;
 
     yield* Effect.log(`[StateMachine] Starting execution ${executionId} for skill ${skill.id}`);
 
@@ -343,9 +363,15 @@ export const runStateMachine = (
         // N provider calls in parallel inside one state; aggregate into {lentes, approved}.
         // The budget gate reserves per LENS inside runFanout (F3 #147 / H6) —
         // the most expensive state must not run with zero reservation.
+        // Reinject prior repo learnings into every lens too (F5 #166) — no
+        // precedents block here (that is the plan phase only, never a fanout).
+        const fanoutMemory = yield* Effect.promise(() =>
+          buildTacticalMemoryPrompt({ stateId, repo: cardRepo, inputs, repoLearnings: config.repoLearnings })
+        );
         const fanout = yield* runFanout(
           state, inputs, outputs, templateOutputPath, providerRegistry, provider, executionId, worktreePath, config.fanoutAggregators,
-          config.budgetGate ? { phase: stateId, gate: config.budgetGate, settle: config.budgetSettle } : undefined
+          config.budgetGate ? { phase: stateId, gate: config.budgetGate, settle: config.budgetSettle } : undefined,
+          fanoutMemory
         );
         if (fanout.error) {
           return yield* fail(`Fanout state ${stateId} failed: ${fanout.error}`);
@@ -355,6 +381,10 @@ export const runStateMachine = (
           costByProvider[pk] = (costByProvider[pk] ?? 0) + c;
         }
         outputs[stateId] = fanout.output;
+        // A fanout lens is an agent phase too — persist the learnings each lens declared.
+        for (const lens of fanout.output.lentes) {
+          yield* persistLearnings(config.repoLearnings, cardRepo, (lens as { output?: unknown }).output);
+        }
         yield* Effect.log(`[StateMachine] Fanout state ${stateId} completed (${fanout.output.lentes.length} lenses, approved=${fanout.output.approved})`);
         yield* persistStateContext(repository, executionId, snapshotContext(stateId));
       } else if (!state.agent_prompt && !state.agent_prompt_file && state.gate) {
@@ -394,7 +424,19 @@ export const runStateMachine = (
             }
           }
           const context: TemplateContext = buildContext(inputs, outputs, templateOutputPath);
-          const prompt = renderTemplate(promptTemplate, context);
+          // Reinject prior repo learnings (+ merged-card precedents on the plan
+          // phase) as delimited low-confidence DATA appended after the rendered
+          // template (F5 #166). Empty when no repo/deps → prompt unchanged.
+          const memoryBlock = yield* Effect.promise(() =>
+            buildTacticalMemoryPrompt({
+              stateId,
+              repo: cardRepo,
+              inputs,
+              repoLearnings: config.repoLearnings,
+              similarCards: config.similarCards,
+            })
+          );
+          const prompt = renderTemplate(promptTemplate, context) + memoryBlock;
           yield* Effect.log(`[StateMachine] Rendered prompt for ${stateId}: ${prompt.slice(0, 300)}`);
 
           if (runStateRepository) {
@@ -515,6 +557,10 @@ export const runStateMachine = (
           }
 
           outputs[stateId] = stateOutput;
+          // Persist any tactical learnings this phase declared (F5 #166). Output
+          // already passed validateOutputLearnings, so this is ≤3 well-shaped
+          // facts; upsertByFato dedupes them per (repo, normalized fato).
+          yield* persistLearnings(config.repoLearnings, cardRepo, stateOutput);
           if (runStateRepository) {
             yield* Effect.promise(() => runStateRepository.save({
               executionId,
@@ -820,7 +866,9 @@ export const runFanout = (
   executionId: string,
   worktreePath: string | undefined,
   aggregators?: Record<string, FanoutAggregator>,
-  budget?: FanoutBudget
+  budget?: FanoutBudget,
+  /** Delimited low-confidence repo-learnings block appended to each lens prompt (F5 #166). */
+  injectedMemory?: string
 ): Effect.Effect<FanoutResult, never> =>
   Effect.gen(function* () {
     // A declared-but-unregistered aggregator must fail loudly BEFORE spending
@@ -859,7 +907,7 @@ export const runFanout = (
             return { name: lens.name, provider: lens.provider, error: `agent_prompt_file read failed: ${err instanceof Error ? err.message : String(err)}`, costUsd: 0 };
           }
         }
-        const lensPrompt = renderTemplate(promptTemplate, ctx);
+        const lensPrompt = renderTemplate(promptTemplate, ctx) + (injectedMemory ?? "");
         // Money gate (H6): reserve 1 call per lens BEFORE invoking it. A denied
         // reservation fails only THIS lens ({error}); the aggregation is
         // fail-closed on an errored lens, so the state still resolves.
@@ -1224,6 +1272,14 @@ export const extractAndValidateOutput = (
     }
   }
 
+  // Transversal contract (F5 #166): a phase may carry `learnings[]` (max 3). An
+  // over-long/malformed list is a "format" failure — the runner re-invokes with
+  // a reminder — never a silently-truncated write. Absent field → no-op.
+  const learningsCheck = validateOutputLearnings(stateOutput);
+  if (!learningsCheck.ok) {
+    return { ok: false, error: `Learnings validation failed in state ${stateId}: ${learningsCheck.error}`, schemaValidationFailed: true };
+  }
+
   return { ok: true, output: stateOutput };
 };
 
@@ -1319,6 +1375,24 @@ export const persistImplementFileMetadata = (
       ).pipe(Effect.ignore);
     }
     yield* Effect.log(`[StateMachine] File metadata persisted for ${changes.length} file(s)`);
+  });
+
+/**
+ * Persist the tactical learnings an agent phase (or fanout lens) declared
+ * (F5 #166), deduped per (repo, normalized fato) by upsertByFato. No-op without
+ * a wired repo or a known card repo. Best-effort — a failed write never breaks
+ * the phase.
+ */
+export const persistLearnings = (
+  repoLearnings: RepoLearningRepository | undefined,
+  repo: string | undefined,
+  output: unknown
+): Effect.Effect<void, never> =>
+  Effect.gen(function* () {
+    if (!repoLearnings || !repo) return;
+    for (const learning of parseLearnings(output)) {
+      yield* Effect.promise(() => repoLearnings.upsertByFato(repo, learning)).pipe(Effect.ignore);
+    }
   });
 
 const persistExecution = (
