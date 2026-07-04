@@ -13,8 +13,9 @@ import type { CompletionRequest, CompletionResponse } from "./types.js";
 import { makeKimiCliProvider, type KimiCliConfig } from "./kimi-cli.js";
 import { makeClaudeCliProvider, type ClaudeCliConfig } from "./claude-cli.js";
 import { makeClaudeProvider } from "./claude.js";
+import { makeSecurityJudgeProvider } from "./security-judge.js";
 
-export type ProviderName = "kimi-cli" | "claude-cli" | "claude-api";
+export type ProviderName = "kimi-cli" | "claude-cli" | "claude-api" | "security-judge";
 
 export interface ProviderAdapter {
   complete: (request: CompletionRequest) => Effect.Effect<CompletionResponse, Error>;
@@ -50,6 +51,20 @@ const buildProvider = (
         );
       }
       return makeClaudeProvider({ ...config.claudeApi, ...(model !== undefined ? { model } : {}) });
+    }
+    case "security-judge": {
+      // Composite judge (F4 #154) — reuses the claude-api credential; the
+      // model param is the PRIMARY (Opus) judge, the Fable second judge is
+      // internal to the provider.
+      if (!config.claudeApi?.apiKey) {
+        throw new Error(
+          'Provider "security-judge" requested but no claude-api apiKey configured (set ANTHROPIC_API_KEY)'
+        );
+      }
+      return makeSecurityJudgeProvider({
+        claudeApi: config.claudeApi,
+        ...(model !== undefined ? { model } : {}),
+      });
     }
     default:
       throw new Error(`Unknown provider: ${name as string}`);
