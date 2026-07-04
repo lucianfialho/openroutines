@@ -301,7 +301,7 @@ export const aggregateDebtSignals = (rows: ExecutionSignalRow[]): DebtSignal[] =
   const groups = new Map<string, DebtSignal>();
   for (const row of rows) {
     for (const occ of extractDebtOccurrences(row)) {
-      const key = `${occ.repo} ${occ.tipo} ${occ.chave}`;
+      const key = `${occ.repo}::${occ.tipo}::${occ.chave}`;
       const existing = groups.get(key);
       if (existing) existing.count += 1;
       else groups.set(key, { repo: occ.repo, tipo: occ.tipo, chave: occ.chave, count: 1, evidence: occ.evidence });
