@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Effect } from "effect";
 import { makePr } from "./pr.js";
 import type { CardToPrDeps } from "./index.js";
@@ -24,11 +24,32 @@ const preparacaoFixture = (): PreparacaoOutput => ({
 const inputs = { source_id: "trello-main", task_id: "card1", repo: "acme-widgets", title: "Fix the bug" };
 const CREATED_PR = { url: "https://github.com/acme/widgets/pull/42", number: 42, branch: "openroutines/card-t1" };
 
+// A small, clean 3-line diff on a single non-sensitive file — everything the
+// risk radar (F4 #158) reads via git, args-dispatched like the real runGit.
+const RISKY_UNIFIED_DIFF = [
+  "diff --git a/src/foo.ts b/src/foo.ts",
+  "index 1111111..2222222 100644",
+  "--- a/src/foo.ts",
+  "+++ b/src/foo.ts",
+  "@@ -10,0 +11,3 @@",
+  "+line1",
+  "+line2",
+  "+line3",
+].join("\n");
+
+const makeRiskyRunGit = () =>
+  vi.fn(async (args: string[]): Promise<{ stdout: string; stderr: string }> => {
+    if (args[0] === "diff" && args[1] === "--name-only") return { stdout: "src/foo.ts\n", stderr: "" };
+    if (args[0] === "diff" && args[1] === "--unified=0") return { stdout: RISKY_UNIFIED_DIFF, stderr: "" };
+    if (args[0] === "rev-parse") return { stdout: "cafefeed1234\n", stderr: "" };
+    return { stdout: "", stderr: "" }; // push and anything else
+  });
+
 describe("makePr", () => {
   it("AC5: push, PR creation and card handoff each fire exactly once across two runs of the same execution", async () => {
     const ledger = makeInMemoryActionLedgerRepository();
     const prLinks = makeInMemoryPrLinkRepository();
-    const runGit = vi.fn(async () => ({ stdout: "", stderr: "" }));
+    const runGit = vi.fn(async (_args: string[], _cwd: string) => ({ stdout: "", stderr: "" }));
 
     let prCreated = false;
     const createPullRequest = vi.fn(() =>
@@ -69,7 +90,10 @@ describe("makePr", () => {
 
     expect(r1).toEqual(r2);
     expect(r1).toMatchObject({ prUrl: CREATED_PR.url, prNumber: 42 });
-    expect(runGit).toHaveBeenCalledTimes(1);
+    // The push itself (ledger-guarded) fires exactly once across both runs —
+    // the risk-radar git diff/rev-parse calls added by #158 are read-only and
+    // legitimately repeat on every invocation, so count "push" specifically.
+    expect(runGit.mock.calls.filter(([args]) => args[0] === "push")).toHaveLength(1);
     expect(runGit).toHaveBeenCalledWith(["push", "-u", "origin", "openroutines/card-t1"], "/tmp/or-pr-test-wt");
     expect(createPullRequest).toHaveBeenCalledTimes(1);
     expect(getOpenPrByBranch).toHaveBeenCalledTimes(1);
@@ -146,5 +170,96 @@ describe("makePr", () => {
     await expect(makePr(deps)({ inputs, outputs: { preparacao }, executionId: "exec1", stateId: "pr" })).rejects.toThrow(
       /main\/master/
     );
+  });
+
+  describe("F4 #158: risk radar + green lane", () => {
+    const baseDeps = (registry: CardToPrDeps["registry"] = { repos: {} }): CardToPrDeps => ({
+      registry,
+      githubToken: "gh_test",
+      worktreeBase: "/tmp/or-pr-test-worktrees",
+      ledger: makeInMemoryActionLedgerRepository(),
+      prLinks: makeInMemoryPrLinkRepository(),
+      taskSourceFor: () => ({ moveTo: () => Effect.succeed(undefined), comment: () => Effect.succeed(undefined) }) as unknown as TaskSource,
+      makeGithub: (() => ({
+        getOpenPrByBranch: () => Effect.sync(() => undefined),
+        createPullRequest: (_b: string, _t: string, body: string) => {
+          lastCreatedBody = body;
+          return Effect.sync(() => ({ pr: CREATED_PR }));
+        },
+      })) as unknown as CardToPrDeps["makeGithub"],
+      runGit: makeRiskyRunGit(),
+    });
+
+    let lastCreatedBody = "";
+    beforeEach(() => {
+      lastCreatedBody = "";
+    });
+
+    const outputsWithVerify = (verify: Record<string, unknown> = {}) => ({
+      preparacao: preparacaoFixture(),
+      plano: { summary: "Add validation", testStrategy: "unit tests" },
+      verify: { passed: true, newFailures: [], knownFailures: [], diffLoc: 3, ...verify },
+    });
+
+    it("computes and persists risk_score/green_lane at PR creation; risk section at the TOP, rest collapsed in <details>", async () => {
+      const deps = baseDeps();
+
+      await makePr(deps)({ inputs, outputs: outputsWithVerify(), executionId: "exec-risk", stateId: "pr" });
+
+      expect(lastCreatedBody.startsWith("## 🎯 Revise isto primeiro")).toBe(true);
+      expect(lastCreatedBody.indexOf("<details>")).toBeGreaterThan(lastCreatedBody.indexOf("Revise isto primeiro"));
+      expect(lastCreatedBody).toContain("src/foo.ts#L11-L13");
+      expect(lastCreatedBody).toMatch(/⏱️ ~\d+ min/);
+
+      const links = await deps.prLinks.findByTask("trello-main", "card1");
+      expect(links).toHaveLength(1);
+      expect(links[0].riskScore).toBeTypeOf("number");
+      expect(links[0].greenLane).toBe(true); // tiny, clean, non-sensitive diff
+    });
+
+    it("a risky diff (dataChanges + auth path + new dependency) scores higher and is never green lane", async () => {
+      const deps = baseDeps();
+      const riskyOutputs = outputsWithVerify({ dataChanges: true, dependencyAudit: { new: ["left-pad"] } });
+
+      await makePr(deps)({ inputs, outputs: riskyOutputs, executionId: "exec-risky", stateId: "pr" });
+
+      const links = await deps.prLinks.findByTask("trello-main", "card1");
+      expect(links[0].greenLane).toBe(false);
+      expect(links[0].riskScore as number).toBeGreaterThan(0);
+    });
+
+    it("GREEN_LANE_ENABLED=false forces green_lane:false even for a 100% clean diff", async () => {
+      const original = process.env.GREEN_LANE_ENABLED;
+      process.env.GREEN_LANE_ENABLED = "false";
+      try {
+        const deps = baseDeps();
+        await makePr(deps)({ inputs, outputs: outputsWithVerify(), executionId: "exec-killswitch", stateId: "pr" });
+        const links = await deps.prLinks.findByTask("trello-main", "card1");
+        expect(links[0].greenLane).toBe(false);
+      } finally {
+        if (original === undefined) delete process.env.GREEN_LANE_ENABLED;
+        else process.env.GREEN_LANE_ENABLED = original;
+      }
+    });
+
+    it("repos.yaml critical:true forces green_lane:false even for a 100% clean diff", async () => {
+      const registry: CardToPrDeps["registry"] = {
+        repos: {
+          "acme-widgets": {
+            clonePath: "/tmp/or-pr-test-clone",
+            githubRepo: "acme/widgets",
+            baseBranch: "development",
+            verify: { build: "npm run build", test: "npm test" },
+            critical: true,
+          },
+        },
+      };
+      const deps = baseDeps(registry);
+
+      await makePr(deps)({ inputs, outputs: outputsWithVerify(), executionId: "exec-critical", stateId: "pr" });
+
+      const links = await deps.prLinks.findByTask("trello-main", "card1");
+      expect(links[0].greenLane).toBe(false);
+    });
   });
 });

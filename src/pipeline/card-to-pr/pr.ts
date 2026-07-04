@@ -11,6 +11,18 @@ import { Effect } from "effect";
 import type { ScriptHandler } from "../../script/registry.js";
 import { runIdempotent } from "../../persistence/idempotent-action.js";
 import { makeGitHubConnector } from "../../connector/github.js";
+import { resolveRepo } from "../../repo-registry/registry.js";
+import {
+  calculateRiskScore,
+  estimateReviewMinutes,
+  isGreenLane,
+  isSensitivePath,
+  countLowConfidenceFindings,
+  pickTopRiskyHunks,
+  buildRiskSection,
+  type RiskScoreInput,
+  type RiskyHunk,
+} from "../../report/risk-score.js";
 import { defaultRunGit, type CardToPrDeps } from "./index.js";
 import type { PreparacaoOutput } from "./preparacao.js";
 import type { VerifyOutput } from "./verify.js";
@@ -20,8 +32,24 @@ interface PlanoOutput {
   testStrategy?: string;
 }
 
-const buildPrBody = (plano: PlanoOutput | undefined, verify: VerifyOutput | undefined): string =>
+// The SAST issue (F4, parallel wave) will add these to VerifyOutput once it
+// lands (03-PIPELINE-EXECUCAO.md "Verify" row:
+// `{..., semgrepFindings[], dependencyAudit{new[],vulnerable[]}, dataChanges}`).
+// Read loosely and default to 0/false until then — nothing here breaks if
+// verify never emits them.
+interface VerifyRiskExtras {
+  dataChanges?: boolean;
+  semgrepFindings?: Array<{ confidence?: number }>;
+  dependencyAudit?: { new?: unknown[] };
+}
+
+const buildPrBody = (plano: PlanoOutput | undefined, verify: VerifyOutput | undefined, riskSection: string): string =>
   [
+    riskSection,
+    "",
+    "<details>",
+    "<summary>Ver evidência completa</summary>",
+    "",
     "## Summary",
     plano?.summary ?? "(no plan summary available)",
     "",
@@ -30,7 +58,45 @@ const buildPrBody = (plano: PlanoOutput | undefined, verify: VerifyOutput | unde
     "",
     "## Verify evidence",
     `known failures (pre-existing, not blocking): ${(verify?.knownFailures ?? []).join(", ") || "none"}`,
+    "",
+    "</details>",
   ].join("\n");
+
+// ponytail: a regex pass over `git diff --unified=0`, not a full diff parser —
+// good enough for the pilot's hunk-header shape. A rename whose old path
+// happens to contain " b/" could misparse the file name (rare); upgrade to a
+// real diff-parsing library if that ever bites.
+const DIFF_GIT_HEADER_RE = /^diff --git a\/.+ b\/(.+)$/;
+const HUNK_HEADER_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/;
+
+/** Unified-diff hunks -> RiskyHunk[], using new-file line numbers (the PR branch's own sha — what the permalink points at). */
+const parseRiskyHunks = (unifiedDiff: string): RiskyHunk[] => {
+  const hunks: RiskyHunk[] = [];
+  let file: string | undefined;
+  for (const line of unifiedDiff.split("\n")) {
+    const fileMatch = DIFF_GIT_HEADER_RE.exec(line);
+    if (fileMatch) {
+      file = fileMatch[1];
+      continue;
+    }
+    if (!file) continue;
+    const hunkMatch = HUNK_HEADER_RE.exec(line);
+    if (!hunkMatch) continue;
+    const start = Number(hunkMatch[1]);
+    const count = hunkMatch[2] !== undefined ? Number(hunkMatch[2]) : 1;
+    const end = count > 0 ? start + count - 1 : start;
+    hunks.push({
+      file,
+      startLine: start,
+      endLine: end,
+      reason: isSensitivePath(file) ? "toca caminho sensível (auth/payment/migration/webhook)" : `altera ${end - start + 1} linha(s)`,
+    });
+  }
+  return hunks;
+};
+
+/** GREEN_LANE_ENABLED kill switch (env, default "true"): only the literal "false" disables it. */
+const greenLaneEnabled = (): boolean => process.env.GREEN_LANE_ENABLED !== "false";
 
 const alreadyLinked = async (
   deps: CardToPrDeps,
@@ -79,8 +145,42 @@ export const makePr = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
   });
 
   const plano = ctx.outputs.plano as PlanoOutput | undefined;
-  const verify = ctx.outputs.verify as VerifyOutput | undefined;
-  const prBody = buildPrBody(plano, verify);
+  const verify = ctx.outputs.verify as (VerifyOutput & VerifyRiskExtras) | undefined;
+
+  // Risk radar (F4 #158, D29): computed once, right before the PR body is
+  // assembled. The git calls below are read-only (diff/rev-parse) — safe to
+  // redo on a crash-resume; only the pr_links write further down is guarded.
+  const { stdout: changedOut } = await runGit(["diff", "--name-only", preparacao.baseSha!, "HEAD"], worktree.path);
+  const changedFiles = changedOut.split("\n").filter(Boolean);
+  const { stdout: unifiedDiff } = await runGit(["diff", "--unified=0", preparacao.baseSha!, "HEAD"], worktree.path);
+  const { stdout: headShaOut } = await runGit(["rev-parse", "HEAD"], worktree.path);
+  const headSha = headShaOut.trim();
+
+  const riskInput: RiskScoreInput = {
+    diffLoc: verify?.diffLoc ?? 0,
+    dataChanges: Boolean(verify?.dataChanges),
+    touchesAuthOrMoney: changedFiles.some(isSensitivePath),
+    newDependencies: verify?.dependencyAudit?.new?.length ?? 0,
+    lowConfidenceFindings: countLowConfidenceFindings(verify?.semgrepFindings),
+    // No test-delta signal is wired anywhere yet (the red->green test-writer
+    // phase between gate_plano/implementacao, 03-PIPELINE-EXECUCAO.md L187,
+    // isn't in skill.yaml yet) — see openDecisions.
+    testDelta: 0,
+    // Fase 6 (validação visual) doesn't exist in skill.yaml yet — undefined
+    // passes isGreenLane's gate, per the interface's own contract.
+    visualConfidence: undefined,
+    repoCritical: resolveRepo(deps.registry, repo.slug)?.critical ?? false,
+  };
+  const riskScoreValue = calculateRiskScore(riskInput);
+  const greenLaneValue = isGreenLane(riskInput, { enabled: greenLaneEnabled() });
+  const riskSection = buildRiskSection({
+    repo: repo.githubRepo,
+    sha: headSha,
+    hunks: pickTopRiskyHunks(parseRiskyHunks(unifiedDiff)),
+    minutes: estimateReviewMinutes(riskInput),
+  });
+
+  const prBody = buildPrBody(plano, verify, riskSection);
 
   const prResult = await runIdempotent(
     deps.ledger,
@@ -91,7 +191,16 @@ export const makePr = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
       const existing = await Effect.runPromise(github.getOpenPrByBranch(branch));
       const pr = existing ?? (await Effect.runPromise(github.createPullRequest(branch, title, prBody, repo.baseBranch))).pr;
       if (!(await alreadyLinked(deps, sourceId, taskId, branch))) {
-        await deps.prLinks.create({ sourceId, taskId, repo: repo.slug, prNumber: pr.number, branch, status: "open" });
+        await deps.prLinks.create({
+          sourceId,
+          taskId,
+          repo: repo.slug,
+          prNumber: pr.number,
+          branch,
+          status: "open",
+          riskScore: riskScoreValue,
+          greenLane: greenLaneValue,
+        });
       }
       return { externalRef: pr.url };
     }

@@ -60,6 +60,27 @@ describe("3. RepoConfigSchema rejects baseBranch main/master", () => {
   });
 });
 
+describe("RepoConfigSchema.critical (F4 #158, D29)", () => {
+  const base = {
+    clonePath: "/x",
+    githubRepo: "owner/repo",
+    baseBranch: "development",
+    verify: { build: "npm run build", test: "npm test" },
+  };
+
+  it("defaults to false when absent", () => {
+    const result = RepoConfigSchema.safeParse(base);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.critical).toBe(false);
+  });
+
+  it("accepts an explicit critical: true", () => {
+    const result = RepoConfigSchema.safeParse({ ...base, critical: true });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.critical).toBe(true);
+  });
+});
+
 describe("loadRepoRegistry", () => {
   const originalEnv = process.env.REPOS_REGISTRY_PATH;
   const dirs: string[] = [];
