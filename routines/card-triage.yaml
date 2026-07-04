@@ -1,0 +1,6 @@
+id: card-triage
+triggers:
+  - type: schedule
+    cron: "*/30 8-23 * * *"
+pipeline:
+  skill: card-triage
