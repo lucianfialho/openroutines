@@ -26,6 +26,7 @@ import { makeVerify } from "./verify.js";
 import { makePr } from "./pr.js";
 import { makeBloqueado } from "./bloqueado.js";
 import { makeReworkPreparacao, makeReworkPergunta } from "./rework.js";
+import { makeVisual, type VisualDeps } from "./visual.js";
 
 /**
  * Named `type: fanout` aggregators for card-to-pr (F4 #153) — resolved by the
@@ -59,6 +60,12 @@ export interface CardToPrDeps {
    * (the identity git-worktree-tools configures in worktrees).
    */
   agentGitAuthors?: string[];
+  /**
+   * Visual phase deps (F5 #160) — the Kimi/vision providers + compose/SSIM/
+   * attach seams the `visual` state needs. Absent in flows that never reach
+   * `visual` (non-UI cards); the handler throws if invoked without it.
+   */
+  visual?: VisualDeps;
 }
 
 /**
@@ -82,6 +89,7 @@ export const defaultRunGit =
 export const registerCardToPrHandlers = (reg: ScriptRegistry, deps: CardToPrDeps): void => {
   reg.register("card-to-pr-preparacao", makePreparacao(deps));
   reg.register("card-to-pr-verify", makeVerify(deps));
+  reg.register("card-to-pr-visual", makeVisual(deps));
   reg.register("card-to-pr-pr", makePr(deps));
   reg.register("card-to-pr-bloqueado", makeBloqueado(deps));
   reg.register("card-to-pr-rework-preparacao", makeReworkPreparacao(deps));

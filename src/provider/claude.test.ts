@@ -104,6 +104,31 @@ describe("makeClaudeProvider", () => {
     expect(err.status).toBe(429);
   }, 10000);
 
+  it("appends `images` as base64 image blocks on the final user turn (F5 #160 vision)", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce(fakeResponse(200, successBody("claude-sonnet-5")));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const provider = makeClaudeProvider(config);
+    await Effect.runPromise(
+      provider.complete({
+        prompt: "Does this screen match the brand?",
+        images: [{ base64: "aGVsbG8=", mediaType: "image/png" }],
+      })
+    );
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body as string);
+    // The user turn is now a content-block array carrying the text + the image.
+    expect(body.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Does this screen match the brand?" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } },
+        ],
+      },
+    ]);
+  });
+
   it("propagates the model reported by the response, not the requested one", async () => {
     const mockFetch = vi
       .fn()

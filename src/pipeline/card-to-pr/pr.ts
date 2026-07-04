@@ -27,6 +27,7 @@ import { defaultRunGit, type CardToPrDeps } from "./index.js";
 import type { PreparacaoOutput } from "./preparacao.js";
 import type { ReworkPreparacaoOutput } from "./rework.js";
 import type { VerifyOutput } from "./verify.js";
+import type { VisualOutput } from "./visual.js";
 import type { ScriptContext } from "../../script/registry.js";
 
 interface PlanoOutput {
@@ -45,8 +46,30 @@ interface VerifyRiskExtras {
   dependencyAudit?: { new?: unknown[] };
 }
 
-const buildPrBody = (plano: PlanoOutput | undefined, verify: VerifyOutput | undefined, riskSection: string): string =>
-  [
+// Visual evidence line (F5 #160), per 03-PIPELINE-EXECUCAO.md's PR template:
+// "Visual: N/N asserções ✅ · SSIM rotas douradas ✅ · 0 console.error · [screenshots]".
+// Absent for non-UI cards (visual state never ran) → omitted from the body.
+const buildVisualLine = (visual: VisualOutput | undefined): string | undefined => {
+  if (!visual) return undefined;
+  const total = visual.assertions.length;
+  const passCount = visual.assertions.filter((a) => a.verdict === "pass").length;
+  const ssimOk = visual.ssim.every((s) => !s.regressed);
+  return [
+    `Visual: ${passCount}/${total} asserções ${total > 0 && passCount === total ? "✅" : "❌"}`,
+    `SSIM rotas douradas ${ssimOk ? "✅" : "❌"}`,
+    `${visual.consoleErrors.length} console.error`,
+    `${visual.screenshots.length} screenshot(s)`,
+  ].join(" · ");
+};
+
+const buildPrBody = (
+  plano: PlanoOutput | undefined,
+  verify: VerifyOutput | undefined,
+  riskSection: string,
+  visual: VisualOutput | undefined
+): string => {
+  const visualLine = buildVisualLine(visual);
+  return [
     riskSection,
     "",
     "<details>",
@@ -60,9 +83,11 @@ const buildPrBody = (plano: PlanoOutput | undefined, verify: VerifyOutput | unde
     "",
     "## Verify evidence",
     `known failures (pre-existing, not blocking): ${(verify?.knownFailures ?? []).join(", ") || "none"}`,
+    ...(visualLine ? ["", "## Visual", visualLine] : []),
     "",
     "</details>",
   ].join("\n");
+};
 
 // ponytail: a regex pass over `git diff --unified=0`, not a full diff parser —
 // good enough for the pilot's hunk-header shape. A rename whose old path
@@ -274,7 +299,8 @@ export const makePr = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
     minutes: estimateReviewMinutes(riskInput),
   });
 
-  const prBody = buildPrBody(plano, verify, riskSection);
+  const visual = ctx.outputs.visual as VisualOutput | undefined;
+  const prBody = buildPrBody(plano, verify, riskSection, visual);
 
   const prResult = await runIdempotent(
     deps.ledger,
