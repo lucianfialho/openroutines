@@ -29,8 +29,8 @@ import { sendTelegramAlert } from "../notify/telegram.js";
 import { isTierOpen, tierForComplexity } from "../engine/circuit-breaker.js";
 import { nextTier } from "../engine/retry-classifier.js";
 import type { RepoRegistry } from "../repo-registry/schema.js";
-import type { ExecutionRepository, ExecutionProcessRepository, PrLinkRepository, TaskRepository } from "../persistence/types.js";
-import type { TaskSource } from "../task-source/types.js";
+import type { ExecutionRepository, ExecutionProcessRepository, PrLink, PrLinkRepository, TaskRepository } from "../persistence/types.js";
+import type { TaskSource, TaskComplexity } from "../task-source/types.js";
 import type { JobQueue } from "../queue/types.js";
 
 export interface NightSummary {
@@ -40,6 +40,8 @@ export interface NightSummary {
   cardsSynced?: number;
   cardsClaimed?: number;
   cardsEnqueued?: number;
+  /** Rework rounds admitted this night (F4 #157, D24). */
+  reworkAdmitted?: number;
 }
 
 export interface RunNightCycleDeps {
@@ -129,17 +131,28 @@ const getBusyRepos = async (pool: Pool, nightId: string): Promise<Set<string>> =
  * ClaimedCard (Wave A) intentionally carries only identity + repo — enough
  * for the atomic claim and same-repo dedup. The card-to-pr skill also needs
  * title/description, so this hydrates them from `tasks` with the same pool.
+ *
+ * `altaImpl` (D9 "regra ALTA", F4 #185) has no upstream writer yet — no
+ * triage routine sets it and Task/TaskClassification (F2) carry no such
+ * field — so this is a best-effort bridge via a literal "altaImpl" label
+ * until that routine exists, not a designed contract.
  */
 const getTaskContent = async (
   pool: Pool,
   sourceId: string,
   taskId: string
-): Promise<{ title: string; description: string }> => {
-  const { rows } = await pool.query(`SELECT title, body FROM tasks WHERE source_id = $1 AND task_id = $2`, [
-    sourceId,
-    taskId,
-  ]);
-  return { title: String(rows[0]?.title ?? ""), description: String(rows[0]?.body ?? "") };
+): Promise<{ title: string; description: string; altaImpl: boolean; complexity?: TaskComplexity }> => {
+  const { rows } = await pool.query(
+    `SELECT title, body, labels, complexity FROM tasks WHERE source_id = $1 AND task_id = $2`,
+    [sourceId, taskId]
+  );
+  const labels = ((rows[0]?.labels as string[]) ?? []) as string[];
+  return {
+    title: String(rows[0]?.title ?? ""),
+    description: String(rows[0]?.body ?? ""),
+    altaImpl: labels.includes("altaImpl"),
+    complexity: (rows[0]?.complexity as TaskComplexity | null) ?? undefined,
+  };
 };
 
 const insertPendingExecution = async (
@@ -182,6 +195,101 @@ const syncQueuedCards = async (deps: RunNightCycleDeps): Promise<number> => {
   return synced;
 };
 
+/** Completed rework rounds allowed per card (D24) — the 3rd request blocks the card instead. */
+export const REWORK_MAX_ROUNDS = 2;
+
+/** Move an exhausted-rework card to Blocked. Deliberately NO Telegram alert — D22's taxonomy excludes it. */
+const blockExhaustedRework = async (deps: RunNightCycleDeps, link: PrLink): Promise<void> => {
+  const ts = deps.taskSourceFor?.(link.sourceId);
+  if (ts) {
+    await Effect.runPromise(ts.moveTo(link.taskId, "blocked"));
+    await Effect.runPromise(
+      ts.comment(
+        link.taskId,
+        `⛔ [Bloqueio]\nMotivo: retrabalho-esgotado\nO que falta: ${REWORK_MAX_ROUNDS} rodadas de retrabalho não satisfizeram o review do PR #${link.prNumber ?? "?"}\nPróximo passo: assumir o PR manualmente`
+      )
+    );
+  }
+  // Leaving 'changes_requested' would re-block every night AND let the poller
+  // re-open the card — this terminal review_state makes both skip it for good.
+  await deps.prLinks.update(
+    { sourceId: link.sourceId, taskId: link.taskId, branch: link.branch },
+    { reviewState: "rework-exhausted" }
+  );
+};
+
+/**
+ * Rework admission (F4 #157, D24) — runs BEFORE the normal claim loop. An open
+ * pr_link with review_state='changes_requested' is admitted at most when
+ * rework_count < REWORK_MAX_ROUNDS and it hasn't already reworked TONIGHT
+ * (last_rework_night_id — completed round — plus the claimed_by_night_id
+ * stamp below, which refuses a 2nd admission of the same card in the same
+ * night even before the first completes). At the cap it blocks with
+ * 'retrabalho-esgotado' instead.
+ */
+const admitReworkCards = async (deps: RunNightCycleDeps, nightId: string, generateId: () => string): Promise<number> => {
+  let admitted = 0;
+  // No prNumber -> the poller can never have marked it changes_requested; the
+  // filter is defense in depth against a hand-edited row.
+  const candidates = (await deps.prLinks.findOpen()).filter(
+    (l) => l.reviewState === "changes_requested" && l.prNumber !== undefined
+  );
+  for (const link of candidates) {
+    if ((link.reworkCount ?? 0) >= REWORK_MAX_ROUNDS) {
+      await blockExhaustedRework(deps, link);
+      continue;
+    }
+    if (link.lastReworkNightId === nightId) continue; // max 1 completed round/card/night
+    // Atomic per-night claim: the card keeps its old claimed_by_night_id after
+    // the original night, so "not claimed" here means "not claimed by THIS
+    // night" — stamping it refuses any 2nd admission tonight.
+    const { rows } = await deps.pool.query(
+      `UPDATE tasks SET claimed_by_night_id = $1
+       WHERE source_id = $2 AND task_id = $3 AND (claimed_by_night_id IS NULL OR claimed_by_night_id != $1)
+       RETURNING task_id`,
+      [nightId, link.sourceId, link.taskId]
+    );
+    if (rows.length === 0) continue; // already claimed tonight
+
+    const { title, description, altaImpl, complexity } = await getTaskContent(deps.pool, link.sourceId, link.taskId);
+    const executionId = generateId();
+    await insertPendingExecution(deps.pool, {
+      executionId,
+      nightId,
+      repo: link.repo,
+      sourceId: link.sourceId,
+      taskId: link.taskId,
+    });
+    await deps.queue.enqueue({
+      id: executionId,
+      trigger: {
+        type: "card-execution",
+        executionId,
+        payload: {
+          source_id: link.sourceId,
+          task_id: link.taskId,
+          repo: link.repo,
+          title,
+          description,
+          night_id: nightId,
+          executionId,
+          skill: "card-to-pr",
+          tier: tierForComplexity(complexity),
+          ...(complexity ? { complexity } : {}),
+          ...(altaImpl ? { altaImpl: true } : {}),
+          // Rework markers: the queue handler starts the machine at
+          // rework_preparacao when it sees rework:true.
+          rework: true,
+          prNumber: link.prNumber,
+          branch: link.branch,
+        },
+      },
+    });
+    admitted++;
+  }
+  return admitted;
+};
+
 export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSummary> => {
   const now = deps.now ?? (() => new Date());
   const generateId = deps.generateId ?? randomUUID;
@@ -222,6 +330,14 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
     // 3b. Ingest the sources' queued cards into `tasks` so the claim loop below
     // has rows to claim (F2's poller runtime is unwired — the night-run syncs).
     const cardsSynced = await syncQueuedCards(deps);
+
+    // 3c. Rework admission (F4 #157, D24) — BEFORE the normal claim loop, so
+    // PRs waiting on human-requested corrections take priority over new cards.
+    // Window-guarded like the claim loop: an out-of-window invocation (the
+    // hard-stop path below) must not enqueue new work.
+    const reworkAdmitted = isWithinWindow(now(), deps.nightWindowStart, deps.nightWindowEnd, deps.tz)
+      ? await admitReworkCards(deps, nightId, generateId)
+      : 0;
 
     // 4. Baseline pre-warm: OPTIONAL for this wave, skipped by choice. Each
     // card's preparacao computes its repo's baseline lazily and idempotently
@@ -319,7 +435,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
           tier = escalated;
         }
 
-        const { title, description } = await getTaskContent(deps.pool, card.sourceId, card.taskId);
+        const { title, description, altaImpl } = await getTaskContent(deps.pool, card.sourceId, card.taskId);
         const executionId = generateId();
         await insertPendingExecution(deps.pool, {
           executionId,
@@ -343,6 +459,11 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
               executionId,
               skill: "card-to-pr",
               tier,
+              // F4 #185 (D9): consumed by card-to-pr's implementacao dynamic
+              // routing — independent of `tier` above (that one is the
+              // circuit breaker's night-level bookkeeping bucket).
+              complexity: card.complexity,
+              ...(altaImpl ? { altaImpl: true } : {}),
             },
           },
         });
@@ -362,7 +483,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
       });
     }
 
-    return { started: true, nightId, cardsSynced, cardsClaimed, cardsEnqueued };
+    return { started: true, nightId, cardsSynced, cardsClaimed, cardsEnqueued, reworkAdmitted };
   } catch (err) {
     console.error(`[NightCoordinator] night cycle ${date} failed:`, err);
     await sendAlert(`🔥 night-run ${date} falhou: ${err instanceof Error ? err.message : String(err)}`);

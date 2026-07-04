@@ -25,7 +25,9 @@ import {
 } from "../../report/risk-score.js";
 import { defaultRunGit, type CardToPrDeps } from "./index.js";
 import type { PreparacaoOutput } from "./preparacao.js";
+import type { ReworkPreparacaoOutput } from "./rework.js";
 import type { VerifyOutput } from "./verify.js";
+import type { ScriptContext } from "../../script/registry.js";
 
 interface PlanoOutput {
   summary?: string;
@@ -117,7 +119,82 @@ const prNumberFromUrl = (url: string): number | undefined => {
   return m ? Number(m[1]) : undefined;
 };
 
+/**
+ * Rework completion (F4 #157, D24): push the corrections to the SAME branch
+ * (detached worktree HEAD -> refs/heads/<branch>, NEVER --force) and
+ * re-request review — this path NEVER creates a PR. Completing a round
+ * increments rework_count and stamps last_rework_night_id / the new
+ * last_agent_commit_sha, all inside one ledger-guarded step so a crash-resume
+ * can never double-count.
+ */
+const prForRework = async (deps: CardToPrDeps, ctx: ScriptContext, reworkPrep: ReworkPreparacaoOutput) => {
+  const worktree = reworkPrep.worktree!;
+  const repo = reworkPrep.repo!;
+  const sourceId = String(ctx.inputs.source_id);
+  const taskId = String(ctx.inputs.task_id);
+  const branch = worktree.branch;
+  const prNumber = reworkPrep.prNumber!;
+  const nightId = typeof ctx.inputs.night_id === "string" && ctx.inputs.night_id ? ctx.inputs.night_id : undefined;
+
+  const github = (deps.makeGithub ?? makeGitHubConnector)({ token: deps.githubToken, repo: repo.githubRepo });
+  const ts = deps.taskSourceFor(sourceId);
+  const runGit = deps.runGit ?? defaultRunGit(deps.githubToken);
+
+  await runIdempotent(deps.ledger, { executionId: ctx.executionId, stateId: "pr", actionKey: "git:push" }, async () => {
+    // Fast-forward push of the detached rework HEAD onto the PR branch. No -u,
+    // no --force (force-push is also denied in an earlier layer); an
+    // already-pushed HEAD makes the re-push a git no-op.
+    await runGit(["push", "origin", `HEAD:refs/heads/${branch}`], worktree.path);
+    return {};
+  });
+
+  const { stdout: headOut } = await runGit(["rev-parse", "HEAD"], worktree.path);
+  const newHeadSha = headOut.trim();
+
+  await runIdempotent(
+    deps.ledger,
+    { executionId: ctx.executionId, stateId: "pr", actionKey: "pr:rework-complete" },
+    async () => {
+      if ((reworkPrep.reviewers ?? []).length > 0) {
+        await Effect.runPromise(github.requestReview(prNumber, reworkPrep.reviewers!));
+      }
+      const link = (await deps.prLinks.findByTask(sourceId, taskId)).find((l) => l.branch === branch);
+      await deps.prLinks.update(
+        { sourceId, taskId, branch },
+        {
+          lastAgentCommitSha: newHeadSha,
+          reviewState: "re-requested",
+          reworkCount: (link?.reworkCount ?? 0) + 1,
+          ...(nightId ? { lastReworkNightId: nightId } : {}),
+        }
+      );
+      return {};
+    }
+  );
+
+  const prUrl = `https://github.com/${repo.githubRepo}/pull/${prNumber}`;
+  await runIdempotent(
+    deps.ledger,
+    { executionId: ctx.executionId, stateId: "pr", actionKey: "card:handoff" },
+    async () => {
+      if (ts) {
+        await Effect.runPromise(ts.moveTo(taskId, "review"));
+        await Effect.runPromise(ts.comment(taskId, `🔁 [Retrabalho] correções enviadas na mesma branch — review re-solicitado: ${prUrl}`));
+      }
+      return { externalRef: prUrl };
+    }
+  );
+
+  return { prUrl, prNumber, rework: true };
+};
+
 export const makePr = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
+  // Rework flow (F4 #157): entered at rework_preparacao, so `preparacao` is
+  // absent and `rework_preparacao` carries the worktree/repo — same branch
+  // push + re-request review, never a new PR.
+  const reworkPrep = ctx.outputs.rework_preparacao as ReworkPreparacaoOutput | undefined;
+  if (reworkPrep) return prForRework(deps, ctx, reworkPrep);
+
   const preparacao = ctx.outputs.preparacao as PreparacaoOutput;
   const worktree = preparacao.worktree!;
   const repo = preparacao.repo!;
@@ -198,6 +275,9 @@ export const makePr = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
           prNumber: pr.number,
           branch,
           status: "open",
+          // F4 #157: the rework human-commit guard diffs from the agent's last
+          // pushed sha — record it from day one or round 1 can never run.
+          lastAgentCommitSha: headSha,
           riskScore: riskScoreValue,
           greenLane: greenLaneValue,
         });

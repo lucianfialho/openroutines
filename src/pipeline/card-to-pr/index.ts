@@ -25,6 +25,7 @@ import { makePreparacao } from "./preparacao.js";
 import { makeVerify } from "./verify.js";
 import { makePr } from "./pr.js";
 import { makeBloqueado } from "./bloqueado.js";
+import { makeReworkPreparacao, makeReworkPergunta } from "./rework.js";
 
 /**
  * Named `type: fanout` aggregators for card-to-pr (F4 #153) — resolved by the
@@ -52,6 +53,12 @@ export interface CardToPrDeps {
   getBaseline?: typeof getOrCreateBaseline;
   /** Telegram alert seam (D22, F4 #186) — defaults to the real sender; tests inject a mock. */
   sendAlert?: typeof sendTelegramAlert;
+  /**
+   * Agent commit identity for the rework human-commit guard (F4 #157) —
+   * matched against git log %an/%ae. Defaults to DEFAULT_AGENT_GIT_AUTHORS
+   * (the identity git-worktree-tools configures in worktrees).
+   */
+  agentGitAuthors?: string[];
 }
 
 /**
@@ -77,4 +84,6 @@ export const registerCardToPrHandlers = (reg: ScriptRegistry, deps: CardToPrDeps
   reg.register("card-to-pr-verify", makeVerify(deps));
   reg.register("card-to-pr-pr", makePr(deps));
   reg.register("card-to-pr-bloqueado", makeBloqueado(deps));
+  reg.register("card-to-pr-rework-preparacao", makeReworkPreparacao(deps));
+  reg.register("card-to-pr-rework-pergunta", makeReworkPergunta(deps));
 };

@@ -648,11 +648,13 @@ export const resolveOutputPaths = (
   stateId: string
 ): { worktreePath: string | undefined; outputPath: string; templateOutputPath: string } => {
   // Legacy solve-issue stores the worktree under `create_worktree`; the F3
-  // thick-state skills (card-to-pr) store it under `preparacao`. Accept either
-  // so CLI states run inside the card's worktree, not the orchestrator's cwd.
+  // thick-state skills (card-to-pr) store it under `preparacao`; the rework
+  // flow (F4 #157) under `rework_preparacao`. Accept any so CLI states run
+  // inside the card's worktree, not the orchestrator's cwd.
   const worktreePath =
     (outputs.create_worktree as { worktree?: { path?: string } } | undefined)?.worktree?.path ??
-    (outputs.preparacao as { worktree?: { path?: string } } | undefined)?.worktree?.path;
+    (outputs.preparacao as { worktree?: { path?: string } } | undefined)?.worktree?.path ??
+    (outputs.rework_preparacao as { worktree?: { path?: string } } | undefined)?.worktree?.path;
   const outputPath = state.output_path ?? (worktreePath
     ? `${worktreePath}/.gates/outputs/${executionId}/${stateId}.output.yaml`
     : `.gates/outputs/${executionId}/${stateId}.output.yaml`);

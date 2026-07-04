@@ -21,6 +21,17 @@ inputs:
     - { name: description, type: string }
   optional:
     - { name: night_id, type: string }
+    # D9 (F4 #185) routing inputs — TaskComplexity (F2) and the "regra ALTA"
+    # triage flag. Both absent-safe: no complexity -> sonnet default (never
+    # kimi); no altaImpl -> false (routes by complexity alone).
+    - { name: complexity, type: string }
+    - { name: altaImpl, type: boolean }
+    # Rework loop (F4 #157, D24): set by the night-coordinator's rework
+    # admission; the queue handler then starts the machine at rework_preparacao
+    # instead of preparacao.
+    - { name: rework, type: boolean }
+    - { name: prNumber, type: integer }
+    - { name: branch, type: string }
 
 initial_state: preparacao
 
@@ -34,23 +45,60 @@ states:
       - { to: plano }
 
   plano:
-    description: Explore the repo and produce a plan.
+    description: >
+      Explore the repo and produce a plan; decides whether the architecture
+      gate (gate_plano) must approve it before implementation starts.
     provider: claude-cli
     model: claude-sonnet-5
     output_schema: .gates/skills/card-to-pr/schemas/plano.schema.json
     agent_prompt: |
       Card: {{inputs.title}}
       Descrição: {{inputs.description}}
+      Complexidade triada: {{inputs.complexity}}
       Worktree: {{outputs.preparacao.worktree.path}}
 
       Explore o repositório no worktree acima, produza um PLAN.md e emita um JSON com:
-      {summary, files[], estimatedLoc, dataChanges[], testStrategy, risks[]}.
-      Não altere código nesta fase — só planeje.
+      {summary, files[], estimatedLoc, dataChanges[], testStrategy, needsArchGate, risks[]}.
+      needsArchGate=true se a complexidade for High/Highest OU o plano tocar
+      schema/migration/autenticação/pagamento/dado sensível — mesmo em
+      complexidade menor. Não altere código nesta fase — só planeje.
     transitions:
+      - { to: gate_plano, when: "output.plano.needsArchGate == true" }
       - { to: implementacao }
+
+  gate_plano:
+    description: >
+      Architecture gate (F4 #185, D9): Opus judges the plan adversarially —
+      architecture A/B/C, raizes-architecture-principles, scope vs. card —
+      escalating to Fable only for an ambiguous/high-risk/unprecedented call,
+      never to avoid judging (the composite Opus(+Fable handoff) mechanics
+      live in the architecture-judge provider; here it's just a provider
+      name). Refuted once sends the plan back to `plano`; refuted twice
+      blocks the card (`on_exhausted`) instead of looping forever.
+    type: agent
+    provider: architecture-judge
+    model: claude-opus-4-8
+    output_schema: .gates/skills/card-to-pr/schemas/gate-plano.schema.json
+    agent_prompt: |
+      Julgue adversarialmente o plano abaixo: arquitetura A/B/C,
+      raizes-architecture-principles, escopo vs. card.
+
+      Card: {{inputs.title}} — {{inputs.description}}
+      Plano: {{outputs.plano}}
+
+      Emita um JSON com: {verdict: "aprovado"|"refutado", corrections: string[], escalate: boolean}.
+      escalate=true só se a decisão de arquitetura for nova/ambígua/de alto
+      risco/sem precedente — nunca para evitar julgar.
+    transitions:
+      - { to: implementacao, when: "output.gate_plano.verdict == 'aprovado'" }
+      - { to: plano, when: "output.gate_plano.verdict == 'refutado'", max_retries: 1, on_exhausted: bloqueado }
 
   implementacao:
     description: Implement the plan in the worktree and commit locally (never push).
+    # F4 #185 (D9): resolved per-card by the dispatcher's resolveDynamicProvider
+    # hook (complexity/altaImpl -> kimi/sonnet/opus). provider:/model: below
+    # are the static FALLBACK — used verbatim when no hook is wired.
+    dynamic_provider: true
     provider: claude-cli
     model: claude-sonnet-5
     output_schema: .gates/skills/card-to-pr/schemas/implementacao.schema.json
@@ -128,8 +176,9 @@ states:
       gap from the last `revisao` pass (correctness/conventions/data/security,
       including a security finding still open) as a delimited fix-list and
       decides, for the batch, whether to fix or contest with evidence.
-      #185 will route this state's tier dynamically (complexity routing); for
-      now it always runs at the card's original executor tier.
+      F4 #185's complexity routing covers plano/gate_plano/implementacao only
+      — refutacao deliberately stays static (claude-cli/claude-sonnet-5), not
+      a gap left for a future issue.
     type: agent
     provider: claude-cli
     model: claude-sonnet-5
@@ -142,8 +191,65 @@ states:
       - { to: implementacao, when: "output.refutacao.status == 'corrigir'" }
       - { to: revisao, when: "output.refutacao.status == 'contestado'" }
 
+  # ---- Rework loop (F4 #157, D24): PR got CHANGES_REQUESTED, the card came
+  # back for corrections ON THE SAME BRANCH. Entered directly (the queue
+  # handler starts at rework_preparacao for `rework: true` payloads); verify/
+  # revisao/pr are REUSED — pr detects the rework flow and pushes + re-requests
+  # review instead of creating a PR. The 2-round cap is per CARD (pr_links.
+  # rework_count, enforced by the night-coordinator's admission), not a
+  # max_retries of this graph.
+  rework_preparacao:
+    description: >
+      Recreate a worktree from the PR branch's remote head (detached, no new
+      branch), abort on any human commit since the agent's last push (never
+      overwrite — ask for direction instead), and build the delimited
+      fix-list from the review comments.
+    type: script
+    script: card-to-pr-rework-preparacao
+    transitions:
+      - { to: done, when: "output.rework_preparacao.aborted == true" }
+      - { to: rework }
+
+  rework:
+    description: >
+      Apply the human review's fix-list on the same branch (commit-only, D13:
+      the orchestrator owns push/re-request). Routed by the card's ORIGINAL
+      D9 tier via the same resolveDynamicProvider hook as implementacao;
+      static provider:/model: below are the unrouted fallback. Ambiguous
+      feedback -> needsClarification (the orchestrator posts the question on
+      the PR thread; no rework round is counted).
+    type: agent
+    dynamic_provider: true
+    provider: claude-cli
+    model: claude-sonnet-5
+    output_schema: .gates/skills/card-to-pr/schemas/rework.schema.json
+    agent_prompt_file: .gates/skills/card-to-pr/prompts/rework.md
+    tools:
+      - read_file
+      - edit_file
+      - write_file
+      - run_shell
+      - git_commit
+      - emit_output
+    transitions:
+      - { to: rework_pergunta, when: "output.rework.needsClarification == true" }
+      - { to: verify }
+
+  rework_pergunta:
+    description: >
+      Orchestrator-side effect of an ambiguous review: post the agent's
+      question on the PR thread (D13) and end without counting a round.
+    type: script
+    script: card-to-pr-rework-pergunta
+    transitions:
+      - { to: done }
+
   pr:
-    description: Push, open PR to the integration branch, hand the card off to Review — all idempotent.
+    description: >
+      Push, open PR to the integration branch, hand the card off to Review —
+      all idempotent. In the rework flow: push to the SAME branch (never
+      --force) + re-request review, NEVER a new PR; completing the round
+      increments pr_links.rework_count.
     type: script
     script: card-to-pr-pr
     transitions:

@@ -142,6 +142,10 @@ describe("card-to-pr E2E (#146, #153)", () => {
       // pre-existing engine quirk that would reject an LLM's typical
       // whole-number LOC estimate in production too (see deviationsFromSpec).
       dataChanges: [],
+      // needsArchGate:false (F4 #185) — this happy-path fixture goes straight
+      // to implementacao, never through gate_plano; see gate-plano.e2e.test.ts
+      // for the architecture-gate flow.
+      needsArchGate: false,
       risks: [],
     });
     const implementacaoJson = JSON.stringify({

@@ -64,6 +64,13 @@ describe("resolveOutputPaths", () => {
     expect(r.worktreePath).toBe("/wt/card-x");
     expect(r.outputPath).toBe("/wt/card-x/.gates/outputs/exec1/implementacao.output.yaml");
   });
+
+  it("derives the worktree from the F4 #157 `rework_preparacao` output key too (rework flow)", () => {
+    const outputs = { rework_preparacao: { worktree: { path: "/wt/rework-x" } } };
+    const r = resolveOutputPaths(state({}), outputs, "exec1", "rework");
+    expect(r.worktreePath).toBe("/wt/rework-x");
+    expect(r.outputPath).toBe("/wt/rework-x/.gates/outputs/exec1/rework.output.yaml");
+  });
 });
 
 describe("buildContext", () => {

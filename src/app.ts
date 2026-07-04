@@ -61,16 +61,18 @@ import { makePostgresTaskRepository } from "./persistence/task-postgres.js";
 import { loadTaskSources, type ResolvedTaskSource } from "./task-source/loader.js";
 import { makeTrelloTaskSource } from "./connector/trello.js";
 import { makeRestTaskSource } from "./task-source/rest-executor.js";
-import type { TaskSource } from "./task-source/types.js";
+import type { TaskSource, TaskComplexity } from "./task-source/types.js";
 import { registerCardToPrHandlers, cardToPrFanoutAggregators } from "./pipeline/card-to-pr/index.js";
+import { resolveCardToPrProvider, resolveImplementationTier, resolveEscalatedProvider } from "./pipeline/card-to-pr/routing.js";
 import { registerMorningReportHandlers, makeTrelloCreateCard, MORNING_REPORT_TRELLO_LIST } from "./pipeline/morning-report/index.js";
-import { runStateMachine, type StateMachineConfig, type StateMachineContext } from "./engine/state-machine.js";
+import { runStateMachine, type StateMachineConfig, type StateMachineContext, type DynamicProviderContext } from "./engine/state-machine.js";
 import { recordTierOutcome, type Tier } from "./engine/circuit-breaker.js";
 import type { SkillStateMachine } from "./skill/schema.js";
 import type { TriggerEvent } from "./routine/matcher.js";
-import { reserveBudget, BUDGET_UNIT_WEIGHTS, type BudgetTier } from "./night-coordinator/budget.js";
+import { reserveBudget, BUDGET_UNIT_WEIGHTS, normalizeBudgetTier } from "./night-coordinator/budget.js";
 import { runNightCycle, type RunNightCycleDeps } from "./night-coordinator/run.js";
 import { runNightHardStop } from "./night-coordinator/hard-stop.js";
+import { runPrReviewPoll, type PrReviewPollDeps } from "./trigger/pr-review-poller.js";
 
 /**
  * Build a TaskSource from one loaded task-sources.yaml entry (F2 #144 left
@@ -89,6 +91,29 @@ const buildTaskSource = (resolved: ResolvedTaskSource): TaskSource => {
     return makeTrelloTaskSource({ manifest, sourceId: entry.id, boardId: entry.containers.board ?? "", apiKey, apiToken });
   }
   return makeRestTaskSource({ manifest, sourceId: entry.id, containers: entry.containers, authEnv: entry.auth });
+};
+
+/**
+ * Complexity routing hook (F4 #185, D9) for card-to-pr's dispatch — wired as
+ * `StateMachineConfig.resolveDynamicProvider` for the `card-to-pr` skill.
+ * Only `implementacao` declares `dynamic_provider: true` in skill.yaml
+ * (`plano`/`gate_plano` stay static; routing.ts's fixed routes for them exist
+ * only as the one auditable source of truth, never wired here) — an
+ * unescalated call resolves straight from the card's complexity/altaImpl
+ * inputs, an escalated one (F4 #159: the verify->implementacao retry cap just
+ * exhausted) bumps one tier up the same D9 ladder instead of re-deriving it
+ * from scratch.
+ */
+export const resolveCardToPrDynamicProvider = (
+  ctx: DynamicProviderContext
+): { provider: string; model?: string } | undefined => {
+  // `rework` (F4 #157, D24) routes exactly like implementacao: the card's
+  // ORIGINAL D9 tier from the same complexity/altaImpl inputs.
+  if (ctx.stateId !== "implementacao" && ctx.stateId !== "rework") return undefined;
+  const complexity = ctx.inputs.complexity as TaskComplexity | undefined;
+  const altaImpl = ctx.inputs.altaImpl as boolean | undefined;
+  if (!ctx.escalated) return resolveCardToPrProvider(ctx.stateId, { complexity, altaImpl });
+  return resolveEscalatedProvider(resolveImplementationTier({ complexity, altaImpl }));
 };
 
 export interface AppConfig {
@@ -329,7 +354,7 @@ export const createApp = async (config: AppConfig) => {
         const { rows } = await pgPool.query("SELECT night_id FROM executions WHERE id = $1", [executionId]);
         const nightId = rows[0]?.night_id as string | undefined;
         if (!nightId) return { granted: true }; // no night = manual run, no cap
-        const resolvedTier = (tier in BUDGET_UNIT_WEIGHTS ? tier : "claude-sonnet-5") as BudgetTier;
+        const resolvedTier = normalizeBudgetTier(tier);
         return reserveBudget(pgPool, {
           nightId,
           executionId,
@@ -441,6 +466,10 @@ export const createApp = async (config: AppConfig) => {
             // an index signature on the nominal type; not modifying
             // src/review/aggregate.ts's own return type for this.
             fanoutAggregators: cardToPrFanoutAggregators as unknown as StateMachineConfig["fanoutAggregators"],
+            // F4 #185 (D9): routes implementacao's provider/model by the
+            // card's complexity/altaImpl (falls back to the YAML's static
+            // claude-cli/claude-sonnet-5 for every other state, unchanged).
+            resolveDynamicProvider: resolveCardToPrDynamicProvider,
           };
         }
       } catch (err) {
@@ -502,6 +531,8 @@ export const createApp = async (config: AppConfig) => {
   // final value; both only read it once actually invoked, well after createApp
   // has finished assigning it.
   let nightCoordinatorDeps: RunNightCycleDeps | undefined;
+  // PR-review poller deps (F4 #157) — same gating/lifecycle as the coordinator.
+  let prReviewPollDeps: PrReviewPollDeps | undefined;
 
   // 6. Setup queue (connects to engine)
   const queueHandler = async (job: { id?: string; routineId?: string; trigger: { type: string; payload: unknown; executionId?: string } }) => {
@@ -515,6 +546,19 @@ export const createApp = async (config: AppConfig) => {
       }
       const summary = await runNightCycle(nightCoordinatorDeps);
       console.log(`[Queue] Night cycle: ${JSON.stringify(summary)}`);
+      return;
+    }
+
+    // PR-review poll tick (F4 #157): sweep open pr_links for review-state
+    // transitions (CHANGES_REQUESTED -> card back to Working, merged/closed ->
+    // link closed). Same interception pattern as night-run.
+    if (job.routineId === "pr-review-poll" && job.trigger.type === "schedule") {
+      if (!prReviewPollDeps) {
+        console.warn("[Queue] pr-review-poll cron fired but the poller is not wired (need DATABASE_URL + GITHUB_TOKEN + repos.yaml)");
+        return;
+      }
+      const summary = await runPrReviewPoll(prReviewPollDeps);
+      console.log(`[Queue] PR review poll: ${JSON.stringify(summary)}`);
       return;
     }
 
@@ -559,6 +603,13 @@ export const createApp = async (config: AppConfig) => {
       if (!executionId) {
         console.error("[Queue] card-execution job missing executionId, dropping");
         return;
+      }
+      // Rework admission (F4 #157): a fresh rework job enters the machine at
+      // rework_preparacao, not preparacao. A persisted (crash-resume) context
+      // above always wins — it already points at the right state.
+      if (!stateMachineContext && (job.trigger.payload as { rework?: boolean } | null)?.rework === true) {
+        stateMachineContext = { currentState: "rework_preparacao", outputs: {} };
+        console.log(`[Queue] card-execution ${executionId} is a rework round — starting at rework_preparacao`);
       }
       // runStateMachine never itself transitions executions.status to 'running'
       // (only fail/succeed/pause) — mark it here (fresh start or resume alike)
@@ -662,7 +713,14 @@ export const createApp = async (config: AppConfig) => {
       taskSourceFor: (id) => cardTaskSources?.get(id),
       taskRepo: makePostgresTaskRepository(pgPool),
     };
+    prReviewPollDeps = {
+      prLinks,
+      registry: repoRegistry,
+      githubToken: config.githubToken,
+      taskSourceFor: (id) => cardTaskSources?.get(id),
+    };
     console.log("[App] Night coordinator wired (POST /trigger/night-run, cron 0 1 * * *)");
+    console.log("[App] PR-review poller wired (cron */30 8-22 * * *)");
   } else {
     console.log("[App] Night coordinator not wired (need DATABASE_URL + GITHUB_TOKEN + repos.yaml)");
   }

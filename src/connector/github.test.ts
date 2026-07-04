@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Effect, Cause } from "effect";
-import { makeGitHubConnector, GitHubCliError } from "./github.js";
+import { makeGitHubConnector, aggregateReviewState, GitHubCliError } from "./github.js";
 
 let mockStdout = "";
 let mockStderr = "";
@@ -139,6 +139,78 @@ describe("makeGitHubConnector", () => {
     } finally {
       delete process.env.DATABASE_URL;
     }
+  });
+
+  describe("F4 #157: review polling / rework methods", () => {
+    it("listPullRequestReviews aggregates latest reviews (CHANGES_REQUESTED wins) and returns pr state + pending re-requests", async () => {
+      mockStdout = JSON.stringify({
+        state: "OPEN",
+        latestReviews: [
+          { author: { login: "alice" }, state: "APPROVED", body: "lgtm" },
+          { author: { login: "bob" }, state: "CHANGES_REQUESTED", body: "fix the null check" },
+        ],
+        reviewRequests: [{ login: "bob" }],
+      });
+
+      const connector = makeGitHubConnector(config);
+      const result = await Effect.runPromise(connector.listPullRequestReviews(7));
+
+      expect(result.prState).toBe("OPEN");
+      expect(result.reviewState).toBe("CHANGES_REQUESTED");
+      expect(result.changesRequestedBy).toEqual(["bob"]);
+      expect(result.pendingReviewRequests).toEqual(["bob"]);
+      expect(calls[0].file).toBe("gh");
+      expect(calls[0].args).toEqual(["pr", "view", "7", "--json", "state,latestReviews,reviewRequests"]);
+    });
+
+    it("aggregateReviewState: APPROVED without CHANGES_REQUESTED; COMMENTED only; PENDING when empty", () => {
+      expect(aggregateReviewState([{ state: "APPROVED" }, { state: "COMMENTED" }])).toBe("APPROVED");
+      expect(aggregateReviewState([{ state: "COMMENTED" }])).toBe("COMMENTED");
+      expect(aggregateReviewState([])).toBe("PENDING");
+    });
+
+    it("listReviewComments maps file/line/body/author from the REST endpoint (line falls back to original_line)", async () => {
+      mockStdout = JSON.stringify([
+        { path: "src/a.ts", line: 12, body: "rename this", user: { login: "bob" } },
+        { path: "src/b.ts", line: null, original_line: 30, body: "off by one", user: { login: "carol" } },
+      ]);
+
+      const connector = makeGitHubConnector(config);
+      const result = await Effect.runPromise(connector.listReviewComments(7));
+
+      expect(result).toEqual([
+        { file: "src/a.ts", line: 12, body: "rename this", author: "bob" },
+        { file: "src/b.ts", line: 30, body: "off by one", author: "carol" },
+      ]);
+      expect(calls[0].args).toEqual(["api", "repos/{owner}/{repo}/pulls/7/comments"]);
+    });
+
+    it("requestReview POSTs each reviewer as a distinct -f argv pair; empty list is a no-op", async () => {
+      const connector = makeGitHubConnector(config);
+      await Effect.runPromise(connector.requestReview(7, []));
+      expect(calls).toHaveLength(0); // no gh call for an empty reviewer list
+
+      await Effect.runPromise(connector.requestReview(7, ["bob", "carol"]));
+      expect(calls[0].args).toEqual([
+        "api", "repos/{owner}/{repo}/pulls/7/requested_reviewers",
+        "-X", "POST",
+        "-f", "reviewers[]=bob",
+        "-f", "reviewers[]=carol",
+      ]);
+    });
+
+    it("requestReview rejects a malformed login before any gh call", async () => {
+      const connector = makeGitHubConnector(config);
+      const exit = await Effect.runPromiseExit(connector.requestReview(7, ["bob; rm -rf /"]));
+      expect(exit._tag).toBe("Failure");
+      expect(calls).toHaveLength(0);
+    });
+
+    it("commentOnPullRequest uses gh pr comment with the body as one argv element", async () => {
+      const connector = makeGitHubConnector(config);
+      await Effect.runPromise(connector.commentOnPullRequest(7, "pergunta?"));
+      expect(calls[0].args).toEqual(["pr", "comment", "7", "--body", "pergunta?"]);
+    });
   });
 
   it("should fail when gh returns error", async () => {

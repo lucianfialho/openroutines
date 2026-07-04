@@ -172,6 +172,100 @@ describe("makePr", () => {
     );
   });
 
+  describe("F4 #157: rework completion path (D24)", () => {
+    const reworkOutputs = () => ({
+      rework_preparacao: {
+        aborted: false,
+        prNumber: 42,
+        reviewers: ["bob"],
+        worktree: { path: "/tmp/or-rework-wt", branch: "openroutines/card-t1" },
+        baseSha: "mergebase123",
+        repo: preparacaoFixture().repo,
+      },
+      rework: { needsClarification: false, filesTouched: ["src/foo.ts"], commits: ["abc fix"], notes: "" },
+      verify: { passed: true, newFailures: [], knownFailures: [] },
+    });
+    const reworkInputs = { ...inputs, night_id: "night-2", rework: true, prNumber: 42, branch: "openroutines/card-t1" };
+
+    const makeReworkHarness = async () => {
+      const ledger = makeInMemoryActionLedgerRepository();
+      const prLinks = makeInMemoryPrLinkRepository();
+      await prLinks.create({
+        sourceId: "trello-main",
+        taskId: "card1",
+        repo: "acme-widgets",
+        prNumber: 42,
+        branch: "openroutines/card-t1",
+        status: "open",
+        reviewState: "changes_requested",
+        lastAgentCommitSha: "oldsha",
+        reworkCount: 0,
+      });
+      const runGit = vi.fn(async (args: string[]): Promise<{ stdout: string; stderr: string }> =>
+        args[0] === "rev-parse" ? { stdout: "newhead789\n", stderr: "" } : { stdout: "", stderr: "" }
+      );
+      const createPullRequest = vi.fn();
+      const getOpenPrByBranch = vi.fn();
+      const requestReview = vi.fn(() => Effect.succeed(undefined));
+      const makeGithub = vi.fn(() => ({ createPullRequest, getOpenPrByBranch, requestReview })) as unknown as CardToPrDeps["makeGithub"];
+      const moveTo = vi.fn(() => Effect.succeed(undefined));
+      const comment = vi.fn(() => Effect.succeed(undefined));
+      const deps: CardToPrDeps = {
+        registry: { repos: {} },
+        githubToken: "gh_test",
+        worktreeBase: "/tmp/or-pr-test-worktrees",
+        ledger,
+        prLinks,
+        taskSourceFor: () => ({ moveTo, comment }) as unknown as TaskSource,
+        makeGithub,
+        runGit,
+      };
+      return { deps, prLinks, runGit, createPullRequest, getOpenPrByBranch, requestReview, moveTo, comment };
+    };
+
+    it("AC: pushes the SAME branch (never --force, never -u/new branch) + requestReview; github_create_pull_request is NEVER called", async () => {
+      const h = await makeReworkHarness();
+
+      const r = await makePr(h.deps)({ inputs: reworkInputs, outputs: reworkOutputs(), executionId: "exec-rw", stateId: "pr" });
+
+      const push = h.runGit.mock.calls.find(([args]) => args[0] === "push");
+      expect(push).toBeDefined();
+      // Detached rework HEAD -> the PR's own branch ref, plain fast-forward.
+      expect(push![0]).toEqual(["push", "origin", "HEAD:refs/heads/openroutines/card-t1"]);
+      expect(push![0]).not.toContain("--force");
+      expect(push![0]).not.toContain("-f");
+      expect(push![0]).not.toContain("-u");
+      expect(push![1]).toBe("/tmp/or-rework-wt");
+
+      expect(h.requestReview).toHaveBeenCalledTimes(1);
+      expect(h.requestReview).toHaveBeenCalledWith(42, ["bob"]);
+      // NEVER a new PR in the rework path (explicit AC)
+      expect(h.createPullRequest).not.toHaveBeenCalled();
+      expect(h.getOpenPrByBranch).not.toHaveBeenCalled();
+      expect(r).toMatchObject({ prNumber: 42, rework: true });
+    });
+
+    it("AC: completing the round updates pr_links — rework_count+1, last_agent_commit_sha = new HEAD, review_state 're-requested', last_rework_night_id — exactly once across two runs (idempotent)", async () => {
+      const h = await makeReworkHarness();
+      const handler = makePr(h.deps);
+
+      await handler({ inputs: reworkInputs, outputs: reworkOutputs(), executionId: "exec-rw", stateId: "pr" });
+      await handler({ inputs: reworkInputs, outputs: reworkOutputs(), executionId: "exec-rw", stateId: "pr" });
+
+      const link = (await h.prLinks.findByTask("trello-main", "card1"))[0];
+      expect(link.reworkCount).toBe(1); // NOT 2 — ledger-guarded increment
+      expect(link.lastAgentCommitSha).toBe("newhead789");
+      expect(link.reviewState).toBe("re-requested");
+      expect(link.lastReworkNightId).toBe("night-2");
+      expect(h.runGit.mock.calls.filter(([args]) => args[0] === "push")).toHaveLength(1);
+      expect(h.requestReview).toHaveBeenCalledTimes(1);
+      // card handed back to Review with a pt-BR note
+      expect(h.moveTo).toHaveBeenCalledTimes(1);
+      expect(h.moveTo).toHaveBeenCalledWith("card1", "review");
+      expect(h.comment).toHaveBeenCalledWith("card1", expect.stringContaining("Retrabalho"));
+    });
+  });
+
   describe("F4 #158: risk radar + green lane", () => {
     const baseDeps = (registry: CardToPrDeps["registry"] = { repos: {} }): CardToPrDeps => ({
       registry,
@@ -215,6 +309,8 @@ describe("makePr", () => {
       expect(links).toHaveLength(1);
       expect(links[0].riskScore).toBeTypeOf("number");
       expect(links[0].greenLane).toBe(true); // tiny, clean, non-sensitive diff
+      // F4 #157: creation records the agent's HEAD — the first rework round's human-commit guard baseline
+      expect(links[0].lastAgentCommitSha).toBe("cafefeed1234");
     });
 
     it("a risky diff (dataChanges + auth path + new dependency) scores higher and is never green lane", async () => {

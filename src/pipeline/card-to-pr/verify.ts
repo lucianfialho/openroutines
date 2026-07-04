@@ -59,7 +59,9 @@ const isUIFile = (p: string): boolean => /\.(tsx|jsx)$/.test(p);
 const isDataChangeFile = (p: string): boolean => /\.prisma$/.test(p) || /(^|\/)migrations\//.test(p) || /\.sql$/.test(p);
 
 export const makeVerify = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
-  const preparacao = ctx.outputs.preparacao as PreparacaoOutput;
+  // Rework flow (F4 #157) enters at rework_preparacao, whose output is
+  // field-compatible with PreparacaoOutput for everything verify reads.
+  const preparacao = (ctx.outputs.preparacao ?? ctx.outputs.rework_preparacao) as PreparacaoOutput;
   const wt = preparacao.worktree!.path;
   const base = preparacao.baseSha!;
   const verifyCommands = preparacao.repo!.verify;

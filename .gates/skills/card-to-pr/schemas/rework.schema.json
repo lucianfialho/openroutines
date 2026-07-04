@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "card-to-pr rework output",
+  "type": "object",
+  "required": ["needsClarification"],
+  "properties": {
+    "needsClarification": { "type": "boolean" },
+    "question": { "type": "string" },
+    "filesTouched": { "type": "array", "items": { "type": "string" } },
+    "commits": { "type": "array", "items": { "type": "string" } },
+    "notes": { "type": "string" }
+  }
+}
