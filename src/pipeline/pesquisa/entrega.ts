@@ -7,15 +7,16 @@
  * phase; <= 2 becomes loose issues. Then the card gets a 3-5 line summary
  * comment, the .md attachment, and a move to Review.
  *
- * ponytail: no action-ledger idempotency here (unlike card-to-pr/pr.ts). A
- * process crash mid-delivery + resume re-runs this state from scratch, which
- * could mint a duplicate milestone/issue — low-harm for a research card (a
- * human dedupes two issues) and rare. Wrap each effect in runIdempotent (the
- * ledger seam pr.ts uses) if duplicate delivery ever becomes a real problem.
+ * Idempotency (F5 #162 hardening): when a ledger is wired, the GitHub delivery
+ * (milestone + issues) and the card handoff (comment + attach + move) each fire
+ * at most once per (executionId, actionKey) — a crash mid-delivery + resume no
+ * longer mints a duplicate milestone/issue on GitHub. Without a ledger (the
+ * legacy e2e harness) it runs directly, unchanged.
  */
 import { Effect } from "effect";
 import type { ScriptHandler } from "../../script/registry.js";
 import type { TaskArtifact } from "../../task-source/types.js";
+import { runIdempotent } from "../../persistence/idempotent-action.js";
 import { resolveGithub, type PesquisaDeps } from "./index.js";
 import type { LevantamentoDoc } from "./levantamento.js";
 import type { JulgamentoVerdict } from "./julgamento.js";
@@ -122,23 +123,35 @@ export const makeEntrega = (deps: PesquisaDeps): ScriptHandler => async (ctx) =>
 
   const fullMd = formatProposalMarkdown(title, doc, parecer);
 
+  // Fire an external effect at most once per (executionId, actionKey) when a
+  // ledger is wired; otherwise run it directly (legacy path). Same guard pr.ts
+  // uses — a crash mid-delivery + resume never re-creates the GitHub issues.
+  const once = async (
+    actionKey: string,
+    run: () => Promise<{ externalRef?: string }>
+  ): Promise<{ externalRef?: string }> => {
+    if (!deps.ledger) return run();
+    return runIdempotent(deps.ledger, { executionId: ctx.executionId, stateId: ctx.stateId, actionKey }, run);
+  };
+
   // GitHub: file against the product repo (the card's first resolved repo). A
   // docs/ecosystem card with no resolvable repo still delivers to the card
-  // (issueUrl stays "").
+  // (issueUrl stays ""). externalRef carries {issueUrl, milestoneUrl} so a
+  // ledger-skip resume recovers both without re-hitting GitHub.
   const targetRepo = prep?.repos?.[0]?.githubRepo;
-  let issueUrl = "";
-  let milestoneUrl: string | undefined;
-  if (targetRepo) {
+  const delivery = await once("github:delivery", async () => {
+    if (!targetRepo) return { externalRef: JSON.stringify({ issueUrl: "" }) };
     const github = resolveGithub(deps, targetRepo);
     const phases = doc.phases;
     const useMilestone = phases.length >= 3;
     const effectivePhases = phases.length > 0 ? phases : ["(proposta completa — sem fases discretas)"];
 
     let milestoneNumber: number | undefined;
+    let msUrl: string | undefined;
     if (useMilestone) {
       const ms = await Effect.runPromise(github.createMilestone(`Pesquisa: ${clip(title, 120)}`, doc.summary));
       milestoneNumber = ms.number;
-      milestoneUrl = ms.url;
+      msUrl = ms.url;
     }
 
     const createdUrls: string[] = [];
@@ -152,35 +165,38 @@ export const makeEntrega = (deps: PesquisaDeps): ScriptHandler => async (ctx) =>
       );
       createdUrls.push(issue.url);
     }
-    issueUrl = createdUrls[0] ?? "";
-  }
+    return { externalRef: JSON.stringify({ issueUrl: createdUrls[0] ?? "", milestoneUrl: msUrl }) };
+  });
+  const { issueUrl, milestoneUrl } = JSON.parse(delivery.externalRef ?? '{"issueUrl":""}') as {
+    issueUrl: string;
+    milestoneUrl?: string;
+  };
 
   // Card: summary comment + full .md attachment + move to Review.
   const ts = deps.taskSourceFor(sourceId);
-  let cardCommentPosted = false;
-  let attachmentPosted = false;
   if (ts) {
-    const artifact: TaskArtifact = {
-      filename: `pesquisa-${slugify(taskId)}.md`,
-      content: fullMd,
-      mimeType: "text/markdown",
-    };
-    await Effect.runPromise(
-      ts.comment(
-        taskId,
-        buildCardComment(doc, parecer, milestoneUrl ?? issueUrl, Boolean(milestoneUrl), doc.phases.length || 1)
-      )
-    );
-    cardCommentPosted = true;
-    await Effect.runPromise(ts.attachArtifact(taskId, artifact));
-    attachmentPosted = true;
-    await Effect.runPromise(ts.moveTo(taskId, "review"));
+    await once("card:handoff", async () => {
+      const artifact: TaskArtifact = {
+        filename: `pesquisa-${slugify(taskId)}.md`,
+        content: fullMd,
+        mimeType: "text/markdown",
+      };
+      await Effect.runPromise(
+        ts.comment(
+          taskId,
+          buildCardComment(doc, parecer, milestoneUrl ?? issueUrl, Boolean(milestoneUrl), doc.phases.length || 1)
+        )
+      );
+      await Effect.runPromise(ts.attachArtifact(taskId, artifact));
+      await Effect.runPromise(ts.moveTo(taskId, "review"));
+      return { externalRef: issueUrl || milestoneUrl || taskId };
+    });
   }
 
   return {
     issueUrl,
     ...(milestoneUrl ? { milestoneUrl } : {}),
-    cardCommentPosted,
-    attachmentPosted,
+    cardCommentPosted: Boolean(ts),
+    attachmentPosted: Boolean(ts),
   } satisfies EntregaOutput;
 };

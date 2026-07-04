@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { Effect } from "effect";
 import { makeEntrega, formatProposalMarkdown, type EntregaOutput } from "./entrega.js";
+import { makeInMemoryActionLedgerRepository } from "../../persistence/action-ledger-in-memory.js";
 import type { PesquisaDeps } from "./index.js";
 import type { LevantamentoDoc } from "./levantamento.js";
 import type { JulgamentoVerdict } from "./julgamento.js";
@@ -129,6 +130,24 @@ describe("card-pesquisa entrega", () => {
     expect(rec.comments).toHaveLength(1); // the card still receives the proposal
     expect(rec.attachments).toHaveLength(1);
     expect(rec.moves).toEqual([{ id: "card1", state: "review" }]);
+  });
+
+  it("idempotent delivery (F5 #162): a second run on a 'done' ledger never re-creates the issue", async () => {
+    const rec = freshRecord();
+    const ledger = makeInMemoryActionLedgerRepository();
+    const deps: PesquisaDeps = { ...baseDeps(rec), ledger };
+    const outputs = { preparacao: prep, levantamento_proposta: doc(2), julgamento_arquitetura: parecer };
+
+    const first = await run(deps, outputs);
+    expect(rec.issues).toHaveLength(2);
+    expect(rec.comments).toHaveLength(1);
+
+    // Crash-resume: the state re-runs from scratch, but the ledger short-circuits.
+    const second = await run(deps, outputs);
+    expect(rec.issues).toHaveLength(2); // NOT re-created
+    expect(rec.milestones).toHaveLength(0);
+    expect(rec.comments).toHaveLength(1); // handoff also fired only once
+    expect(second.issueUrl).toBe(first.issueUrl); // same URL recovered from the ledger
   });
 
   it("formatProposalMarkdown always includes the security opinion and the full parecer", () => {

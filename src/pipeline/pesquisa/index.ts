@@ -19,6 +19,7 @@ import { Effect } from "effect";
 import type { ScriptRegistry } from "../../script/registry.js";
 import type { RepoRegistry } from "../../repo-registry/schema.js";
 import type { TaskSource } from "../../task-source/types.js";
+import type { ActionLedgerRepository } from "../../persistence/types.js";
 import type { CompletionRequest, CompletionResponse } from "../../provider/types.js";
 import { makeGitHubConnector } from "../../connector/github.js";
 import { makeClaudeCliProvider } from "../../provider/claude-cli.js";
@@ -51,6 +52,13 @@ export interface PesquisaDeps {
   taskSourceFor: (sourceId: string) => TaskSource | undefined;
   /** Anthropic API key for the billed judge provider (claude.ts / Opus+Fable). */
   claudeApiKey: string;
+  /**
+   * Action ledger (F5 #162 hardening): when present, entrega wraps its GitHub
+   * issue/milestone creation and card handoff so a crash mid-delivery + resume
+   * never mints a duplicate issue. Optional to keep the existing e2e harness
+   * (which never crashes mid-delivery) unchanged; app.ts always wires it.
+   */
+  ledger?: ActionLedgerRepository;
   // Injectable seams for tests (default to the real impls):
   makeGithub?: (cfg: { token: string; repo: string }) => ReturnType<typeof makeGitHubConnector>;
   /** CLI provider for the read-only survey (claude-cli / Sonnet). */
