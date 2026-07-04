@@ -596,3 +596,29 @@ export const makeTrelloReadComments =
     comments.reverse(); // newest-first from Trello -> oldest-first for the caller
     return { comments, cursor: actions[0].id };
   };
+
+/**
+ * Reads back the ids of cards cross-linked onto `cardId` via makeTrelloLinkCards
+ * (F5 #163's degraded-mode gate: a Blocked card <-> the Mapping card raised for
+ * it) — GET /1/cards/{id}/attachments, keeping only attachments whose `url` is
+ * a Trello card link (`trello.com/c/<shortLink>`), never a screenshot/file
+ * upload. Trello resolves a shortLink exactly like a full card id for every
+ * other call in this file (getTask/comment/moveTo), so the caller never needs
+ * to resolve it further.
+ */
+export const makeTrelloReadLinkedCards =
+  (cfg: TrelloAuthConfig) =>
+  async (cardId: string): Promise<string[]> => {
+    const auth = `key=${encodeURIComponent(cfg.apiKey)}&token=${encodeURIComponent(cfg.apiToken)}`;
+    const res = await fetch(
+      `https://api.trello.com/1/cards/${encodeURIComponent(cardId)}/attachments?fields=url&${auth}`
+    );
+    if (!res.ok) throw new Error(`trello: failed to read attachments on card ${cardId} (${res.status})`);
+    const attachments = (await res.json()) as Array<{ url?: string }>;
+    const ids: string[] = [];
+    for (const a of attachments) {
+      const match = a.url ? /trello\.com\/c\/([a-zA-Z0-9]+)/.exec(a.url) : null;
+      if (match) ids.push(match[1]);
+    }
+    return ids;
+  };

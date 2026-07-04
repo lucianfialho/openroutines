@@ -53,6 +53,7 @@ import {
   dismissImprovement,
 } from "./observability/feedback-loop.js";
 import { loadRepoRegistry } from "./repo-registry/registry.js";
+import { loadPolicy } from "./config/policy.js";
 import { makeInMemoryActionLedgerRepository } from "./persistence/action-ledger-in-memory.js";
 import { makePostgresActionLedgerRepository } from "./persistence/action-ledger-postgres.js";
 import { makeInMemoryPrLinkRepository } from "./persistence/pr-links-in-memory.js";
@@ -63,8 +64,9 @@ import { makeInMemoryRepoLearningRepository } from "./persistence/repo-learnings
 import { makePostgresRepoLearningRepository } from "./persistence/repo-learnings-postgres.js";
 import { makeSimilarCards } from "./orchestrator/tactical-memory.js";
 import { loadTaskSources, type ResolvedTaskSource } from "./task-source/loader.js";
-import { makeTrelloTaskSource, makeTrelloCreateCard, makeTrelloLinkCards, makeTrelloReadComments } from "./connector/trello.js";
+import { makeTrelloTaskSource, makeTrelloCreateCard, makeTrelloLinkCards, makeTrelloReadComments, makeTrelloReadLinkedCards } from "./connector/trello.js";
 import { runSteeringPoll, type SteeringPollDeps } from "./orchestrator/steering.js";
+import { runDegradedModeUnblockPoll, type DegradedModeUnblockDeps } from "./orchestrator/degraded-mode.js";
 import { makePostgresPollStateRepository } from "./persistence/poll-state-postgres.js";
 import { makePostgresCardSteeringRepository } from "./persistence/card-steering-postgres.js";
 import { makeRestTaskSource } from "./task-source/rest-executor.js";
@@ -418,8 +420,13 @@ export const createApp = async (config: AppConfig) => {
   // worker concurrency below and by the night-coordinator deps further down.
   const nightWindowStart = process.env.NIGHT_WINDOW_START ?? "01:00";
   const nightWindowEnd = process.env.NIGHT_WINDOW_END ?? "06:30";
-  const nightBudgetUsd = Number(process.env.NIGHT_BUDGET_USD ?? "30") || 30;
-  const nightPrCap = parseInt(process.env.NIGHT_PR_CAP ?? "6", 10) || 6;
+  // F5 #168 (D32): operational caps come from the versioned, bounds-checked
+  // policy.yaml — no env fallback. A missing/invalid file fails boot loud and
+  // clear here rather than silently applying a hardcoded default.
+  const policy = loadPolicy(process.env.POLICY_PATH ?? "policy.yaml");
+  const nightBudgetUsd = policy.night.budget_usd;
+  const nightPrCap = policy.night.max_prs_per_night;
+  const perRepoOpenPrCap = policy.backpressure.max_open_prs_per_repo;
   const nightParallelism = Math.max(1, Math.min(3, parseInt(process.env.NIGHT_PARALLELISM ?? "2", 10) || 2));
   const nightTz = process.env.TZ ?? "America/Sao_Paulo";
 
@@ -814,6 +821,8 @@ export const createApp = async (config: AppConfig) => {
   let prReviewPollDeps: PrReviewPollDeps | undefined;
   // Steering poller deps (F5 #169) — runs on the same daytime tick as PR-review.
   let steeringPollDeps: SteeringPollDeps | undefined;
+  // Degraded-mode unblock poller deps (F5 #163) — same daytime tick, Trello-only.
+  let degradedModeUnblockDeps: DegradedModeUnblockDeps | undefined;
 
   // 6. Setup queue (connects to engine)
   const queueHandler = async (job: { id?: string; routineId?: string; trigger: { type: string; payload: unknown; executionId?: string } }) => {
@@ -846,6 +855,13 @@ export const createApp = async (config: AppConfig) => {
       if (steeringPollDeps) {
         const summary = await runSteeringPoll(steeringPollDeps);
         console.log(`[Queue] Steering poll: ${JSON.stringify(summary)}`);
+      }
+      // Degraded-mode unblock sweep (F5 #163): a Mapping card reaching Done ->
+      // its linked Blocked cards return to the queue. Independent of the two
+      // sweeps above (Trello-only, no GitHub token needed).
+      if (degradedModeUnblockDeps) {
+        const summary = await runDegradedModeUnblockPoll(degradedModeUnblockDeps);
+        console.log(`[Queue] Degraded-mode unblock poll: ${JSON.stringify(summary)}`);
       }
       return;
     }
@@ -964,6 +980,7 @@ export const createApp = async (config: AppConfig) => {
       nightWindowEnd,
       nightBudgetUsd,
       nightPrCap,
+      perRepoOpenPrCap,
       nightParallelism,
       tz: nightTz,
       // Ingest these sources' queued cards into `tasks` at cycle start (F2's
@@ -1007,6 +1024,18 @@ export const createApp = async (config: AppConfig) => {
       );
     } else {
       console.log("[App] Steering poller not wired (need a 'trello' task source with key+token)");
+    }
+
+    // Degraded-mode unblock poll (F5 #163): same Trello source as steering, no
+    // GitHub token needed — reacts to a Mapping card reaching Done.
+    if (trelloSteeringConfig && steeringTaskSource) {
+      degradedModeUnblockDeps = {
+        sourceId: trelloSteeringConfig.sourceId,
+        taskSource: steeringTaskSource,
+        pollState: makePostgresPollStateRepository(pgPool),
+        readLinkedCards: makeTrelloReadLinkedCards(trelloSteeringConfig),
+      };
+      console.log("[App] Degraded-mode unblock poller wired (cron */30 8-22 * * *)");
     }
   } else {
     console.log("[App] Night coordinator not wired (need DATABASE_URL + GITHUB_TOKEN + repos.yaml)");
