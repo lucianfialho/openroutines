@@ -73,8 +73,11 @@ const buildArgs = (config: ClaudeCliConfig, request: CompletionRequest, promptTe
   args.push("--exclude-dynamic-system-prompt-sections", "--strict-mcp-config");
   if (config.model) args.push("--model", config.model);
   args.push("--permission-mode", "dontAsk");
-  if (config.allowedTools && config.allowedTools.length > 0) {
-    args.push("--allowedTools", config.allowedTools.join(","));
+  // Per-request allowlist (F4 #153: lens least privilege) overrides the
+  // provider-level config; both are argv elements, never shell strings.
+  const allowedTools = request.allowedTools ?? config.allowedTools;
+  if (allowedTools && allowedTools.length > 0) {
+    args.push("--allowedTools", allowedTools.join(","));
   }
   if (config.settingsFile) args.push("--settings", config.settingsFile);
   if (request.workdir) args.push("--add-dir", request.workdir);

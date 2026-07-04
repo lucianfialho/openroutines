@@ -380,7 +380,16 @@ describe("persistStateContext", () => {
       findById: async (id: string) => records.get(id),
       save: async (rec: any) => { records.set(rec.id, rec); },
     } as any;
-    await Effect.runPromise(persistStateContext(repo, "exec1", "s2", { out: 1 }, { in: 2 }, { "a->b": 1 }, 0.07, { default: 0.07 }));
+    await Effect.runPromise(
+      persistStateContext(repo, "exec1", {
+        currentState: "s2",
+        outputs: { out: 1 },
+        inputs: { in: 2 },
+        transitionCounts: { "a->b": 1 },
+        totalCostUsd: 0.07,
+        costByProvider: { default: 0.07 },
+      })
+    );
     const saved = records.get("exec1");
     expect(saved.metadata.existing).toBe(true);
     expect(saved.metadata.stateMachineContext).toEqual({
@@ -395,6 +404,8 @@ describe("persistStateContext", () => {
 
   it("is a no-op when the execution does not exist", async () => {
     const repo = { findById: async () => undefined, save: async () => { throw new Error("should not save"); } } as any;
-    await expect(Effect.runPromise(persistStateContext(repo, "missing", "s1", {}, {}, {}, 0, {}))).resolves.toBeUndefined();
+    await expect(
+      Effect.runPromise(persistStateContext(repo, "missing", { currentState: "s1", outputs: {} }))
+    ).resolves.toBeUndefined();
   });
 });

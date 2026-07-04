@@ -71,15 +71,36 @@ export interface PrLink {
   branch: string;
   status: string; // 'open' | 'merged' | 'closed' ...
   reviewState?: string;
+  /** Completed rework rounds (F4 #157, D24); 2 => retrabalho-esgotado. */
+  reworkCount?: number;
+  /** Agent's HEAD after its last push — a human commit past it aborts rework (F4 #157). */
+  lastAgentCommitSha?: string;
+  /** Night that ran the last rework — max 1 rework/card/night (F4 #157). */
+  lastReworkNightId?: string;
+  /** Deterministic risk score, computed once at PR creation (F4 #158, D29). */
+  riskScore?: number;
+  /** 100%-safe PR eligible for the batch-merge block (F4 #158, D29). */
+  greenLane?: boolean;
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+/** Mutable pr_links columns — everything except the identity key (sourceId, taskId, branch). */
+export type PrLinkPatch = Partial<
+  Pick<PrLink, "prNumber" | "status" | "reviewState" | "reworkCount" | "lastAgentCommitSha" | "lastReworkNightId" | "riskScore" | "greenLane">
+>;
 
 export interface PrLinkRepository {
   create: (link: PrLink) => Promise<void>;
   findByTask: (sourceId: string, taskId: string) => Promise<PrLink[]>;
   /** Open PRs of a night, via executions(source_id, task_id, night_id) — the global PR-cap count (F3 #147). */
   countOpenForNight: (nightId: string) => Promise<number>;
+  /** All links with status='open' — scanned by the PR-review poller (F4 #157). */
+  findOpen: () => Promise<PrLink[]>;
+  /** Patch a link identified by (sourceId, taskId, branch). No-op when the link doesn't exist. */
+  update: (key: { sourceId: string; taskId: string; branch: string }, patch: PrLinkPatch) => Promise<void>;
+  /** Links whose task executed under this night, ordered by risk_score DESC — morning-report (F4 #159). */
+  findForNight: (nightId: string) => Promise<PrLink[]>;
 }
 
 /** Task snapshot persistence, keyed by composite (sourceId, taskId) — reuses Task from task-source (F2 #144). */

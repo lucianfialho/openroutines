@@ -5,17 +5,20 @@ import type { ExecutionRecord } from "./types.js";
 let mockRows: Array<Record<string, unknown>> = [];
 let lastQuery = "";
 let lastParams: unknown[] = [];
+let allQueries: string[] = [];
 
 vi.mock("pg", () => ({
   Pool: vi.fn(() => ({
     query: vi.fn(async (sql: string, params: unknown[]) => {
       lastQuery = sql;
       lastParams = params;
+      allQueries.push(sql);
       return { rows: mockRows };
     }),
     connect: vi.fn(async () => ({
       query: vi.fn(async (sql: string) => {
         lastQuery = sql;
+        allQueries.push(sql);
         return { rows: [] };
       }),
       release: vi.fn(),
@@ -28,6 +31,7 @@ describe("makePostgresRepository", () => {
     mockRows = [];
     lastQuery = "";
     lastParams = [];
+    allQueries = [];
     vi.clearAllMocks();
   });
 
@@ -36,7 +40,9 @@ describe("makePostgresRepository", () => {
       connectionString: "postgresql://test:test@localhost/test",
     });
     await repo.migrate();
-    expect(lastQuery).toContain("executions");
+    // Migrations run in lexicographic order; the executions table is 001, so it
+    // must appear among the executed statements (not necessarily last).
+    expect(allQueries.some((q) => q.includes("executions"))).toBe(true);
   });
 
   it("should save execution record", async () => {
