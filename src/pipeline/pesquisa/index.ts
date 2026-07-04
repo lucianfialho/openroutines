@@ -74,7 +74,7 @@ export const defaultRunGit =
   (args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> =>
     execFileAsync("git", args, { cwd });
 
-export const resolveGithub = (deps: PesquisaDeps, repo: string) =>
+export const resolveGithub = (deps: PesquisaDeps, repo: string): ReturnType<typeof makeGitHubConnector> =>
   (deps.makeGithub ?? makeGitHubConnector)({ token: deps.githubToken, repo });
 
 export const resolveCliProvider = (deps: PesquisaDeps, model: string): PesquisaProvider =>

@@ -93,7 +93,7 @@ export const defaultRunGit =
       args[0] === "push" ? { cwd, env: { ...process.env, GITHUB_TOKEN: githubToken } } : { cwd }
     );
 
-export const resolveGithub = (deps: MapeamentoDeps, repo: string) =>
+export const resolveGithub = (deps: MapeamentoDeps, repo: string): ReturnType<typeof makeGitHubConnector> =>
   (deps.makeGithub ?? makeGitHubConnector)({ token: deps.githubToken, repo });
 
 export const resolveCliProvider = (deps: MapeamentoDeps, model: string): MapeamentoProvider =>
