@@ -86,10 +86,15 @@ export interface SastOptions {
   exec?: ExecRunner;
 }
 
-const defaultExec: ExecRunner = (file, args, options) =>
+export const defaultExec: ExecRunner = (file, args, options) =>
   execFileAsync(file, args, { maxBuffer: MAX_BUFFER, timeout: TOOL_TIMEOUT_MS, ...options }).catch((err) => {
-    const e = err as { code?: string; stdout?: string; stderr?: string };
-    if (e.code === "ENOENT") throw e; // binary missing from PATH — caller degrades this specific step
+    const e = err as { code?: string; killed?: boolean; signal?: string | null; stdout?: string; stderr?: string };
+    // Binary missing from PATH, or execFile's OWN timeout killing the child
+    // (killed/signal set — the tool never actually finished) must both reach
+    // the caller so it degrades to a note (M7/#155): swallowing a kill as
+    // `{stdout: ''}` used to read as "scan ran clean", silently persisting an
+    // empty baseline snapshot instead of flagging the tool as unavailable.
+    if (e.code === "ENOENT" || e.killed || e.signal) throw e;
     // A non-zero exit (semgrep --error on findings, gitleaks on a leak, npm
     // audit on a vulnerability) still carries the JSON report on stdout.
     return { stdout: e.stdout ?? "", stderr: e.stderr ?? "" };

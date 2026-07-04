@@ -1,8 +1,22 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { runSast, filterSastAgainstBaseline, emptySastResult, type ExecRunner, type SastResult } from "./sast.js";
+import { runSast, filterSastAgainstBaseline, emptySastResult, defaultExec, type ExecRunner, type SastResult } from "./sast.js";
+
+// M7/#155: defaultExec is the one path not covered by the ExecRunner fakes
+// below (every runSast() test injects its own `exec`, bypassing defaultExec
+// entirely) — mock child_process directly to drive its own catch/rethrow logic.
+let mockErr: { code?: string; killed?: boolean; signal?: string | null; stdout?: string; stderr?: string } | null = null;
+let mockStdout = "";
+
+vi.mock("child_process", () => ({
+  execFile: vi.fn((_file: string, _args: string[], _options: unknown, callback: (err: unknown, result: { stdout: string; stderr: string }) => void) => {
+    if (mockErr) callback(mockErr, { stdout: mockErr.stdout ?? "", stderr: mockErr.stderr ?? "" });
+    else callback(null, { stdout: mockStdout, stderr: "" });
+    return {};
+  }),
+}));
 
 type Recorded = { file: string; args: string[] };
 
@@ -334,5 +348,36 @@ describe("filterSastAgainstBaseline", () => {
 
     expect(filterSastAgainstBaseline(current, undefined).semgrepFindings).toEqual([finding()]);
     expect(filterSastAgainstBaseline(current, null).semgrepFindings).toEqual([finding()]);
+  });
+});
+
+describe("defaultExec — M7/#155: a killed/timeout exec must not look like a clean scan", () => {
+  afterEach(() => {
+    mockErr = null;
+    mockStdout = "";
+  });
+
+  it("re-throws when execFile was killed by its own timeout (killed:true) instead of resolving success", async () => {
+    mockErr = { killed: true, signal: "SIGTERM" };
+
+    await expect(defaultExec("semgrep", ["--version"])).rejects.toMatchObject({ killed: true });
+  });
+
+  it("re-throws when only `signal` is set (killed via signal, killed flag not guaranteed)", async () => {
+    mockErr = { signal: "SIGTERM" };
+
+    await expect(defaultExec("semgrep", ["--version"])).rejects.toMatchObject({ signal: "SIGTERM" });
+  });
+
+  it("still resolves with stdout on a plain non-zero exit (e.g. semgrep --error on real findings) — unaffected", async () => {
+    mockErr = { code: "1", stdout: '{"results":[]}', stderr: "" };
+
+    await expect(defaultExec("semgrep", ["--version"])).resolves.toEqual({ stdout: '{"results":[]}', stderr: "" });
+  });
+
+  it("still re-throws ENOENT (binary missing) — unaffected", async () => {
+    mockErr = { code: "ENOENT" };
+
+    await expect(defaultExec("semgrep", ["--version"])).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

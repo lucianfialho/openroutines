@@ -234,12 +234,19 @@ const admitReworkCards = async (deps: RunNightCycleDeps, nightId: string, genera
   const candidates = (await deps.prLinks.findOpen()).filter(
     (l) => l.reviewState === "changes_requested" && l.prNumber !== undefined
   );
+  // M10: same same-repo-in-series rule the normal claim loop enforces via
+  // getBusyRepos — without it, two rework rounds on the SAME clone run `git
+  // fetch`/`worktree add` in parallel and collide on index.lock. Seeded once
+  // (this loop isn't a re-queried `for(;;)` like the claim loop below) and
+  // grown in-memory as each rework is admitted.
+  const busyRepos = await getBusyRepos(deps.pool, nightId);
   for (const link of candidates) {
     if ((link.reworkCount ?? 0) >= REWORK_MAX_ROUNDS) {
       await blockExhaustedRework(deps, link);
       continue;
     }
     if (link.lastReworkNightId === nightId) continue; // max 1 completed round/card/night
+    if (busyRepos.has(link.repo)) continue; // same-repo-in-series — retry next night
     // Atomic per-night claim: the card keeps its old claimed_by_night_id after
     // the original night, so "not claimed" here means "not claimed by THIS
     // night" — stamping it refuses any 2nd admission tonight.
@@ -250,6 +257,7 @@ const admitReworkCards = async (deps: RunNightCycleDeps, nightId: string, genera
       [nightId, link.sourceId, link.taskId]
     );
     if (rows.length === 0) continue; // already claimed tonight
+    busyRepos.add(link.repo);
 
     const { title, description, altaImpl, complexity } = await getTaskContent(deps.pool, link.sourceId, link.taskId);
     const executionId = generateId();

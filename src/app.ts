@@ -44,7 +44,7 @@ import { makePostgresFeedbackRepository } from "./persistence/feedback-repo.js";
 import { makePostgresRunRepository } from "./persistence/run-repository.js";
 import { makeInMemoryFileMetadataRepository } from "./persistence/file-metadata-in-memory.js";
 import { makePostgresFileMetadataRepository } from "./persistence/file-metadata-postgres.js";
-import type { SpanRepository, FeedbackRepository } from "./persistence/types.js";
+import type { SpanRepository, FeedbackRepository, ExecutionRepository, PrLinkRepository } from "./persistence/types.js";
 import { analyzeExecution, aggregateMetrics } from "./observability/analyzer.js";
 import {
   analyzeFeedback,
@@ -71,7 +71,7 @@ import type { SkillStateMachine } from "./skill/schema.js";
 import type { TriggerEvent } from "./routine/matcher.js";
 import { reserveBudget, BUDGET_UNIT_WEIGHTS, normalizeBudgetTier } from "./night-coordinator/budget.js";
 import { runNightCycle, type RunNightCycleDeps } from "./night-coordinator/run.js";
-import { runNightHardStop } from "./night-coordinator/hard-stop.js";
+import { runNightHardStop, isWithinWindow } from "./night-coordinator/hard-stop.js";
 import { runPrReviewPoll, type PrReviewPollDeps } from "./trigger/pr-review-poller.js";
 
 /**
@@ -94,6 +94,25 @@ const buildTaskSource = (resolved: ResolvedTaskSource): TaskSource => {
 };
 
 /**
+ * D9 tier ladder order (kimi < sonnet < opus) for the escalation-rank
+ * comparisons below — routing.ts documents the same order; kept here as rank
+ * only, never as a route (routing.ts's IMPLEMENTATION_ROUTES stays the only
+ * source of truth for provider/model, F4 #185).
+ */
+const TIER_LADDER: readonly Tier[] = ["kimi", "sonnet", "opus"];
+const tierRank = (t: Tier): number => TIER_LADDER.indexOf(t);
+
+/**
+ * Route for an explicit target tier, via routing.ts's own "one tier up"
+ * primitive (resolveEscalatedProvider) fed its predecessor — avoids a 2nd
+ * copy of the provider/model table in this file.
+ */
+const routeForTier = (tier: Tier): { provider: string; model?: string } | undefined => {
+  const belowIdx = tierRank(tier) - 1;
+  return belowIdx >= 0 ? resolveEscalatedProvider(TIER_LADDER[belowIdx]) : undefined;
+};
+
+/**
  * Complexity routing hook (F4 #185, D9) for card-to-pr's dispatch — wired as
  * `StateMachineConfig.resolveDynamicProvider` for the `card-to-pr` skill.
  * Only `implementacao` declares `dynamic_provider: true` in skill.yaml
@@ -112,8 +131,168 @@ export const resolveCardToPrDynamicProvider = (
   if (ctx.stateId !== "implementacao" && ctx.stateId !== "rework") return undefined;
   const complexity = ctx.inputs.complexity as TaskComplexity | undefined;
   const altaImpl = ctx.inputs.altaImpl as boolean | undefined;
-  if (!ctx.escalated) return resolveCardToPrProvider(ctx.stateId, { complexity, altaImpl });
-  return resolveEscalatedProvider(resolveImplementationTier({ complexity, altaImpl }));
+  const derivedTier = resolveImplementationTier({ complexity, altaImpl });
+
+  // H9c/#159: the night-level circuit breaker (run.ts) may have already
+  // escalated this card one tier up before it ever reached the queue, riding
+  // along as payload.tier -> ctx.inputs.tier (run.ts:404-412 calls this
+  // "honest partial today" — the escalation only affected
+  // recordTierOutcome's bookkeeping bucket, never the actual route). Honor
+  // it when it outranks the derived tier; never downgrade — a stale/lower
+  // payload.tier must never override a legitimately higher derived one
+  // (e.g. altaImpl already forcing opus).
+  const payloadTier = ctx.inputs.tier as Tier | undefined;
+  const payloadEscalates = payloadTier !== undefined && tierRank(payloadTier) > tierRank(derivedTier);
+
+  if (!ctx.escalated && !payloadEscalates) return resolveCardToPrProvider(ctx.stateId, { complexity, altaImpl });
+  if (!payloadEscalates) return resolveEscalatedProvider(derivedTier); // ctx.escalated only — unchanged (incl. undefined at the opus ceiling)
+  return routeForTier(payloadTier!); // payload names a higher rung directly (whether or not ctx.escalated also fired)
+};
+
+export interface CardExecutionJobDeps {
+  cardToPrStateMachineConfig: StateMachineConfig | undefined;
+  cardToPrSkill: SkillStateMachine | undefined;
+  persistence: ExecutionRepository;
+  prLinks: PrLinkRepository;
+  pgPool: import("pg").Pool | undefined;
+  nightWindowStart: string;
+  nightWindowEnd: string;
+  nightTz: string;
+  /** Injectable seam for tests; defaults to the real engine runner. */
+  runStateMachine?: typeof runStateMachine;
+  now?: () => Date;
+}
+
+/**
+ * Dispatches one `card-execution` job (enqueued by the night coordinator)
+ * straight through the card-to-pr state machine — it has no matching Routine
+ * trigger, so it bypasses engine.execute()'s routine resolution entirely.
+ * Extracted out of queueHandler's closure so H7/H9's guards below are directly
+ * testable without standing up the full createApp() wiring (BullMQ/Redis/real
+ * skill files).
+ */
+export const runCardExecutionJob = async (
+  deps: CardExecutionJobDeps,
+  job: { trigger: { type: string; payload: unknown; executionId?: string } },
+  stateMachineContextIn: StateMachineContext | undefined
+): Promise<void> => {
+  if (!deps.cardToPrStateMachineConfig || !deps.cardToPrSkill) {
+    console.error("[Queue] card-execution job received but card-to-pr is not registered (need GITHUB_TOKEN + repos.yaml)");
+    return;
+  }
+  const executionId = job.trigger.executionId;
+  if (!executionId) {
+    console.error("[Queue] card-execution job missing executionId, dropping");
+    return;
+  }
+
+  const payload = job.trigger.payload as {
+    source_id?: string;
+    task_id?: string;
+    night_id?: string;
+    tier?: Tier;
+    rework?: boolean;
+  } | null;
+
+  // H7: a job can survive in Redis past its night's window — the 06:30
+  // hard-stop only kills executions already `running` (enforceHardStop's
+  // `WHERE status='running'`); anything still queued in BullMQ (backlog past
+  // nightParallelism, or redelivered after an app restart) would otherwise
+  // run the full pipeline (CLI + PR) the next morning once the hard-stop's
+  // kill frees a worker slot. Manual executions (no night_id) are untouched.
+  // Same blockReason vocabulary as enforceHardStop (hard-stop.ts) so the
+  // morning report reads a dropped night job identically either way.
+  const nightId = payload?.night_id;
+  if (nightId) {
+    const now = deps.now ?? (() => new Date());
+    let stale = !isWithinWindow(now(), deps.nightWindowStart, deps.nightWindowEnd, deps.nightTz);
+    if (!stale && deps.pgPool) {
+      const { rows } = await deps.pgPool.query(`SELECT finished_at FROM night_runs WHERE id = $1`, [nightId]);
+      stale = rows[0]?.finished_at != null;
+    }
+    if (stale) {
+      const existing = await deps.persistence.findById(executionId);
+      if (existing) {
+        await deps.persistence.save({
+          ...existing,
+          status: "failed",
+          finishedAt: new Date(),
+          error: existing.error ?? "night window closed before this job could run",
+          metadata: { ...(existing.metadata ?? {}), blockReason: "timeout" },
+        });
+      }
+      if (deps.pgPool && payload?.source_id && payload?.task_id) {
+        // Release the claim so the NEXT night can pick this card back up —
+        // same release query the PR-cap/circuit-breaker denials use in run.ts.
+        await deps.pgPool.query(
+          `UPDATE tasks SET claimed_by_night_id = NULL WHERE source_id = $1 AND task_id = $2 AND claimed_by_night_id = $3`,
+          [payload.source_id, payload.task_id, nightId]
+        );
+      }
+      console.log(`[Queue] card-execution ${executionId} dropped — night ${nightId} window closed`);
+      return;
+    }
+  }
+
+  let stateMachineContext = stateMachineContextIn;
+  // Rework admission (F4 #157): a fresh rework job enters the machine at
+  // rework_preparacao, not preparacao. A persisted (crash-resume) context
+  // above always wins — it already points at the right state.
+  if (!stateMachineContext && payload?.rework === true) {
+    stateMachineContext = { currentState: "rework_preparacao", outputs: {} };
+    console.log(`[Queue] card-execution ${executionId} is a rework round — starting at rework_preparacao`);
+  }
+
+  // runStateMachine never itself transitions executions.status to 'running'
+  // (only fail/succeed/pause) — mark it here (fresh start or resume alike)
+  // so enforceHardStop's `WHERE status='running'` query (and boot
+  // reconciliation) can actually find this execution while in flight.
+  // save() never touches night_id/repo (not on ExecutionRecord), so they
+  // survive untouched.
+  const pending = await deps.persistence.findById(executionId);
+  if (pending) await deps.persistence.save({ ...pending, status: "running" });
+  const event: TriggerEvent = { type: "card-execution", payload: job.trigger.payload, executionId };
+  const syntheticRoutine: Routine = { id: "night-run", triggers: [{ type: "schedule", cron: "0 1 * * *" }], pipeline: { skill: "card-to-pr" } };
+  const run = deps.runStateMachine ?? runStateMachine;
+  const result = await Effect.runPromise(
+    run(deps.cardToPrStateMachineConfig)(deps.cardToPrSkill, syntheticRoutine, event, executionId, stateMachineContext)
+  );
+  console.log(`[Queue] card-execution job completed: success=${result.success}`);
+
+  // F4 #159 circuit breaker: record this card's tier outcome for the night.
+  // The outcome is only observable HERE (runNightCycle enqueues and returns
+  // long before the job actually runs) — `tier` and `night_id` ride along on
+  // the payload run.ts already built.
+  if (deps.pgPool && payload?.night_id && payload?.tier && payload?.source_id && payload?.task_id) {
+    try {
+      // H9b: a pre-LLM script block (this card never reached its tier's LLM
+      // call at all) must not charge that tier a failure it never had a
+      // chance at. blockReason lives at metadata.stateMachineContext.
+      // outputs.bloqueado (same path morning-report.ts reads); the two
+      // pre-LLM blocks are "sem-branch-protection" (preparacao) and
+      // "orcamento" (budget denial, state-machine.ts) — anything blocked
+      // LATER (verify/security/revisao/...) did reach the tier, so it stays
+      // chargeable.
+      const finished = await deps.persistence.findById(executionId);
+      const bloqueado = (
+        finished?.metadata as { stateMachineContext?: { outputs?: { bloqueado?: { blockReason?: string } } } } | undefined
+      )?.stateMachineContext?.outputs?.bloqueado;
+      const preLlmBlock = bloqueado?.blockReason === "sem-branch-protection" || bloqueado?.blockReason === "orcamento";
+      if (!preLlmBlock) {
+        // H9a: for a rework round the pr_link ALWAYS pre-exists (rework only
+        // ever starts from one), so "shipped" can't be "a link exists" — it
+        // has to be "this round actually completed" (pr:rework-complete
+        // stamps lastReworkNightId when it does; a blocked/aborted round
+        // never reaches that step).
+        const shipped = payload.rework === true
+          ? (await deps.prLinks.findByTask(payload.source_id, payload.task_id)).some((l) => l.lastReworkNightId === payload.night_id)
+          : result.success && (await deps.prLinks.findByTask(payload.source_id, payload.task_id)).length > 0;
+        await recordTierOutcome(deps.pgPool, payload.night_id, payload.tier, shipped ? "success" : "failure");
+      }
+    } catch (err) {
+      console.error("[Queue] Failed to record tier outcome:", err);
+    }
+  }
 };
 
 export interface AppConfig {
@@ -593,57 +772,24 @@ export const createApp = async (config: AppConfig) => {
 
     // A card-execution job (enqueued by the night coordinator) runs the
     // card-to-pr skill directly — it has no matching Routine trigger, so it
-    // bypasses engine.execute()'s routine resolution entirely.
+    // bypasses engine.execute()'s routine resolution entirely. See
+    // runCardExecutionJob for the H7 (stale-night guard) / H9 (circuit
+    // breaker attribution) logic.
     if (job.trigger.type === "card-execution") {
-      if (!cardToPrStateMachineConfig || !cardToPrSkill) {
-        console.error("[Queue] card-execution job received but card-to-pr is not registered (need GITHUB_TOKEN + repos.yaml)");
-        return;
-      }
-      const executionId = job.trigger.executionId;
-      if (!executionId) {
-        console.error("[Queue] card-execution job missing executionId, dropping");
-        return;
-      }
-      // Rework admission (F4 #157): a fresh rework job enters the machine at
-      // rework_preparacao, not preparacao. A persisted (crash-resume) context
-      // above always wins — it already points at the right state.
-      if (!stateMachineContext && (job.trigger.payload as { rework?: boolean } | null)?.rework === true) {
-        stateMachineContext = { currentState: "rework_preparacao", outputs: {} };
-        console.log(`[Queue] card-execution ${executionId} is a rework round — starting at rework_preparacao`);
-      }
-      // runStateMachine never itself transitions executions.status to 'running'
-      // (only fail/succeed/pause) — mark it here (fresh start or resume alike)
-      // so enforceHardStop's `WHERE status='running'` query (and boot
-      // reconciliation) can actually find this execution while in flight.
-      // save() never touches night_id/repo (not on ExecutionRecord), so they
-      // survive untouched.
-      const pending = await persistence.findById(executionId);
-      if (pending) await persistence.save({ ...pending, status: "running" });
-      const event: TriggerEvent = { type: "card-execution", payload: job.trigger.payload, executionId };
-      const syntheticRoutine: Routine = { id: "night-run", triggers: [{ type: "schedule", cron: "0 1 * * *" }], pipeline: { skill: "card-to-pr" } };
-      const result = await Effect.runPromise(
-        runStateMachine(cardToPrStateMachineConfig)(cardToPrSkill, syntheticRoutine, event, executionId, stateMachineContext)
+      await runCardExecutionJob(
+        {
+          cardToPrStateMachineConfig,
+          cardToPrSkill,
+          persistence,
+          prLinks,
+          pgPool,
+          nightWindowStart,
+          nightWindowEnd,
+          nightTz,
+        },
+        job,
+        stateMachineContext
       );
-      console.log(`[Queue] card-execution job completed: success=${result.success}`);
-
-      // F4 #159 circuit breaker: record this card's tier outcome for the
-      // night. The outcome is only observable HERE (runNightCycle enqueues
-      // and returns long before the job actually runs) — `tier` and
-      // `night_id` ride along on the payload run.ts already built. A
-      // script-path block (bloqueado) still returns result.success=true (the
-      // execution didn't crash), so "did the tier actually deliver" is
-      // confirmed by a real pr_links row, not result.success alone.
-      if (pgPool) {
-        const payload = job.trigger.payload as { source_id?: string; task_id?: string; night_id?: string; tier?: Tier };
-        if (payload.night_id && payload.tier && payload.source_id && payload.task_id) {
-          try {
-            const shipped = result.success && (await prLinks.findByTask(payload.source_id, payload.task_id)).length > 0;
-            await recordTierOutcome(pgPool, payload.night_id, payload.tier, shipped ? "success" : "failure");
-          } catch (err) {
-            console.error("[Queue] Failed to record tier outcome:", err);
-          }
-        }
-      }
       return;
     }
 

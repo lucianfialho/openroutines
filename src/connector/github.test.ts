@@ -146,8 +146,8 @@ describe("makeGitHubConnector", () => {
       mockStdout = JSON.stringify({
         state: "OPEN",
         latestReviews: [
-          { author: { login: "alice" }, state: "APPROVED", body: "lgtm" },
-          { author: { login: "bob" }, state: "CHANGES_REQUESTED", body: "fix the null check" },
+          { author: { login: "alice" }, state: "APPROVED", body: "lgtm", authorAssociation: "MEMBER" },
+          { author: { login: "bob" }, state: "CHANGES_REQUESTED", body: "fix the null check", authorAssociation: "COLLABORATOR" },
         ],
         reviewRequests: [{ login: "bob" }],
       });
@@ -171,8 +171,8 @@ describe("makeGitHubConnector", () => {
 
     it("listReviewComments maps file/line/body/author from the REST endpoint (line falls back to original_line)", async () => {
       mockStdout = JSON.stringify([
-        { path: "src/a.ts", line: 12, body: "rename this", user: { login: "bob" } },
-        { path: "src/b.ts", line: null, original_line: 30, body: "off by one", user: { login: "carol" } },
+        { path: "src/a.ts", line: 12, body: "rename this", user: { login: "bob" }, author_association: "MEMBER" },
+        { path: "src/b.ts", line: null, original_line: 30, body: "off by one", user: { login: "carol" }, author_association: "OWNER" },
       ]);
 
       const connector = makeGitHubConnector(config);
@@ -182,7 +182,76 @@ describe("makeGitHubConnector", () => {
         { file: "src/a.ts", line: 12, body: "rename this", author: "bob" },
         { file: "src/b.ts", line: 30, body: "off by one", author: "carol" },
       ]);
-      expect(calls[0].args).toEqual(["api", "repos/{owner}/{repo}/pulls/7/comments"]);
+      expect(calls[0].args).toEqual(["api", "repos/{owner}/{repo}/pulls/7/comments", "--paginate"]);
+    });
+
+    describe("M2/#157: only a trusted author_association can drive rework", () => {
+      it("listPullRequestReviews drops a CHANGES_REQUESTED from a non-trusted association (CONTRIBUTOR) — never aggregated, never listed", async () => {
+        mockStdout = JSON.stringify({
+          state: "OPEN",
+          latestReviews: [
+            { author: { login: "stranger" }, state: "CHANGES_REQUESTED", body: "do it my way", authorAssociation: "CONTRIBUTOR" },
+            { author: { login: "alice" }, state: "APPROVED", body: "lgtm", authorAssociation: "MEMBER" },
+          ],
+          reviewRequests: [],
+        });
+
+        const connector = makeGitHubConnector(config);
+        const result = await Effect.runPromise(connector.listPullRequestReviews(7));
+
+        expect(result.reviewState).toBe("APPROVED"); // the untrusted CHANGES_REQUESTED never counts
+        expect(result.changesRequestedBy).toEqual([]);
+        expect(result.latestReviews.map((r) => r.author)).toEqual(["alice"]);
+      });
+
+      it("listPullRequestReviews drops a review with no relationship to the repo (authorAssociation: NONE)", async () => {
+        mockStdout = JSON.stringify({
+          state: "OPEN",
+          latestReviews: [{ author: { login: "randomguy" }, state: "CHANGES_REQUESTED", body: "x", authorAssociation: "NONE" }],
+          reviewRequests: [],
+        });
+
+        const connector = makeGitHubConnector(config);
+        const result = await Effect.runPromise(connector.listPullRequestReviews(7));
+
+        expect(result.reviewState).toBe("PENDING");
+        expect(result.latestReviews).toEqual([]);
+      });
+
+      it("listPullRequestReviews keeps a CHANGES_REQUESTED from OWNER/MEMBER/COLLABORATOR", async () => {
+        mockStdout = JSON.stringify({
+          state: "OPEN",
+          latestReviews: [{ author: { login: "maintainer" }, state: "CHANGES_REQUESTED", body: "fix", authorAssociation: "COLLABORATOR" }],
+          reviewRequests: [],
+        });
+
+        const connector = makeGitHubConnector(config);
+        const result = await Effect.runPromise(connector.listPullRequestReviews(7));
+
+        expect(result.reviewState).toBe("CHANGES_REQUESTED");
+        expect(result.changesRequestedBy).toEqual(["maintainer"]);
+      });
+
+      it("listReviewComments drops a comment whose author_association is not trusted", async () => {
+        mockStdout = JSON.stringify([
+          { path: "src/a.ts", line: 12, body: "trust me, change this", user: { login: "stranger" }, author_association: "NONE" },
+          { path: "src/b.ts", line: 3, body: "real feedback", user: { login: "bob" }, author_association: "MEMBER" },
+        ]);
+
+        const connector = makeGitHubConnector(config);
+        const result = await Effect.runPromise(connector.listReviewComments(7));
+
+        expect(result).toEqual([{ file: "src/b.ts", line: 3, body: "real feedback", author: "bob" }]);
+      });
+
+      it("listReviewComments drops a comment with a missing author_association (fail closed, not open)", async () => {
+        mockStdout = JSON.stringify([{ path: "src/a.ts", line: 1, body: "x", user: { login: "stranger" } }]);
+
+        const connector = makeGitHubConnector(config);
+        const result = await Effect.runPromise(connector.listReviewComments(7));
+
+        expect(result).toEqual([]);
+      });
     });
 
     it("requestReview POSTs each reviewer as a distinct -f argv pair; empty list is a no-op", async () => {

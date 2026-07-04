@@ -90,6 +90,16 @@ export const aggregateReviewState = (
 // reaching argv (defense in depth; the value is embedded after `reviewers[]=`).
 const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
+/**
+ * M2/#157: on a public repo, ANY GitHub account can review a PR or leave an
+ * inline comment — but a CHANGES_REQUESTED (and its body) drives a rework
+ * round straight into an agent with edit/write/run_shell/git_commit. Only
+ * these author_association values are trusted enough to steer that (griefing
+ * / prompt-injection otherwise); an absent association (missing field) fails
+ * closed, never trusted.
+ */
+const TRUSTED_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
 const ensureBranch = (branch: string): Effect.Effect<void, GitHubCliError> =>
   BRANCH_RE.test(branch)
     ? Effect.succeed(undefined)
@@ -252,14 +262,19 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
       const output = yield* execGh(["pr", "view", String(number), "--json", "state,latestReviews,reviewRequests"]);
       const parsed = JSON.parse(output) as {
         state?: string;
-        latestReviews?: Array<{ author?: { login?: string }; state?: string; body?: string }>;
+        latestReviews?: Array<{ author?: { login?: string }; state?: string; body?: string; authorAssociation?: string }>;
         reviewRequests?: Array<{ login?: string; slug?: string }>;
       };
-      const latestReviews = (parsed.latestReviews ?? []).map((r) => ({
-        author: r.author?.login ?? "unknown",
-        state: r.state ?? "",
-        body: r.body ?? "",
-      }));
+      // M2/#157: drop untrusted reviewers BEFORE aggregating/listing — gh
+      // already returns authorAssociation on every review, it was just never
+      // read.
+      const latestReviews = (parsed.latestReviews ?? [])
+        .filter((r) => TRUSTED_AUTHOR_ASSOCIATIONS.has(r.authorAssociation ?? ""))
+        .map((r) => ({
+          author: r.author?.login ?? "unknown",
+          state: r.state ?? "",
+          body: r.body ?? "",
+        }));
       return {
         prState: parsed.state ?? "OPEN",
         reviewState: aggregateReviewState(latestReviews),
@@ -279,20 +294,30 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
       yield* ensureNumber(number);
       yield* Effect.log(`[GitHub] Listing review comments for PR #${number}`);
       // {owner}/{repo} placeholders resolve from GH_REPO (set in this connector's env).
-      const output = yield* execGh(["api", `repos/{owner}/{repo}/pulls/${number}/comments`]);
+      // --paginate (M9/#157): gh's default page is 30, oldest-first — a
+      // heavily-commented PR would silently drop exactly the newest round's
+      // feedback. Verified against the real REST endpoint (single JSON array
+      // response) that --paginate concatenates every page into one array, so
+      // the JSON.parse below is unaffected.
+      const output = yield* execGh(["api", `repos/{owner}/{repo}/pulls/${number}/comments`, "--paginate"]);
       const parsed = JSON.parse(output) as Array<{
         path?: string;
         line?: number | null;
         original_line?: number | null;
         body?: string;
         user?: { login?: string };
+        author_association?: string;
       }>;
-      return parsed.map((c) => ({
-        file: c.path ?? "",
-        line: c.line ?? c.original_line ?? undefined,
-        body: c.body ?? "",
-        author: c.user?.login ?? "unknown",
-      }));
+      // M2/#157: same trust filter as listPullRequestReviews — an inline
+      // comment from an untrusted association must never reach the fix-list.
+      return parsed
+        .filter((c) => TRUSTED_AUTHOR_ASSOCIATIONS.has(c.author_association ?? ""))
+        .map((c) => ({
+          file: c.path ?? "",
+          line: c.line ?? c.original_line ?? undefined,
+          body: c.body ?? "",
+          author: c.user?.login ?? "unknown",
+        }));
     });
 
   /** Re-request review from `reviewers` (F4 #157) — used after a rework push, never to open a new PR. */

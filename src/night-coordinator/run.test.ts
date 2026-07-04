@@ -561,6 +561,26 @@ describe("runNightCycle — F4 #157 rework admission (D24)", () => {
     expect(summary.reworkAdmitted).toBe(0);
     expect(queue.jobs).toHaveLength(0);
   });
+
+  it("M10: two changes_requested links on the SAME repo — only one admitted this night (same-repo-in-series)", async () => {
+    const pool = makeMockPool({
+      lockGranted: true,
+      taskContent: {
+        "trello-main:card1": { title: "Fix the bug", body: cardBody("acme-widgets"), labels: [] },
+        "trello-main:card2": { title: "Fix another bug", body: cardBody("acme-widgets"), labels: [] },
+      },
+    });
+    const prLinks = makeInMemoryPrLinkRepository();
+    await seedLink(prLinks, { taskId: "card1", branch: "openroutines/card-card1", prNumber: 42 });
+    await seedLink(prLinks, { taskId: "card2", branch: "openroutines/card-card2", prNumber: 43 }); // same repo (acme-widgets)
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue, prLinks });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.reworkAdmitted).toBe(1);
+    expect(queue.jobs).toHaveLength(1);
+  });
 });
 
 describe("runNightCycle — D22/F4 #186 Telegram alert on night-run crash", () => {
