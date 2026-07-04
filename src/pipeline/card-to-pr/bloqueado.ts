@@ -11,6 +11,7 @@ import { isSecurityBlockReason, sendTelegramAlert } from "../../notify/telegram.
 import type { CardToPrDeps } from "./index.js";
 import type { PreparacaoOutput } from "./preparacao.js";
 import type { VerifyOutput } from "./verify.js";
+import type { RevisaoOutput } from "../../review/aggregate.js";
 
 const BLOCK_DETAILS: Record<string, { faltando: string; proximoPasso: string }> = {
   "repo-nao-resolvivel": {
@@ -36,7 +37,18 @@ const blockedBody = (reason: string): string => {
 export const makeBloqueado = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
   const preparacao = ctx.outputs.preparacao as PreparacaoOutput | undefined;
   const verify = ctx.outputs.verify as VerifyOutput | undefined;
-  const blockReason = preparacao?.blockReason ?? verify?.blockReason ?? "desconhecido";
+  const revisao = ctx.outputs.revisao as RevisaoOutput | undefined;
+  // #153 security issue extends securityVerdict with `secondJudge` (independent
+  // 2nd judge in a critical area) — read defensively; aggregate.ts's exported
+  // type stays minimal (`{approved, findings, criticalArea}`) until that lands.
+  const securityVerdict = revisao?.securityVerdict as { approved: boolean; secondJudge?: { diverged?: boolean } } | null | undefined;
+  const securityBlockReason =
+    securityVerdict?.approved === false
+      ? securityVerdict.secondJudge?.diverged === true
+        ? "seguranca-divergente"
+        : "seguranca"
+      : undefined;
+  const blockReason = preparacao?.blockReason ?? verify?.blockReason ?? securityBlockReason ?? "desconhecido";
   const sourceId = String(ctx.inputs.source_id);
   const taskId = String(ctx.inputs.task_id);
 

@@ -20,10 +20,19 @@ import { runVerifyCommands } from "../../verify/run-commands.js";
 import { getOrCreateBaseline } from "../../verify/baseline.js";
 import { pickEnv, BASE_ENV_VARS } from "../../util/env.js";
 import { sendTelegramAlert } from "../../notify/telegram.js";
+import { aggregateRevisao } from "../../review/aggregate.js";
 import { makePreparacao } from "./preparacao.js";
 import { makeVerify } from "./verify.js";
 import { makePr } from "./pr.js";
 import { makeBloqueado } from "./bloqueado.js";
+
+/**
+ * Named `type: fanout` aggregators for card-to-pr (F4 #153) — resolved by the
+ * runner via `StateMachineConfig.fanoutAggregators` when a state declares
+ * `aggregate: aggregateRevisao` (see skill.yaml's `revisao` state). Wiring
+ * this into StateMachineConfig at boot is the next agent's job (app.ts).
+ */
+export const cardToPrFanoutAggregators = { aggregateRevisao };
 
 const execFileAsync = promisify(execFile);
 

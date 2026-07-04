@@ -352,9 +352,9 @@ export const runStateMachine = (
         outputs[stateId] = fanout.output;
         yield* Effect.log(`[StateMachine] Fanout state ${stateId} completed (${fanout.output.lentes.length} lenses, approved=${fanout.output.approved})`);
         yield* persistStateContext(repository, executionId, snapshotContext(stateId));
-      } else if (!state.agent_prompt && state.gate) {
+      } else if (!state.agent_prompt && !state.agent_prompt_file && state.gate) {
         yield* Effect.log(`[StateMachine] State ${stateId} is gate-only, skipping LLM`);
-      } else if (!state.agent_prompt) {
+      } else if (!state.agent_prompt && !state.agent_prompt_file) {
         yield* Effect.log(`[StateMachine] State ${stateId} has no agent_prompt and no gate`);
         return yield* fail(`State ${stateId} has no agent_prompt and no gate`);
       } else {
@@ -375,8 +375,21 @@ export const runStateMachine = (
         if (auto.succeeded) {
           yield* Effect.log(`[StateMachine] Auto-action succeeded for ${stateId}, skipping LLM loop`);
         } else {
+          // agent_prompt_file (F4 #153) — same file-template alternative already
+          // supported for fanout lenses, generalized to regular agent states so
+          // e.g. `refutacao` can keep its prompt in its own .md file.
+          let promptTemplate: string;
+          if (state.agent_prompt !== undefined) {
+            promptTemplate = state.agent_prompt;
+          } else {
+            try {
+              promptTemplate = readFileSync(state.agent_prompt_file!, "utf-8");
+            } catch (err) {
+              return yield* fail(`agent_prompt_file read failed for state ${stateId}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
           const context: TemplateContext = buildContext(inputs, outputs, templateOutputPath);
-          const prompt = renderTemplate(state.agent_prompt, context);
+          const prompt = renderTemplate(promptTemplate, context);
           yield* Effect.log(`[StateMachine] Rendered prompt for ${stateId}: ${prompt.slice(0, 300)}`);
 
           if (runStateRepository) {

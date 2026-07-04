@@ -1,10 +1,16 @@
 id: card-to-pr
 name: Card to PR
 description: >
-  Thick-state pipeline (F3 pilot): 1 Trello card -> 1 PR. Each phase is one full
-  CLI-agent invocation or one deterministic script, not a micro-tool loop.
-  preparacao -> plano -> implementacao -> verify -> pr_gate (human) -> pr -> done,
-  diverting to bloqueado when the repo has no branch protection or verify stalls.
+  Thick-state pipeline (F3 pilot, F4 #153 adversarial review): 1 Trello card ->
+  1 PR. Each phase is one full CLI-agent invocation or one deterministic
+  script, not a micro-tool loop.
+  preparacao -> plano -> implementacao -> verify -> revisao -> pr -> done,
+  diverting to refutacao on a contestable gap and to bloqueado when the repo
+  has no branch protection, verify stalls, or the adversarial review/security
+  lens never clears. The old `pr_gate` (manual human gate) is REMOVED: the
+  fanout `revisao` state (correctness/conventions + data + security lenses)
+  now IS the pre-PR gate, and the human approval step moves to the GitHub PR
+  review itself (D13: merge still requires a human, just later in the flow).
 
 inputs:
   required:
@@ -70,15 +76,71 @@ states:
     type: script
     script: card-to-pr-verify
     transitions:
-      - { to: pr_gate, when: "output.verify.passed == true" }
+      - { to: revisao, when: "output.verify.passed == true" }
       - { to: implementacao, when: "output.verify.retryable == true" }
       - { to: bloqueado }
 
-  pr_gate:
-    description: Human approval before any push/PR.
-    gate: manual_approval
+  revisao:
+    description: >
+      Adversarial multi-lens review (F4 #153), fresh context per lens: 3 lenses
+      in this order — correctness+conventions/raizes-docs (Kimi, always, 1
+      call/2 rubrics), data/Prisma (Sonnet, read-only tools, only when the
+      diff touches data files), security (security-judge provider, Opus,
+      always — the composite Opus(+Fable in critical areas)/confidence/
+      adjudication mechanics live in that provider, implemented by a separate
+      issue; here it's just a provider name). Replaces `pr_gate`: this state +
+      the security lens IS the pre-PR gate now.
+    type: fanout
+    lenses:
+      - name: correctness
+        provider: kimi-cli
+        model: kimi-k2.6
+        agent_prompt_file: .gates/skills/card-to-pr/prompts/revisao-correcao.md
+        output_schema: .gates/skills/card-to-pr/schemas/lens-correctness.json
+      - name: data
+        provider: claude-cli
+        model: claude-sonnet-5
+        tools: [Read, Grep, Glob]
+        when: "output.verify.dataChanges == true"
+        agent_prompt_file: .gates/skills/card-to-pr/prompts/revisao-dados.md
+        output_schema: .gates/skills/card-to-pr/schemas/lens-data.json
+      - name: security
+        provider: security-judge
+        model: claude-opus-4-8
+        agent_prompt_file: .gates/skills/card-to-pr/prompts/revisao-seguranca.md
+        output_schema: .gates/skills/card-to-pr/schemas/lens-security.json
+    aggregate: aggregateRevisao
     transitions:
-      - { to: pr }
+      # Order matters (first true `when` wins): refutacao is ALWAYS checked
+      # before bloqueado — on the first pass gaps.length>0 is already true,
+      # before anything could have gone through adjudication yet. A security
+      # finding still `status:"open"` surfaces as a gap too, so it takes this
+      # SAME edge — never a direct shortcut to bloqueado.
+      - { to: refutacao, when: "output.revisao.gaps.length > 0", max_retries: 2, on_exhausted: bloqueado }
+      - { to: bloqueado, when: "output.revisao.securityVerdict.approved == false" }
+      - { to: pr, when: "output.revisao.approved == true" }
+      # F5 #160 adds the ValidacaoVisual edge here (approved + isUI).
+      - { to: bloqueado }
+
+  refutacao:
+    description: >
+      Generic adversarial-gap responder (F4 #153): receives every contestable
+      gap from the last `revisao` pass (correctness/conventions/data/security,
+      including a security finding still open) as a delimited fix-list and
+      decides, for the batch, whether to fix or contest with evidence.
+      #185 will route this state's tier dynamically (complexity routing); for
+      now it always runs at the card's original executor tier.
+    type: agent
+    provider: claude-cli
+    model: claude-sonnet-5
+    output_schema: .gates/skills/card-to-pr/schemas/refutacao.schema.json
+    agent_prompt_file: .gates/skills/card-to-pr/prompts/refutacao.md
+    tools:
+      - read_file
+      - emit_output
+    transitions:
+      - { to: implementacao, when: "output.refutacao.status == 'corrigir'" }
+      - { to: revisao, when: "output.refutacao.status == 'contestado'" }
 
   pr:
     description: Push, open PR to the integration branch, hand the card off to Review — all idempotent.

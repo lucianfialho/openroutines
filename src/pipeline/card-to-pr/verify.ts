@@ -28,6 +28,8 @@ export interface VerifyOutput {
   newFailures: string[];
   knownFailures: string[];
   forbiddenPathsTouched: string[];
+  /** Full diff --name-only list vs base (F4 #153) — the security/critical-area lens needs the real file list, not just the derived booleans. */
+  changedFiles: string[];
   diffLoc: number;
   isUI: boolean;
   dataChanges: boolean;
@@ -121,6 +123,7 @@ export const makeVerify = (deps: CardToPrDeps): ScriptHandler => async (ctx) => 
     newFailures: diff.newFailures,
     knownFailures: diff.knownFailures,
     forbiddenPathsTouched,
+    changedFiles: changed,
     diffLoc,
     isUI,
     dataChanges,

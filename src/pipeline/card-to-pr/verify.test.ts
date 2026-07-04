@@ -259,7 +259,11 @@ describe("makeVerify", () => {
 
     const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
 
-    expect(r).toMatchObject({ isUI: true, dataChanges: true });
+    expect(r).toMatchObject({
+      isUI: true,
+      dataChanges: true,
+      changedFiles: ["src/Button.tsx", "prisma/schema.prisma", "src/persistence/migrations/017_x.sql"],
+    });
   });
 
   it("isUI/dataChanges are both false for a diff touching neither UI nor data files", async () => {

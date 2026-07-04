@@ -70,6 +70,43 @@ describe("makeBloqueado", () => {
     expect(body).toContain("Próximo passo: revisar os logs de verify, ajustar a implementação manualmente e reabrir o card");
   });
 
+  it("F4 #153: derives blockReason 'seguranca' from a reproved outputs.revisao.securityVerdict", async () => {
+    const { deps } = makeDeps();
+    const outputs = { preparacao: { branchProtected: true }, revisao: { approved: false, gaps: [], securityVerdict: { approved: false, findings: [], criticalArea: false } } };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "seguranca" });
+  });
+
+  it("F4 #153: derives blockReason 'seguranca-divergente' when securityVerdict.secondJudge.diverged is true", async () => {
+    const { deps } = makeDeps();
+    const outputs = {
+      preparacao: { branchProtected: true },
+      revisao: {
+        approved: false,
+        gaps: [],
+        securityVerdict: { approved: false, findings: [], criticalArea: true, secondJudge: { diverged: true } },
+      },
+    };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "seguranca-divergente" });
+  });
+
+  it("F4 #153: an approved (or absent) securityVerdict never derives a security blockReason", async () => {
+    const { deps } = makeDeps();
+    const outputs = {
+      preparacao: { branchProtected: true },
+      revisao: { approved: true, gaps: [], securityVerdict: { approved: true, findings: [], criticalArea: false } },
+    };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "desconhecido" });
+  });
+
   it("AC3: defaults blockReason to 'desconhecido' (unmapped detail) when neither preparacao nor verify carry one", async () => {
     const { deps, comment } = makeDeps();
 

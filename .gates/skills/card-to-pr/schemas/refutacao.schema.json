@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "card-to-pr refutacao output",
+  "type": "object",
+  "required": ["status"],
+  "properties": {
+    "status": { "type": "string", "enum": ["corrigir", "contestado"] },
+    "evidencia": { "type": "string" },
+    "correcoes": { "type": "array", "items": { "type": "string" } }
+  }
+}

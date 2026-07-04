@@ -49,6 +49,8 @@ export const SkillLensSchema = z
 export const SkillStateSchema = z.object({
   description: z.string().optional(),
   agent_prompt: z.string().optional(),
+  /** Prompt template loaded from a file (F4 #153) — alternative to inline agent_prompt, same as SkillLensSchema's. */
+  agent_prompt_file: z.string().optional(),
   output_schema: z.string().optional(),
   output_path: z.string().optional(),
   tools: z.array(z.string()).optional(),

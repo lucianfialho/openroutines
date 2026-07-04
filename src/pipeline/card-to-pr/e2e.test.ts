@@ -1,11 +1,14 @@
 /**
- * card-to-pr E2E (F3 #146): drives the REAL skill.yaml through
+ * card-to-pr E2E (F3 #146, F4 #153): drives the REAL skill.yaml through
  * runStateMachine with the 4 script handlers registered and every external
  * effect mocked/injected — mirrors src/engine/state-machine-f1.test.ts's
  * harness pattern.
  *
- * preparacao -> plano -> implementacao -> verify(passed) -> pr_gate(pauses)
- * -> [approve] -> pr(mock push+PR) -> done.
+ * preparacao -> plano -> implementacao -> verify(passed) -> revisao (fanout,
+ * approved; dataChanges stays false in this fixture so the data lens never
+ * fires) -> pr(mock push+PR) -> done. `pr_gate` is gone (F4 #153): the
+ * adversarial review + security lens ARE the pre-PR gate now, so this happy
+ * path no longer pauses for manual approval.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
@@ -14,13 +17,12 @@ import { Effect } from "effect";
 import { runStateMachine, type StateMachineContext } from "../../engine/state-machine.js";
 import { makeScriptRegistry } from "../../script/registry.js";
 import { parseSkillStateMachine } from "../../skill/parser.js";
-import { makeGateEngine } from "../../gate/gate.js";
-import { makeInMemoryGateRepository } from "../../gate/in-memory.js";
 import { makeInMemoryActionLedgerRepository } from "../../persistence/action-ledger-in-memory.js";
 import { makeInMemoryPrLinkRepository } from "../../persistence/pr-links-in-memory.js";
-import { registerCardToPrHandlers } from "./index.js";
+import { registerCardToPrHandlers, cardToPrFanoutAggregators } from "./index.js";
 import type { CardToPrDeps } from "./index.js";
 import type { CompletionResponse } from "../../provider/types.js";
+import type { ProviderRegistry } from "../../provider/registry.js";
 import type { Routine } from "../../routine/types.js";
 import type { TriggerEvent } from "../../routine/matcher.js";
 import type { ExecutionRecord } from "../../persistence/types.js";
@@ -64,20 +66,8 @@ const makeRepo = () => {
   };
 };
 
-/** Sequenced provider: one CompletionResponse per call, holds the last past the end of the queue. */
-const seqProvider = (responses: CompletionResponse[]) => {
-  let calls = 0;
-  return {
-    complete: () => {
-      const r = responses[Math.min(calls, responses.length - 1)];
-      calls++;
-      return Effect.succeed(r);
-    },
-  };
-};
-
-describe("card-to-pr E2E (#146)", () => {
-  it("preparacao -> plano -> implementacao -> verify -> pr_gate (pauses) -> approve -> pr -> done", async () => {
+describe("card-to-pr E2E (#146, #153)", () => {
+  it("preparacao -> plano -> implementacao -> verify -> revisao (approved) -> pr -> done", async () => {
     const skill = parseSkillStateMachine(readFileSync(".gates/skills/card-to-pr/skill.yaml", "utf-8"));
 
     const registry: RepoRegistry = {
@@ -139,7 +129,6 @@ describe("card-to-pr E2E (#146)", () => {
     const scriptRegistry = makeScriptRegistry();
     registerCardToPrHandlers(scriptRegistry, deps);
 
-    const gateEngine = makeGateEngine({ repository: makeInMemoryGateRepository() });
     const repo = makeRepo();
 
     const planoJson = JSON.stringify({
@@ -161,7 +150,37 @@ describe("card-to-pr E2E (#146)", () => {
       notes: "done",
       openDecisions: [],
     });
-    const provider = seqProvider([resp(planoJson), resp(implementacaoJson)]);
+    // plano/implementacao both declare provider:claude-cli and are served in
+    // order from one queue. The revisao fanout (F4 #153) resolves its lenses
+    // to their OWN named providers: correctness (kimi-cli) and security
+    // (security-judge) always answer approved; data (claude-cli) is never
+    // called because runGit's diff is empty here (dataChanges stays false).
+    const claudeCliResponses = [resp(planoJson), resp(implementacaoJson)];
+    let claudeCliCalls = 0;
+    const providerRegistry: ProviderRegistry = {
+      resolve: (name) => {
+        // Compare against a plain string key (not the ProviderName literal
+        // union) since "security-judge" is a provider registered by a
+        // separate issue and isn't (yet) one of ProviderName's members.
+        const key = String(name);
+        if (key === "claude-cli") {
+          return {
+            complete: () => {
+              const r = claudeCliResponses[Math.min(claudeCliCalls, claudeCliResponses.length - 1)];
+              claudeCliCalls++;
+              return Effect.succeed(r);
+            },
+          };
+        }
+        if (key === "kimi-cli") {
+          return { complete: () => Effect.succeed(resp(JSON.stringify({ approved: true, gaps: [] }))) };
+        }
+        if (key === "security-judge") {
+          return { complete: () => Effect.succeed(resp(JSON.stringify({ approved: true, findings: [], criticalArea: false }))) };
+        }
+        throw new Error(`e2e fixture: unexpected provider '${key}'`);
+      },
+    };
 
     const event: TriggerEvent = {
       type: "task_source",
@@ -175,23 +194,20 @@ describe("card-to-pr E2E (#146)", () => {
       },
     } as TriggerEvent;
 
-    const config = { provider, repository: repo.repo, scriptRegistry, gateEngine };
+    const config = {
+      provider: { complete: () => Effect.succeed(resp("{}")) }, // never invoked: every agent state resolves via providerRegistry
+      providerRegistry,
+      repository: repo.repo,
+      scriptRegistry,
+      fanoutAggregators: cardToPrFanoutAggregators,
+    };
 
-    const r1 = await Effect.runPromise(runStateMachine(config)(skill, routine, event, "exec1"));
-    expect(r1.success).toBe(false);
-    expect(r1.paused).toBe(true);
-    expect(r1.gateId).toBeTruthy();
-    expect(repo.get("exec1")!.status).toBe("paused");
+    const r = await Effect.runPromise(runStateMachine(config)(skill, routine, event, "exec1"));
 
-    await gateEngine.approve(r1.gateId!, "approved in test");
-
-    const context = repo.lastContext();
-    expect(context?.currentState).toBe("pr_gate");
-
-    const r2 = await Effect.runPromise(runStateMachine(config)(skill, routine, event, "exec1", context));
-
-    expect(r2.success).toBe(true);
+    expect(r.success).toBe(true);
+    expect(r.logs.join(" ")).toContain("Reached terminal state: done");
     expect(moveToCalls).toContainEqual(["card1", "review"]);
+    expect(claudeCliCalls).toBe(2); // plano + implementacao only — the data lens never fires
 
     const links = await prLinks.findByTask("trello-main", "card1");
     expect(links).toHaveLength(1);
