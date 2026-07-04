@@ -10,10 +10,14 @@ import type { CardSteering, CardSteeringRepository } from "./types.js";
 export const makePostgresCardSteeringRepository = (pool: Pool): CardSteeringRepository => {
   return {
     save: async (steering) => {
+      // COALESCE lets a caller pin the id (so it can markApplied the exact row
+      // it just saved without a round-trip SELECT); omitted, the table default
+      // mints one. The in-memory repo already honors steering.id the same way.
       await pool.query(
-        `INSERT INTO card_steering (source_id, task_id, author_trello_id, text, applied, effect_type)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
+        `INSERT INTO card_steering (id, source_id, task_id, author_trello_id, text, applied, effect_type)
+         VALUES (COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5, $6, $7)`,
         [
+          steering.id ?? null,
           steering.sourceId,
           steering.taskId,
           steering.authorTrelloId,

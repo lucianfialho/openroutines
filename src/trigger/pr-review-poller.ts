@@ -37,6 +37,28 @@ export interface PrReviewPollSummary {
   closed: number;
 }
 
+/**
+ * The single "admit this PR to next night's rework queue" transition (D24),
+ * shared by this poller (on a GitHub CHANGES_REQUESTED) and async human
+ * steering (F5 #169, a 🧭 on a Review card): move the card Review -> Working,
+ * comment why, and flip review_state so the night coordinator's EXISTING
+ * admitReworkCards picks it up — there is deliberately no second rework path.
+ * External actions first (moveTo is idempotent by construction), persisted
+ * review_state last — a crash in between re-runs both on the next tick.
+ */
+export const transitionToRework = async (
+  prLinks: PrLinkRepository,
+  ts: TaskSource | undefined,
+  link: { sourceId: string; taskId: string; branch: string },
+  reason: string
+): Promise<void> => {
+  if (ts) {
+    await Effect.runPromise(ts.moveTo(link.taskId, "working"));
+    await Effect.runPromise(ts.comment(link.taskId, reason));
+  }
+  await prLinks.update({ sourceId: link.sourceId, taskId: link.taskId, branch: link.branch }, { reviewState: "changes_requested" });
+};
+
 export const runPrReviewPoll = async (deps: PrReviewPollDeps): Promise<PrReviewPollSummary> => {
   const summary: PrReviewPollSummary = { checked: 0, changesRequested: 0, closed: 0 };
   const links = await deps.prLinks.findOpen();
@@ -75,19 +97,12 @@ export const runPrReviewPoll = async (deps: PrReviewPollDeps): Promise<PrReviewP
       snapshot.changesRequestedBy.length > 0 &&
       snapshot.changesRequestedBy.every((login) => snapshot.pendingReviewRequests.includes(login));
     if (snapshot.reviewState === "CHANGES_REQUESTED" && !alreadyActed && !staleReRequest) {
-      // External actions first (moveTo is idempotent by construction), persisted
-      // review_state last — a crash in between re-runs both on the next tick.
-      const ts = deps.taskSourceFor(link.sourceId);
-      if (ts) {
-        await Effect.runPromise(ts.moveTo(link.taskId, "working"));
-        await Effect.runPromise(
-          ts.comment(
-            link.taskId,
-            `↩️ [Retrabalho] o PR #${link.prNumber} recebeu changes_requested — o card volta para Working e entra na fila de retrabalho da próxima noite.`
-          )
-        );
-      }
-      await deps.prLinks.update(key, { reviewState: "changes_requested" });
+      await transitionToRework(
+        deps.prLinks,
+        deps.taskSourceFor(link.sourceId),
+        { sourceId: link.sourceId, taskId: link.taskId, branch: link.branch },
+        `↩️ [Retrabalho] o PR #${link.prNumber} recebeu changes_requested — o card volta para Working e entra na fila de retrabalho da próxima noite.`
+      );
       summary.changesRequested++;
     }
   }

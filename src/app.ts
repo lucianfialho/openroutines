@@ -63,7 +63,10 @@ import { makeInMemoryRepoLearningRepository } from "./persistence/repo-learnings
 import { makePostgresRepoLearningRepository } from "./persistence/repo-learnings-postgres.js";
 import { makeSimilarCards } from "./orchestrator/tactical-memory.js";
 import { loadTaskSources, type ResolvedTaskSource } from "./task-source/loader.js";
-import { makeTrelloTaskSource, makeTrelloCreateCard } from "./connector/trello.js";
+import { makeTrelloTaskSource, makeTrelloCreateCard, makeTrelloLinkCards, makeTrelloReadComments } from "./connector/trello.js";
+import { runSteeringPoll, type SteeringPollDeps } from "./orchestrator/steering.js";
+import { makePostgresPollStateRepository } from "./persistence/poll-state-postgres.js";
+import { makePostgresCardSteeringRepository } from "./persistence/card-steering-postgres.js";
 import { makeRestTaskSource } from "./task-source/rest-executor.js";
 import type { TaskSource, TaskComplexity } from "./task-source/types.js";
 import { registerCardToPrHandlers, cardToPrFanoutAggregators } from "./pipeline/card-to-pr/index.js";
@@ -581,6 +584,10 @@ export const createApp = async (config: AppConfig) => {
   // Hoisted so the night-coordinator (which syncs these sources' queues into
   // `tasks`) can reuse the same live TaskSource instances built below.
   let cardTaskSources: Map<string, TaskSource> | undefined;
+  // Hoisted resolved Trello auth (F5 #169) — the steering poll wiring below
+  // (outside the `if (config.githubToken)` block where resolvedSources lives)
+  // needs board + key + token + sourceId to read comments and seed cards.
+  let trelloSteeringConfig: { boardId: string; apiKey: string; apiToken: string; sourceId: string } | undefined;
 
   if (config.githubToken) {
     // git_commit is commit-only (no push — D13, the orchestrator owns the
@@ -621,6 +628,18 @@ export const createApp = async (config: AppConfig) => {
         } catch (err) {
           console.warn(`[App] Skipping task source '${resolved.entry.id}':`, err instanceof Error ? err.message : err);
         }
+      }
+
+      const trelloEntry = resolvedSources.find((s) => s.entry.type === "trello");
+      const trelloKey = trelloEntry?.entry.auth.key ? process.env[trelloEntry.entry.auth.key] : undefined;
+      const trelloToken = trelloEntry?.entry.auth.token ? process.env[trelloEntry.entry.auth.token] : undefined;
+      if (trelloEntry?.entry.containers.board && trelloKey && trelloToken) {
+        trelloSteeringConfig = {
+          boardId: trelloEntry.entry.containers.board,
+          apiKey: trelloKey,
+          apiToken: trelloToken,
+          sourceId: trelloEntry.entry.id,
+        };
       }
 
       // One action ledger shared by every pipeline that fires idempotent
@@ -793,6 +812,8 @@ export const createApp = async (config: AppConfig) => {
   let nightCoordinatorDeps: RunNightCycleDeps | undefined;
   // PR-review poller deps (F4 #157) — same gating/lifecycle as the coordinator.
   let prReviewPollDeps: PrReviewPollDeps | undefined;
+  // Steering poller deps (F5 #169) — runs on the same daytime tick as PR-review.
+  let steeringPollDeps: SteeringPollDeps | undefined;
 
   // 6. Setup queue (connects to engine)
   const queueHandler = async (job: { id?: string; routineId?: string; trigger: { type: string; payload: unknown; executionId?: string } }) => {
@@ -813,12 +834,19 @@ export const createApp = async (config: AppConfig) => {
     // transitions (CHANGES_REQUESTED -> card back to Working, merged/closed ->
     // link closed). Same interception pattern as night-run.
     if (job.routineId === "pr-review-poll" && job.trigger.type === "schedule") {
-      if (!prReviewPollDeps) {
+      // Two independent sweeps share this daytime tick: the GitHub PR-review
+      // poll (F4 #157) and the Trello human-steering poll (F5 #169). Each runs
+      // if wired; neither gates the other (steering needs no GitHub token).
+      if (prReviewPollDeps) {
+        const summary = await runPrReviewPoll(prReviewPollDeps);
+        console.log(`[Queue] PR review poll: ${JSON.stringify(summary)}`);
+      } else {
         console.warn("[Queue] pr-review-poll cron fired but the poller is not wired (need DATABASE_URL + GITHUB_TOKEN + repos.yaml)");
-        return;
       }
-      const summary = await runPrReviewPoll(prReviewPollDeps);
-      console.log(`[Queue] PR review poll: ${JSON.stringify(summary)}`);
+      if (steeringPollDeps) {
+        const summary = await runSteeringPoll(steeringPollDeps);
+        console.log(`[Queue] Steering poll: ${JSON.stringify(summary)}`);
+      }
       return;
     }
 
@@ -918,6 +946,10 @@ export const createApp = async (config: AppConfig) => {
   // queueHandler and /trigger/night-run above/below via closure, both of which
   // only fire well after createApp has returned.
   if (pgPool && repoRegistry && config.githubToken) {
+    // Shared across the coordinator and the steering poll (F5 #169): the
+    // Blocked-resume admission reads what the poll persists.
+    const cardSteeringRepo = makePostgresCardSteeringRepository(pgPool);
+    const nightTaskRepo = makePostgresTaskRepository(pgPool);
     nightCoordinatorDeps = {
       pool: pgPool,
       registry: repoRegistry,
@@ -938,7 +970,8 @@ export const createApp = async (config: AppConfig) => {
       // poller runtime is unwired) so the claim loop has rows to claim.
       sources: cardTaskSources ? [...cardTaskSources.keys()] : [],
       taskSourceFor: (id) => cardTaskSources?.get(id),
-      taskRepo: makePostgresTaskRepository(pgPool),
+      taskRepo: nightTaskRepo,
+      cardSteering: cardSteeringRepo,
     };
     prReviewPollDeps = {
       prLinks,
@@ -948,6 +981,33 @@ export const createApp = async (config: AppConfig) => {
     };
     console.log("[App] Night coordinator wired (POST /trigger/night-run, cron 0 1 * * *)");
     console.log("[App] PR-review poller wired (cron */30 8-22 * * *)");
+
+    // Steering poll (F5 #169): whitelisted humans steer via 🧭 comments. Needs
+    // a resolved Trello source (board/key/token) and a live TaskSource for it.
+    const steeringTaskSource = trelloSteeringConfig ? cardTaskSources?.get(trelloSteeringConfig.sourceId) : undefined;
+    if (trelloSteeringConfig && steeringTaskSource) {
+      const whitelist = (process.env.TRELLO_STEERING_WHITELIST ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      steeringPollDeps = {
+        sourceId: trelloSteeringConfig.sourceId,
+        taskSource: steeringTaskSource,
+        cardSteering: cardSteeringRepo,
+        pollState: makePostgresPollStateRepository(pgPool),
+        prLinks,
+        taskRepo: nightTaskRepo,
+        readComments: makeTrelloReadComments(trelloSteeringConfig),
+        createCard: makeTrelloCreateCard(trelloSteeringConfig),
+        linkCards: makeTrelloLinkCards(trelloSteeringConfig),
+        whitelist,
+      };
+      console.log(
+        `[App] Steering poller wired (cron */30 8-22 * * *, whitelist: ${whitelist.length} member(s))`
+      );
+    } else {
+      console.log("[App] Steering poller not wired (need a 'trello' task source with key+token)");
+    }
   } else {
     console.log("[App] Night coordinator not wired (need DATABASE_URL + GITHUB_TOKEN + repos.yaml)");
   }

@@ -532,3 +532,67 @@ export const makeTrelloLinkCards =
     await attach(a.id, b.url);
     await attach(b.id, a.url);
   };
+
+export interface SteeringComment {
+  actionId: string;
+  cardId: string;
+  text: string;
+  memberId: string; // idMemberCreator — the whitelist is matched against this…
+  memberUsername?: string; // …or this (TRELLO_STEERING_WHITELIST accepts either)
+}
+
+export interface TrelloReadCommentsConfig extends TrelloAuthConfig {
+  boardId: string;
+}
+
+/**
+ * Board-wide card-comment reader for async human steering (F5 #169). Unlike
+ * watchNew (which reads card MOVES), this reads `commentCard` actions since a
+ * cursor — a Trello action id OR ISO date (`since` accepts both). A null
+ * cursor SEEDS to "now" and returns nothing: the poller must not replay every
+ * historical 🧭 on first boot. Returns oldest-first so a burst of comments
+ * applies in the order the human wrote them; the next cursor is the newest
+ * action's id (Trello returns them newest-first). Standalone export, not a
+ * TaskSource method, for the same reason createCard/linkCards are — a
+ * Trello-only read the shared interface (github.ts too) never covered.
+ */
+export const makeTrelloReadComments =
+  (cfg: TrelloReadCommentsConfig) =>
+  async (cursor: string | null): Promise<{ comments: SteeringComment[]; cursor: string }> => {
+    if (cursor === null) return { comments: [], cursor: new Date().toISOString() };
+    const auth = `key=${encodeURIComponent(cfg.apiKey)}&token=${encodeURIComponent(cfg.apiToken)}`;
+    const params = [
+      "filter=commentCard",
+      `since=${encodeURIComponent(cursor)}`,
+      "limit=1000",
+      "memberCreator=true",
+      "memberCreator_fields=username",
+      "fields=id,date,data,idMemberCreator",
+      auth,
+    ].join("&");
+    const res = await fetch(
+      `https://api.trello.com/1/boards/${encodeURIComponent(cfg.boardId)}/actions?${params}`
+    );
+    if (!res.ok) throw new Error(`trello: failed to read comments (${res.status})`);
+    const actions = (await res.json()) as Array<{
+      id: string;
+      idMemberCreator: string;
+      data?: { text?: string; card?: { id?: string } };
+      memberCreator?: { username?: string };
+    }>;
+    if (actions.length === 0) return { comments: [], cursor };
+    const comments: SteeringComment[] = [];
+    for (const a of actions) {
+      const cardId = a.data?.card?.id;
+      if (!cardId || typeof a.data?.text !== "string") continue;
+      comments.push({
+        actionId: a.id,
+        cardId,
+        text: a.data.text,
+        memberId: a.idMemberCreator,
+        memberUsername: a.memberCreator?.username,
+      });
+    }
+    comments.reverse(); // newest-first from Trello -> oldest-first for the caller
+    return { comments, cursor: actions[0].id };
+  };

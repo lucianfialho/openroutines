@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { readFileSync } from "fs";
 import { Effect } from "effect";
-import { makeTrelloTaskSource, makeTrelloCreateCard, makeTrelloLinkCards } from "./trello.js";
+import { makeTrelloTaskSource, makeTrelloCreateCard, makeTrelloLinkCards, makeTrelloReadComments } from "./trello.js";
 import type { TrelloConfig } from "./trello.js";
 import { parseConnectorManifest } from "../task-source/parser.js";
 
@@ -509,5 +509,52 @@ describe("connector.yaml", () => {
     expect(manifest.classification?.complexity).toEqual({ field: "Complexidade" });
     expect(manifest.classification?.priority).toEqual({ field: "Prioridade" });
     expect(manifest.capabilities).toEqual(["customFields", "twoStepClassification"]);
+  });
+});
+
+describe("makeTrelloReadComments (F5 #169)", () => {
+  const cfg = { boardId: "board-1", apiKey: "key123", apiToken: "token456" };
+
+  it("null cursor seeds to now and reads nothing (no historical 🧭 replay, no fetch)", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const read = makeTrelloReadComments(cfg);
+    const result = await read(null);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.comments).toEqual([]);
+    expect(new Date(result.cursor).toString()).not.toBe("Invalid Date");
+  });
+
+  it("reads commentCard actions since the cursor, oldest-first, cursor -> newest action id", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse(200, [
+        { id: "a3", idMemberCreator: "m1", date: "2026-01-03", data: { text: "🧭 newest", card: { id: "card-9" } }, memberCreator: { username: "henrik" } },
+        { id: "a2", idMemberCreator: "m2", date: "2026-01-02", data: { text: "not steering", card: { id: "card-8" } } },
+        { id: "a1", idMemberCreator: "m1", date: "2026-01-01", data: { text: "🧭 oldest", card: { id: "card-7" } } },
+      ])
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await makeTrelloReadComments(cfg)("cursor-old");
+
+    const url = callUrl(fetchMock, 0);
+    expect(url.pathname).toBe("/1/boards/board-1/actions");
+    expect(url.searchParams.get("filter")).toBe("commentCard");
+    expect(url.searchParams.get("since")).toBe("cursor-old");
+    // oldest-first, all mapped (including the non-🧭 one — the poll filters those)
+    expect(result.comments.map((c) => c.actionId)).toEqual(["a1", "a2", "a3"]);
+    expect(result.comments[2]).toMatchObject({ cardId: "card-9", text: "🧭 newest", memberId: "m1", memberUsername: "henrik" });
+    expect(result.cursor).toBe("a3");
+  });
+
+  it("with no new actions returns the received cursor unchanged", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(200, []));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await makeTrelloReadComments(cfg)("cursor-old");
+
+    expect(result).toEqual({ comments: [], cursor: "cursor-old" });
   });
 });
