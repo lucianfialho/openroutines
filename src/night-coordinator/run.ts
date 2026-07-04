@@ -59,6 +59,8 @@ export interface RunNightCycleDeps {
   nightWindowEnd: string; // "HH:MM"
   nightBudgetUsd: number;
   nightPrCap: number;
+  /** Per-repo open-PR cap (F5 #168, policy.yaml backpressure.max_open_prs_per_repo). */
+  perRepoOpenPrCap?: number;
   nightParallelism: number;
   tz: string;
   /**
@@ -479,6 +481,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
           {
             prLinks: deps.prLinks,
             nightPrCap: deps.nightPrCap,
+            perRepoOpenPrCap: deps.perRepoOpenPrCap,
             githubToken: deps.githubToken,
             registry: deps.registry,
             makeGithub: deps.makeGithub,
