@@ -52,6 +52,8 @@ export interface RiskScoreInput {
   touchesAuthOrMoney: boolean;
   newDependencies: number;
   lowConfidenceFindings: number;
+  /** Raw semgrep finding count (#158/#185 H10) — unlike lowConfidenceFindings, this is never 0 by construction when SemgrepFinding lacks `confidence`; isGreenLane needs the real count, not the confidence-filtered one. */
+  semgrepFindingsCount: number;
   testDelta: number;
   visualConfidence?: number;
   repoCritical: boolean;
@@ -106,8 +108,10 @@ export const isGreenLane = (input: RiskScoreInput, opts: { enabled: boolean }): 
   opts.enabled &&
   input.diffLoc <= GREEN_LANE_MAX_DIFF_LOC &&
   !input.dataChanges &&
+  !input.touchesAuthOrMoney &&
   input.newDependencies === 0 &&
   input.lowConfidenceFindings === 0 &&
+  input.semgrepFindingsCount === 0 &&
   (input.visualConfidence === undefined || input.visualConfidence >= VISUAL_CONFIDENCE_THRESHOLD) &&
   !input.repoCritical;
 
@@ -135,12 +139,18 @@ export const buildRiskSection = (input: { repo: string; sha: string; hunks: Risk
   return ["## 🎯 Revise isto primeiro", "", `⏱️ ~${input.minutes} min`, "", body].join("\n");
 };
 
-/** One `gh pr merge --squash` per PR, chained with `&&` — text only, never executed here, no network call. */
-export const buildGreenLaneBlock = (
-  prs: Array<{ repo: string; owner: string; prNumber: number; diffSummary: string }>
-): string => {
+/**
+ * One `gh pr merge --squash` per PR, chained with `&&` — text only, never
+ * executed here, no network call.
+ *
+ * M6: `gh pr merge <prUrl> --squash` (not `owner/repo#123`, which `gh`
+ * mis-parses as a branch name and which cross-repo batches need `-R` for
+ * anyway) — the full URL is unambiguous regardless of which repo `gh` is
+ * invoked from. Callers must already have filtered out entries with no URL.
+ */
+export const buildGreenLaneBlock = (prs: Array<{ prUrl: string; diffSummary: string }>): string => {
   if (prs.length === 0) return "";
-  const items = prs.map((p) => `- **${p.owner}/${p.repo}#${p.prNumber}** — ${p.diffSummary}`);
-  const mergeCommand = prs.map((p) => `gh pr merge ${p.owner}/${p.repo}#${p.prNumber} --squash`).join(" && ");
+  const items = prs.map((p) => `- **${p.prUrl}** — ${p.diffSummary}`);
+  const mergeCommand = prs.map((p) => `gh pr merge ${p.prUrl} --squash`).join(" && ");
   return ["## 🟢 Faixa verde — merge em lote", "", ...items, "", "```bash", mergeCommand, "```"].join("\n");
 };

@@ -166,8 +166,6 @@ export const gatherMorningReportData = async (
   };
 };
 
-const GITHUB_PR_URL_RE = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/;
-
 const renderSecurityBlocks = (blocks: MorningReportData["securityBlocks"]): string => {
   if (blocks.length === 0) return "";
   const items = blocks.map((b) => `- [${b.title}](${b.trelloUrl || "#"}) — ${b.blockReason}`);
@@ -183,15 +181,12 @@ const renderPrs = (prs: MorningReportData["prs"]): string => {
   return ["## 🎯 PRs para revisar (por risco)", "", ...items].join("\n");
 };
 
+// M6: a PR with no registered URL (no prNumber yet) can't build a valid `gh pr
+// merge` target — skip it rather than fabricate a placeholder.
 const renderGreenLane = (prs: MorningReportData["prs"]): string => {
   const greenLaneInputs = prs
-    .filter((p) => p.greenLane)
-    .map((p) => {
-      const match = GITHUB_PR_URL_RE.exec(p.prUrl);
-      return match
-        ? { owner: match[1], repo: match[2], prNumber: Number(match[3]), diffSummary: `risk_score ${p.riskScore}` }
-        : { owner: "", repo: p.repo, prNumber: 0, diffSummary: `risk_score ${p.riskScore}` };
-    });
+    .filter((p) => p.greenLane && p.prUrl)
+    .map((p) => ({ prUrl: p.prUrl, diffSummary: `risk_score ${p.riskScore}` }));
   return buildGreenLaneBlock(greenLaneInputs);
 };
 

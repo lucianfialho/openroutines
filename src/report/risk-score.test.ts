@@ -20,6 +20,7 @@ const zeroInput: RiskScoreInput = {
   touchesAuthOrMoney: false,
   newDependencies: 0,
   lowConfidenceFindings: 0,
+  semgrepFindingsCount: 0,
   testDelta: 0,
   visualConfidence: undefined,
   repoCritical: false,
@@ -83,6 +84,14 @@ describe("isGreenLane", () => {
 
   it("lowConfidenceFindings > 0 (achados presentes) -> false", () => {
     expect(isGreenLane({ ...green, lowConfidenceFindings: 1 }, { enabled: true })).toBe(false);
+  });
+
+  it("H10: semgrepFindingsCount > 0 -> false even when lowConfidenceFindings (the confidence-filtered count) is 0", () => {
+    expect(isGreenLane({ ...green, lowConfidenceFindings: 0, semgrepFindingsCount: 1 }, { enabled: true })).toBe(false);
+  });
+
+  it("H10: touchesAuthOrMoney -> false (an auth/payment/migration/webhook diff never green-lanes)", () => {
+    expect(isGreenLane({ ...green, touchesAuthOrMoney: true }, { enabled: true })).toBe(false);
   });
 
   it("visualConfidence < 0.9 -> false", () => {
@@ -182,13 +191,15 @@ describe("buildRiskSection", () => {
 });
 
 describe("buildGreenLaneBlock", () => {
-  it("2 PRs -> 1 comando gh pr merge cobrindo os dois, sem chamada de rede", () => {
+  it("2 PRs -> 1 comando gh pr merge cobrindo os dois por URL (cross-repo-safe), sem chamada de rede", () => {
     const block = buildGreenLaneBlock([
-      { owner: "acme", repo: "widgets", prNumber: 10, diffSummary: "+5 -1 in src/foo.ts" },
-      { owner: "acme", repo: "gadgets", prNumber: 11, diffSummary: "+2 -0 in src/bar.ts" },
+      { prUrl: "https://github.com/acme/widgets/pull/10", diffSummary: "+5 -1 in src/foo.ts" },
+      { prUrl: "https://github.com/acme/gadgets/pull/11", diffSummary: "+2 -0 in src/bar.ts" },
     ]);
 
-    expect(block).toContain("gh pr merge acme/widgets#10 --squash && gh pr merge acme/gadgets#11 --squash");
+    expect(block).toContain(
+      "gh pr merge https://github.com/acme/widgets/pull/10 --squash && gh pr merge https://github.com/acme/gadgets/pull/11 --squash"
+    );
   });
 
   it("empty list -> empty string, no crash", () => {

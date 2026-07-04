@@ -79,6 +79,24 @@ describe("renderMorningReportCard — exact section order (D29)", () => {
     expect(body.length).toBeLessThan(MAX_BODY_CHARS);
   });
 
+  it("M6: renders a valid 'gh pr merge <url> --squash' command for a green-lane PR, not the invalid owner/repo#number syntax", () => {
+    const { body } = renderMorningReportCard(syntheticData());
+    expect(body).toContain("gh pr merge https://github.com/acme/beta/pull/5 --squash");
+  });
+
+  it("M6: a green-lane PR with no registered URL is skipped from the merge command instead of fabricating a broken target", () => {
+    const data: MorningReportData = {
+      ...syntheticData(),
+      prs: [
+        ...syntheticData().prs,
+        { cardId: "card-c", prUrl: "", repo: "acme-widgets", riskScore: 5, greenLane: true, estimatedMinutes: 2 },
+      ],
+    };
+    const { body } = renderMorningReportCard(data);
+    const mergeLine = body.split("\n").find((l) => l.startsWith("gh pr merge"));
+    expect(mergeLine).toBe("gh pr merge https://github.com/acme/beta/pull/5 --squash"); // only the PR that HAS a URL
+  });
+
   it("truncates with a note instead of crashing when the body exceeds MAX_BODY_CHARS", () => {
     const manyPrs: MorningReportData["prs"] = Array.from({ length: 400 }, (_, i) => ({
       cardId: `card-${i}`,

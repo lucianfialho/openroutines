@@ -123,7 +123,11 @@ describe("makeVerify", () => {
   });
 
   it("AC4: a root-level dotfile and a .git/ path are both forbidden; a normal src file is not", async () => {
-    const runGit = vi.fn(async () => ({ stdout: ".env\nsrc/index.ts\n.git/config\n", stderr: "" }));
+    const runGit = vi.fn(async (args: string[]) =>
+      args.includes("--numstat")
+        ? { stdout: "2\t0\t.env\n1\t1\tsrc/index.ts\n5\t0\t.git/config\n", stderr: "" }
+        : { stdout: ".env\nsrc/index.ts\n.git/config\n", stderr: "" }
+    );
     const runVerify = vi.fn(async () => passingResults);
     const handler = makeVerify(baseDeps({ runGit, runVerify }));
     const preparacao = preparacaoFixture();
@@ -133,8 +137,49 @@ describe("makeVerify", () => {
     expect(r).toMatchObject({
       passed: false,
       forbiddenPathsTouched: [".env", ".git/config"],
-      diffLoc: 3,
+      diffLoc: 9, // real LOC (added+deleted from --numstat), not the 3-file count
     });
+  });
+
+  it("H4: a diff touching docs/openroutines/security-fp.md is forbidden — a demote-the-finding-you're-being-judged-on trick never reproves clean", async () => {
+    const runGit = vi.fn(async () => ({ stdout: "docs/openroutines/security-fp.md\nsrc/index.ts\n", stderr: "" }));
+    const runVerify = vi.fn(async () => passingResults);
+    const handler = makeVerify(baseDeps({ runGit, runVerify }));
+
+    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+
+    expect(r).toMatchObject({
+      passed: false,
+      forbiddenPathsTouched: ["docs/openroutines/security-fp.md"],
+    });
+  });
+
+  it("M8: diffLoc sums --numstat added+deleted across files, not the changed-file count", async () => {
+    const runGit = vi.fn(async (args: string[]) =>
+      args.includes("--numstat")
+        ? { stdout: "10\t5\tsrc/a.ts\n0\t3\tsrc/b.ts\n", stderr: "" }
+        : { stdout: "src/a.ts\nsrc/b.ts\n", stderr: "" }
+    );
+    const runVerify = vi.fn(async () => passingResults);
+    const handler = makeVerify(baseDeps({ runGit, runVerify }));
+
+    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+
+    expect(r).toMatchObject({ diffLoc: 18 }); // (10+5) + (0+3), NOT changed.length (2)
+  });
+
+  it("M8: a binary file's '-\\t-\\tfile' numstat line contributes 0, never NaN", async () => {
+    const runGit = vi.fn(async (args: string[]) =>
+      args.includes("--numstat")
+        ? { stdout: "-\t-\tassets/logo.png\n4\t1\tsrc/a.ts\n", stderr: "" }
+        : { stdout: "assets/logo.png\nsrc/a.ts\n", stderr: "" }
+    );
+    const runVerify = vi.fn(async () => passingResults);
+    const handler = makeVerify(baseDeps({ runGit, runVerify }));
+
+    const r = await handler({ inputs, outputs: { preparacao: preparacaoFixture() }, executionId: "e1", stateId: "verify" });
+
+    expect(r).toMatchObject({ diffLoc: 5 });
   });
 
   it("forbids a .env at ANY depth (monorepo secrets), not just at the repo root", async () => {

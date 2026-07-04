@@ -18,6 +18,7 @@ import {
   type SastResult,
 } from "../../verify/sast.js";
 import type { BaselineResults } from "../../verify/baseline.js";
+import { SECURITY_FP_FILE_PATH } from "../../security/fp-file.js";
 import { defaultRunGit, type CardToPrDeps } from "./index.js";
 import type { PreparacaoOutput } from "./preparacao.js";
 
@@ -43,20 +44,37 @@ export interface VerifyOutput {
   blockReason?: string;
 }
 
-// A change under .git/, a GitHub Actions workflow, a root-level dotfile, or a
-// .env at ANY depth (apps/api/.env in a monorepo — secrets) is never something
-// the model should be touching.
+// A change under .git/, a GitHub Actions workflow, a root-level dotfile, a
+// .env at ANY depth (apps/api/.env in a monorepo — secrets), or the security
+// false-positive file itself (H4: the security-judge reads this file from the
+// card's OWN worktree HEAD — a diff adding an entry there demotes findings
+// against the same diff it's supposedly excusing) is never something the
+// model should be touching.
 const isForbiddenPath = (p: string): boolean =>
   p.startsWith(".git/") ||
   p.startsWith(".github/workflows/") ||
   /^\.[^/]+$/.test(p) ||
-  p.split("/").some((seg) => seg.startsWith(".env"));
+  p.split("/").some((seg) => seg.startsWith(".env")) ||
+  p === SECURITY_FP_FILE_PATH;
 
 // Diff-derived, never the card's own text (F1 rule: scope decisions are
 // always deterministic off the real diff) — consumed by the review phase via
 // outputs.verify.isUI / outputs.verify.dataChanges.
 const isUIFile = (p: string): boolean => /\.(tsx|jsx)$/.test(p);
 const isDataChangeFile = (p: string): boolean => /\.prisma$/.test(p) || /(^|\/)migrations\//.test(p) || /\.sql$/.test(p);
+
+// M8: `git diff --numstat` lines are "added\tdeleted\tfile" (binary files use
+// "-\t-\tfile" — Number("-") is NaN, treated as 0 line, same as git's own CLI
+// summary). Sums real changed lines, the unit GREEN_LANE_MAX_DIFF_LOC
+// (risk-score.ts) is actually calibrated in — a file count is not.
+const sumNumstat = (stdout: string): number =>
+  stdout
+    .split("\n")
+    .filter(Boolean)
+    .reduce((sum, line) => {
+      const [added, deleted] = line.split("\t");
+      return sum + (Number(added) || 0) + (Number(deleted) || 0);
+    }, 0);
 
 export const makeVerify = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
   // Rework flow (F4 #157) enters at rework_preparacao, whose output is
@@ -77,7 +95,8 @@ export const makeVerify = (deps: CardToPrDeps): ScriptHandler => async (ctx) => 
   const { stdout } = await runGit(["diff", "--name-only", base, "HEAD"], wt);
   const changed = stdout.split("\n").filter(Boolean);
   const forbiddenPathsTouched = changed.filter(isForbiddenPath);
-  const diffLoc = changed.length; // ponytail: file count stands in for LOC for the pilot.
+  const { stdout: numstat } = await runGit(["diff", "--numstat", base, "HEAD"], wt);
+  const diffLoc = sumNumstat(numstat);
   const isUI = changed.some(isUIFile);
   const dataChanges = changed.some(isDataChangeFile);
 

@@ -124,8 +124,16 @@ const prNumberFromUrl = (url: string): number | undefined => {
  * (detached worktree HEAD -> refs/heads/<branch>, NEVER --force) and
  * re-request review — this path NEVER creates a PR. Completing a round
  * increments rework_count and stamps last_rework_night_id / the new
- * last_agent_commit_sha, all inside one ledger-guarded step so a crash-resume
- * can never double-count.
+ * last_agent_commit_sha.
+ *
+ * M4: the ledger alone does NOT make this crash-safe — a true process crash
+ * between the pr_links.update below and runIdempotent's own ledger.complete()
+ * leaves the "pr:rework-complete" entry 'pending' forever (never 'done', never
+ * 'failed'), so a resume re-invokes this same run() with the SAME newHeadSha
+ * while pr_links already carries round 1's write. The reentrancy guard below
+ * (lastAgentCommitSha === newHeadSha && reviewState === 're-requested') detects
+ * exactly that "round 1 already wrote this" state and no-ops instead of
+ * incrementing reworkCount a 2nd time.
  */
 const prForRework = async (deps: CardToPrDeps, ctx: ScriptContext, reworkPrep: ReworkPreparacaoOutput) => {
   const worktree = reworkPrep.worktree!;
@@ -155,10 +163,15 @@ const prForRework = async (deps: CardToPrDeps, ctx: ScriptContext, reworkPrep: R
     deps.ledger,
     { executionId: ctx.executionId, stateId: "pr", actionKey: "pr:rework-complete" },
     async () => {
+      const link = (await deps.prLinks.findByTask(sourceId, taskId)).find((l) => l.branch === branch);
+      // M4 reentrancy guard: round 1 already wrote this exact HEAD — a resume
+      // after a crash here must not request review or increment again.
+      if (link?.lastAgentCommitSha === newHeadSha && link.reviewState === "re-requested") {
+        return {};
+      }
       if ((reworkPrep.reviewers ?? []).length > 0) {
         await Effect.runPromise(github.requestReview(prNumber, reworkPrep.reviewers!));
       }
-      const link = (await deps.prLinks.findByTask(sourceId, taskId)).find((l) => l.branch === branch);
       await deps.prLinks.update(
         { sourceId, taskId, branch },
         {
@@ -239,6 +252,10 @@ export const makePr = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
     touchesAuthOrMoney: changedFiles.some(isSensitivePath),
     newDependencies: verify?.dependencyAudit?.new?.length ?? 0,
     lowConfidenceFindings: countLowConfidenceFindings(verify?.semgrepFindings),
+    // H10: raw count, regardless of confidence — SemgrepFinding (sast.ts)
+    // carries no `confidence` field, so lowConfidenceFindings above is always
+    // 0 for semgrep and can never gate green lane on its own.
+    semgrepFindingsCount: verify?.semgrepFindings?.length ?? 0,
     // No test-delta signal is wired anywhere yet (the red->green test-writer
     // phase between gate_plano/implementacao, 03-PIPELINE-EXECUCAO.md L187,
     // isn't in skill.yaml yet) — see openDecisions.

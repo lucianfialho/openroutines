@@ -264,6 +264,28 @@ describe("makePr", () => {
       expect(h.moveTo).toHaveBeenCalledWith("card1", "review");
       expect(h.comment).toHaveBeenCalledWith("card1", expect.stringContaining("Retrabalho"));
     });
+
+    it("M4: a crash between pr_links.update and ledger.complete never double-increments reworkCount on resume", async () => {
+      const h = await makeReworkHarness();
+      // Simulate round 1's run() already having executed successfully — pr_links
+      // stamped with reworkCount:1/newHeadSha/re-requested — but the process
+      // crashed before ledger.complete recorded "pr:rework-complete" as done.
+      // The ledger entry is still 'pending', exactly what a boot-reconciliation
+      // resume re-invokes.
+      await h.deps.ledger.recordPending("exec-rw", "pr", "git:push");
+      await h.deps.ledger.complete("exec-rw", "git:push");
+      await h.deps.ledger.recordPending("exec-rw", "pr", "pr:rework-complete");
+      await h.prLinks.update(
+        { sourceId: "trello-main", taskId: "card1", branch: "openroutines/card-t1" },
+        { lastAgentCommitSha: "newhead789", reviewState: "re-requested", reworkCount: 1, lastReworkNightId: "night-2" }
+      );
+
+      await makePr(h.deps)({ inputs: reworkInputs, outputs: reworkOutputs(), executionId: "exec-rw", stateId: "pr" });
+
+      const link = (await h.prLinks.findByTask("trello-main", "card1"))[0];
+      expect(link.reworkCount).toBe(1); // guard prevented a 2nd increment
+      expect(h.requestReview).not.toHaveBeenCalled(); // round 1 already requested it
+    });
   });
 
   describe("F4 #158: risk radar + green lane", () => {

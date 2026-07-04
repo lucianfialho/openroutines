@@ -107,4 +107,42 @@ describe("makeInMemoryRepository", () => {
     expect(await repo.findByTask("trello-main", "missing")).toHaveLength(0);
     expect(await repo.findById("exec-3")).toEqual(legacy);
   });
+
+  it("H3: a save() with no metadata (succeed()/fail()'s shape) never nulls out metadata a prior save() already stored", async () => {
+    const repo = makeInMemoryRepository();
+    const withMetadata: ExecutionRecord = {
+      id: "exec-1",
+      routineId: "routine-a",
+      triggerType: "task_source",
+      skillName: "solve-issue",
+      status: "running",
+      metadata: { stateMachineContext: { outputs: { verify: { passed: true } } } },
+      startedAt: new Date("2024-01-01"),
+    };
+    await repo.save(withMetadata);
+
+    // succeed() persists a fresh record with `metadata` entirely absent.
+    await repo.save({ ...withMetadata, status: "completed", output: "done" });
+
+    const found = await repo.findById("exec-1");
+    expect(found?.status).toBe("completed");
+    expect(found?.metadata).toEqual({ stateMachineContext: { outputs: { verify: { passed: true } } } });
+  });
+
+  it("an explicit new metadata value still overwrites the previous one", async () => {
+    const repo = makeInMemoryRepository();
+    const record: ExecutionRecord = {
+      id: "exec-1",
+      routineId: "routine-a",
+      triggerType: "task_source",
+      skillName: "solve-issue",
+      status: "running",
+      metadata: { blockReason: "old" },
+      startedAt: new Date("2024-01-01"),
+    };
+    await repo.save(record);
+    await repo.save({ ...record, metadata: { blockReason: "new" } });
+
+    expect((await repo.findById("exec-1"))?.metadata).toEqual({ blockReason: "new" });
+  });
 });

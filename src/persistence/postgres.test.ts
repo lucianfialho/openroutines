@@ -88,6 +88,27 @@ describe("makePostgresRepository", () => {
     expect(lastQuery).toContain("ON CONFLICT (id) DO UPDATE");
   });
 
+  it("H3: the upsert COALESCEs metadata against the existing row — a save() with no metadata (succeed()/fail()'s shape) must never null out a previously-persisted stateMachineContext", async () => {
+    const repo = makePostgresRepository({
+      connectionString: "postgresql://test:test@localhost/test",
+    });
+    const record: ExecutionRecord = {
+      id: "exec-1",
+      routineId: "routine-a",
+      triggerType: "task_source",
+      skillName: "solve-issue",
+      status: "completed",
+      // No metadata — exactly what state-machine.ts's succeed()/fail() persist.
+      startedAt: new Date("2024-01-01T00:00:00Z"),
+    };
+
+    await repo.save(record);
+
+    expect(lastQuery).toContain("metadata = COALESCE(EXCLUDED.metadata, executions.metadata)");
+    expect(lastQuery).not.toContain("metadata = EXCLUDED.metadata,"); // the old, clobbering clause is gone
+    expect(lastParams).toContain(null); // metadata VALUES param stays null when absent — COALESCE is what protects it
+  });
+
   it("should find by id", async () => {
     mockRows = [
       {
