@@ -47,6 +47,59 @@ interface PullRequest {
   headRefName: string;
 }
 
+/** Aggregated review state of a PR (F4 #157) — one value per PR, not per reviewer. */
+export type ReviewAggregateState = "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "PENDING";
+
+export interface PullRequestReviewSnapshot {
+  /** gh pr view state: OPEN | CLOSED | MERGED. */
+  prState: string;
+  reviewState: ReviewAggregateState;
+  /** Logins whose LATEST review is CHANGES_REQUESTED — the re-request targets. */
+  changesRequestedBy: string[];
+  /** Latest review per reviewer, as gh reports it (body carries the review summary). */
+  latestReviews: Array<{ author: string; state: string; body: string }>;
+  /**
+   * Logins with a review request currently PENDING. After a re-request, the
+   * reviewer stays here (and their stale CHANGES_REQUESTED still shows in
+   * latestReviews) until they actually re-review — the poller uses this to
+   * tell a stale verdict from a fresh one (F4 #157).
+   */
+  pendingReviewRequests: string[];
+}
+
+export interface PullRequestReviewComment {
+  file: string;
+  line?: number;
+  body: string;
+  author: string;
+}
+
+/**
+ * Latest-review-per-reviewer -> one aggregate: any CHANGES_REQUESTED wins,
+ * else any APPROVED, else any review at all is COMMENTED, else PENDING.
+ */
+export const aggregateReviewState = (
+  latestReviews: Array<{ state: string }>
+): ReviewAggregateState => {
+  if (latestReviews.some((r) => r.state === "CHANGES_REQUESTED")) return "CHANGES_REQUESTED";
+  if (latestReviews.some((r) => r.state === "APPROVED")) return "APPROVED";
+  return latestReviews.length > 0 ? "COMMENTED" : "PENDING";
+};
+
+// GitHub logins: alphanumeric + inner hyphens, max 39 chars — validated before
+// reaching argv (defense in depth; the value is embedded after `reviewers[]=`).
+const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
+/**
+ * M2/#157: on a public repo, ANY GitHub account can review a PR or leave an
+ * inline comment — but a CHANGES_REQUESTED (and its body) drives a rework
+ * round straight into an agent with edit/write/run_shell/git_commit. Only
+ * these author_association values are trusted enough to steer that (griefing
+ * / prompt-injection otherwise); an absent association (missing field) fails
+ * closed, never trusted.
+ */
+const TRUSTED_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
 const ensureBranch = (branch: string): Effect.Effect<void, GitHubCliError> =>
   BRANCH_RE.test(branch)
     ? Effect.succeed(undefined)
@@ -184,6 +237,115 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
       yield* execGh(["issue", "comment", String(number), "--body", body]);
     });
 
+  /** PR conversation comment (F4 #157) — `gh issue comment` rejects PR numbers, so this uses `gh pr comment`. */
+  const commentOnPullRequest = (
+    number: number,
+    body: string
+  ): Effect.Effect<void, GitHubCliError> =>
+    Effect.gen(function* () {
+      yield* ensureNumber(number);
+      yield* Effect.log(`[GitHub] Commenting on PR #${number}`);
+      yield* execGh(["pr", "comment", String(number), "--body", body]);
+    });
+
+  /**
+   * Review-state snapshot of a PR (F4 #157, D24): one gh call returns the PR's
+   * open/closed/merged state AND gh's latest-review-per-reviewer list, which
+   * this aggregates to APPROVED|CHANGES_REQUESTED|COMMENTED|PENDING.
+   */
+  const listPullRequestReviews = (
+    number: number
+  ): Effect.Effect<PullRequestReviewSnapshot, GitHubCliError> =>
+    Effect.gen(function* () {
+      yield* ensureNumber(number);
+      yield* Effect.log(`[GitHub] Listing reviews for PR #${number}`);
+      const output = yield* execGh(["pr", "view", String(number), "--json", "state,latestReviews,reviewRequests"]);
+      const parsed = JSON.parse(output) as {
+        state?: string;
+        latestReviews?: Array<{ author?: { login?: string }; state?: string; body?: string; authorAssociation?: string }>;
+        reviewRequests?: Array<{ login?: string; slug?: string }>;
+      };
+      // M2/#157: drop untrusted reviewers BEFORE aggregating/listing — gh
+      // already returns authorAssociation on every review, it was just never
+      // read.
+      const latestReviews = (parsed.latestReviews ?? [])
+        .filter((r) => TRUSTED_AUTHOR_ASSOCIATIONS.has(r.authorAssociation ?? ""))
+        .map((r) => ({
+          author: r.author?.login ?? "unknown",
+          state: r.state ?? "",
+          body: r.body ?? "",
+        }));
+      return {
+        prState: parsed.state ?? "OPEN",
+        reviewState: aggregateReviewState(latestReviews),
+        changesRequestedBy: latestReviews.filter((r) => r.state === "CHANGES_REQUESTED").map((r) => r.author),
+        latestReviews,
+        pendingReviewRequests: (parsed.reviewRequests ?? [])
+          .map((r) => r.login ?? r.slug ?? "")
+          .filter(Boolean),
+      };
+    });
+
+  /** Inline review comments of a PR (file/line/body/author) via the REST endpoint (F4 #157). */
+  const listReviewComments = (
+    number: number
+  ): Effect.Effect<PullRequestReviewComment[], GitHubCliError> =>
+    Effect.gen(function* () {
+      yield* ensureNumber(number);
+      yield* Effect.log(`[GitHub] Listing review comments for PR #${number}`);
+      // {owner}/{repo} placeholders resolve from GH_REPO (set in this connector's env).
+      // --paginate (M9/#157): gh's default page is 30, oldest-first — a
+      // heavily-commented PR would silently drop exactly the newest round's
+      // feedback. Verified against the real REST endpoint (single JSON array
+      // response) that --paginate concatenates every page into one array, so
+      // the JSON.parse below is unaffected.
+      // ACCEPTED FOLLOW-UP (M9, second half): comments from already-resolved
+      // review threads are still returned and re-enter the rework fix-list,
+      // so an agent can burn a rework round re-addressing settled feedback.
+      // The REST endpoint has no isResolved; filtering needs the GraphQL
+      // reviewThreads API (or a created_at > last agent push cutoff).
+      const output = yield* execGh(["api", `repos/{owner}/{repo}/pulls/${number}/comments`, "--paginate"]);
+      const parsed = JSON.parse(output) as Array<{
+        path?: string;
+        line?: number | null;
+        original_line?: number | null;
+        body?: string;
+        user?: { login?: string };
+        author_association?: string;
+      }>;
+      // M2/#157: same trust filter as listPullRequestReviews — an inline
+      // comment from an untrusted association must never reach the fix-list.
+      return parsed
+        .filter((c) => TRUSTED_AUTHOR_ASSOCIATIONS.has(c.author_association ?? ""))
+        .map((c) => ({
+          file: c.path ?? "",
+          line: c.line ?? c.original_line ?? undefined,
+          body: c.body ?? "",
+          author: c.user?.login ?? "unknown",
+        }));
+    });
+
+  /** Re-request review from `reviewers` (F4 #157) — used after a rework push, never to open a new PR. */
+  const requestReview = (
+    number: number,
+    reviewers: string[]
+  ): Effect.Effect<void, GitHubCliError> =>
+    Effect.gen(function* () {
+      yield* ensureNumber(number);
+      if (reviewers.length === 0) return;
+      for (const login of reviewers) {
+        if (!LOGIN_RE.test(login)) {
+          return yield* Effect.fail(new GitHubCliError(`Invalid GitHub login: ${login}`));
+        }
+      }
+      yield* Effect.log(`[GitHub] Re-requesting review on PR #${number} from ${reviewers.join(", ")}`);
+      yield* execGh([
+        "api", `repos/{owner}/{repo}/pulls/${number}/requested_reviewers`,
+        "-X", "POST",
+        ...reviewers.flatMap((login) => ["-f", `reviewers[]=${login}`]),
+      ]);
+    });
+
   const listIssues = (
     state: "open" | "closed" | "all" = "open",
     limit: number = 30
@@ -207,5 +369,9 @@ export const makeGitHubConnector = (config: GitHubConfig) => {
     getPullRequest,
     createPullRequest,
     addComment,
+    commentOnPullRequest,
+    listPullRequestReviews,
+    listReviewComments,
+    requestReview,
   };
 };

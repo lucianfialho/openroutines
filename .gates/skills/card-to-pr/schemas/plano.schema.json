@@ -2,13 +2,14 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "card-to-pr plano output",
   "type": "object",
-  "required": ["summary", "files", "testStrategy"],
+  "required": ["summary", "files", "testStrategy", "needsArchGate"],
   "properties": {
     "summary": { "type": "string" },
     "files": { "type": "array", "items": { "type": "string" } },
     "estimatedLoc": { "type": "number" },
     "dataChanges": { "type": "array", "items": { "type": "string" } },
     "testStrategy": { "type": "string" },
+    "needsArchGate": { "type": "boolean" },
     "risks": { "type": "array", "items": { "type": "string" } }
   }
 }

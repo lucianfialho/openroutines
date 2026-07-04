@@ -25,21 +25,33 @@ import { promisify } from "util";
 import type { Pool } from "pg";
 import type { RepoConfig } from "../repo-registry/schema.js";
 import { runVerifyCommands, type VerifyResults } from "./run-commands.js";
+import { runSast, type SastResult } from "./sast.js";
 
 const execFileAsync = promisify(execFile);
 
 export interface BaselineDeps {
   pool: Pool;
+  runSast?: typeof runSast; // injectable seam for tests — same DI pattern as CardToPrDeps.runVerify
 }
+
+/**
+ * VerifyResults plus a SAST snapshot of the base branch (F4 #155), so
+ * card-to-pr/verify.ts's filterSastAgainstBaseline can tell a pre-existing
+ * finding from a new one. Additive and optional: a baseline row persisted
+ * before #155 has no `sast` key at all, and every reader treats that the same
+ * as an empty snapshot (filterSastAgainstBaseline's `baseline ?? emptySastResult()`)
+ * — never a breaking read of old rows.
+ */
+export type BaselineResults = VerifyResults & { sast?: SastResult };
 
 export interface Baseline {
   baseSha: string;
-  results: VerifyResults;
+  results: BaselineResults;
 }
 
 const rowToBaseline = (row: Record<string, unknown>): Baseline => ({
   baseSha: row.base_sha as string,
-  results: row.results as VerifyResults,
+  results: row.results as BaselineResults,
 });
 
 const readBaseline = async (pool: Pool, repo: string, nightId: string): Promise<Baseline | undefined> => {
@@ -63,7 +75,13 @@ export const getOrCreateBaseline = async (
   await execFileAsync("git", ["checkout", repoConfig.baseBranch], { cwd: repoConfig.clonePath, timeout: GIT_TIMEOUT_MS });
   const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repoConfig.clonePath, timeout: GIT_TIMEOUT_MS });
   const baseSha = stdout.trim();
-  const results = await runVerifyCommands(repoConfig.clonePath, repoConfig.verify);
+  const verifyResults = await runVerifyCommands(repoConfig.clonePath, repoConfig.verify);
+  // Full-repo scan (baseSha omitted) — there's no "before" to diff against for
+  // the base branch itself; this is the reference snapshot every card's own
+  // diff-scoped runSast gets filtered against (see card-to-pr/verify.ts).
+  const doSast = deps.runSast ?? runSast;
+  const sast = await doSast(repoConfig.clonePath);
+  const results: BaselineResults = { ...verifyResults, sast };
 
   const inserted = await deps.pool.query(
     `INSERT INTO verify_baselines (repo, night_id, base_sha, results)

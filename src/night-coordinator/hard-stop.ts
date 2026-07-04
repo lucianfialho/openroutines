@@ -11,6 +11,7 @@
  */
 import type { Pool } from "pg";
 import { killExecutionProcessGroup } from "../provider/process-cleanup.js";
+import { sendTelegramAlert } from "../notify/telegram.js";
 import type { ExecutionRepository, ExecutionProcessRepository } from "../persistence/types.js";
 
 const parseHHMM = (hhmm: string): number => {
@@ -52,6 +53,8 @@ export interface HardStopDeps {
   executionProcessRepo: ExecutionProcessRepository;
   pool: Pool;
   nightId: string;
+  /** Telegram alert seam (D22, F4 #186) — defaults to the real sender; tests inject a mock. */
+  sendAlert?: typeof sendTelegramAlert;
 }
 
 /** "YYYY-MM-DD" of `now`'s wall-clock date in `tz` — the night_runs.date key. */
@@ -114,5 +117,13 @@ export const enforceHardStop = async (deps: HardStopDeps): Promise<void> => {
       error: existing.error ?? "night window closed (hard stop)",
       metadata: { ...(existing.metadata ?? {}), blockReason: "timeout" },
     });
+  }
+
+  // D22/F4 #186: ONE aggregated alert per night-run (not one per execution),
+  // and only when work was actually interrupted — a clean window close with
+  // nothing left `running` fires zero alerts.
+  if (rows.length > 0) {
+    const sendAlert = deps.sendAlert ?? sendTelegramAlert;
+    await sendAlert(`⏰ hard-stop: ${rows.length} execução(ões) interrompida(s) em andamento`);
   }
 };

@@ -53,7 +53,7 @@ export const makePostgresRepository = (
         completion_tokens = EXCLUDED.completion_tokens,
         total_tokens = EXCLUDED.total_tokens,
         finished_at = EXCLUDED.finished_at,
-        metadata = EXCLUDED.metadata,
+        metadata = COALESCE(EXCLUDED.metadata, executions.metadata),
         cost_usd = EXCLUDED.cost_usd,
         provider_breakdown = EXCLUDED.provider_breakdown,
         source_id = EXCLUDED.source_id,
@@ -151,6 +151,9 @@ const rowToRecord = (row: Record<string, unknown>): ExecutionRecord => ({
   providerBreakdown: (row.provider_breakdown as Record<string, number>) ?? undefined,
   sourceId: (row.source_id as string) ?? undefined,
   taskId: (row.task_id as string) ?? undefined,
+  // Set once by the night-coordinator's raw INSERT (run.ts), never by save()
+  // (its INSERT/UPDATE column lists omit night_id on purpose) — read-only here.
+  nightId: (row.night_id as string) ?? undefined,
   startedAt: row.started_at as Date,
   finishedAt: (row.finished_at as Date) ?? undefined,
 });

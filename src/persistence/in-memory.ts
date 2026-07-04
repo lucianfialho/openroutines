@@ -11,7 +11,12 @@ export const makeInMemoryRepository = (): ExecutionRepository => {
 
   return {
     save: async (record) => {
-      store.set(record.id, record);
+      // H3: succeed()/fail() (state-machine.ts) persist a fresh record with no
+      // `metadata` at all — mirror postgres.ts's `COALESCE(EXCLUDED.metadata,
+      // executions.metadata)` so an absent metadata never nulls out what an
+      // earlier persistStateContext() call already stored for this id.
+      const existing = store.get(record.id);
+      store.set(record.id, { ...record, metadata: record.metadata ?? existing?.metadata });
     },
     findById: async (id) => store.get(id),
     findByRoutine: async (routineId) =>

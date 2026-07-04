@@ -29,6 +29,7 @@ import { renderTemplate, type TemplateContext } from "./template.js";
 import { extractOutput } from "./output.js";
 import { evaluateCondition } from "./condition.js";
 import { validate, type JsonSchema } from "./schema-validate.js";
+import { classifyFailure, isSameFailureSignature, TRANSIENT_RETRY_CAP, FORMAT_RETRY_CAP } from "./retry-classifier.js";
 import { readFileSync, mkdirSync } from "fs";
 
 const AUTO_ACTIONS_ENABLED = !process.env.OPENROUTINES_DISABLE_AUTO_ACTIONS;
@@ -58,7 +59,30 @@ export interface StateMachineConfig {
   budgetGate?: (ctx: { phase: string; tier: string; executionId: string }) => Promise<{ granted: boolean; reservationId?: string }>;
   /** Settles a granted reservation with the invocation's actual cost. Best-effort. */
   budgetSettle?: (reservationId: string, actualUsd: number) => Promise<void>;
+  /**
+   * Complexity routing hook (F4 #185, D9): called for states declaring
+   * `dynamic_provider: true` to resolve provider/model at dispatch time.
+   * `escalated: true` marks the one extra attempt granted after a logic-retry
+   * cap exhausts (F4 #159 tier escalation) — return the next tier up, or
+   * undefined when there is none (the runner then exhausts normally). Absent
+   * hook / undefined result → the state's static provider:/model: applies.
+   */
+  resolveDynamicProvider?: (ctx: DynamicProviderContext) => { provider: string; model?: string } | undefined;
+  /** Named custom aggregators for `type: fanout` states declaring `aggregate:` (F4 #153). */
+  fanoutAggregators?: Record<string, FanoutAggregator>;
 }
+
+export interface DynamicProviderContext {
+  stateId: string;
+  state: SkillStateMachineState;
+  inputs: Record<string, unknown>;
+  outputs: Record<string, unknown>;
+  transitionCounts: Record<string, number>;
+  escalated: boolean;
+}
+
+/** Receives the raw `lentes` entries ({name, output?, error?}) and returns extra fields merged into the fanout state output. */
+export type FanoutAggregator = (lentes: Array<Record<string, unknown>>) => Record<string, unknown>;
 
 export interface StateMachineContext {
   currentState: string;
@@ -70,6 +94,12 @@ export interface StateMachineContext {
   totalCostUsd?: number;
   /** Running USD cost per provider name, preserved across resume. */
   costByProvider?: Record<string, number>;
+  /** Last failureSignature seen per retry edge — stall detection (F4 #159). */
+  lastFailureSignatures?: Record<string, string>;
+  /** Edges that already spent their one tier-escalation attempt (F4 #159). */
+  escalatedEdges?: Record<string, boolean>;
+  /** One-shot escalated routes awaiting consumption by the target state (F4 #159). */
+  pendingEscalations?: Record<string, { provider: string; model?: string }>;
 }
 
 type Provider = StateMachineConfig["provider"];
@@ -103,7 +133,9 @@ export interface ToolBatchResult {
   lastStructuredToolResult: unknown;
 }
 
-type OutputResult = { ok: true; output: unknown } | { ok: false; error: string };
+type OutputResult =
+  | { ok: true; output: unknown }
+  | { ok: false; error: string; schemaValidationFailed?: boolean };
 
 const DEFAULT_MAX_TOOL_ITERATIONS = 10;
 
@@ -134,8 +166,26 @@ export const runStateMachine = (
     const transitionCounts: Record<string, number> = context?.transitionCounts ? { ...context.transitionCounts } : {};
     let totalCostUsd = context?.totalCostUsd ?? 0;
     const costByProvider: Record<string, number> = context?.costByProvider ? { ...context.costByProvider } : {};
+    const lastFailureSignatures: Record<string, string> = context?.lastFailureSignatures ? { ...context.lastFailureSignatures } : {};
+    const escalatedEdges: Record<string, boolean> = context?.escalatedEdges ? { ...context.escalatedEdges } : {};
+    const pendingEscalations: Record<string, { provider: string; model?: string }> = context?.pendingEscalations
+      ? { ...context.pendingEscalations }
+      : {};
     let iterations = 0;
     const maxIterations = 50;
+
+    /** Full resumable context at the current instant (values read at call time). */
+    const snapshotContext = (currentState: string): StateMachineContext => ({
+      currentState,
+      outputs,
+      inputs,
+      transitionCounts,
+      totalCostUsd,
+      costByProvider,
+      lastFailureSignatures,
+      escalatedEdges,
+      pendingEscalations,
+    });
 
     const fail = (error: string, blockReason?: string): Effect.Effect<ExecutionResult, never> =>
       Effect.gen(function* () {
@@ -207,7 +257,7 @@ export const runStateMachine = (
           output: `Waiting for gate approval: ${state.gate} at state ${stateId}`,
           startedAt,
           metadata: {
-            stateMachineContext: { currentState: stateId, outputs, inputs, transitionCounts, totalCostUsd, costByProvider },
+            stateMachineContext: snapshotContext(stateId),
             gateId,
             gateType: state.gate,
             gateStatus: "pending",
@@ -241,7 +291,7 @@ export const runStateMachine = (
       yield* Effect.log(`[StateMachine] State: ${stateId}`);
 
       // Persist context at the START of each state so resume begins from the correct state
-      yield* persistStateContext(repository, executionId, stateId, outputs, inputs, transitionCounts, totalCostUsd, costByProvider);
+      yield* persistStateContext(repository, executionId, snapshotContext(stateId));
 
       // Terminal state
       if (state.terminal) {
@@ -288,20 +338,28 @@ export const runStateMachine = (
         }
         outputs[stateId] = scriptResult.value;
         yield* Effect.log(`[StateMachine] Script state ${stateId} completed`);
-        yield* persistStateContext(repository, executionId, stateId, outputs, inputs, transitionCounts, totalCostUsd, costByProvider);
+        yield* persistStateContext(repository, executionId, snapshotContext(stateId));
       } else if (state.type === "fanout") {
         // N provider calls in parallel inside one state; aggregate into {lentes, approved}.
-        const fanout = yield* runFanout(state, inputs, outputs, templateOutputPath, providerRegistry, provider, executionId, worktreePath);
+        // The budget gate reserves per LENS inside runFanout (F3 #147 / H6) —
+        // the most expensive state must not run with zero reservation.
+        const fanout = yield* runFanout(
+          state, inputs, outputs, templateOutputPath, providerRegistry, provider, executionId, worktreePath, config.fanoutAggregators,
+          config.budgetGate ? { phase: stateId, gate: config.budgetGate, settle: config.budgetSettle } : undefined
+        );
+        if (fanout.error) {
+          return yield* fail(`Fanout state ${stateId} failed: ${fanout.error}`);
+        }
         totalCostUsd += fanout.costUsd;
         for (const [pk, c] of Object.entries(fanout.costByProvider)) {
           costByProvider[pk] = (costByProvider[pk] ?? 0) + c;
         }
         outputs[stateId] = fanout.output;
         yield* Effect.log(`[StateMachine] Fanout state ${stateId} completed (${fanout.output.lentes.length} lenses, approved=${fanout.output.approved})`);
-        yield* persistStateContext(repository, executionId, stateId, outputs, inputs, transitionCounts, totalCostUsd, costByProvider);
-      } else if (!state.agent_prompt && state.gate) {
+        yield* persistStateContext(repository, executionId, snapshotContext(stateId));
+      } else if (!state.agent_prompt && !state.agent_prompt_file && state.gate) {
         yield* Effect.log(`[StateMachine] State ${stateId} is gate-only, skipping LLM`);
-      } else if (!state.agent_prompt) {
+      } else if (!state.agent_prompt && !state.agent_prompt_file) {
         yield* Effect.log(`[StateMachine] State ${stateId} has no agent_prompt and no gate`);
         return yield* fail(`State ${stateId} has no agent_prompt and no gate`);
       } else {
@@ -322,8 +380,21 @@ export const runStateMachine = (
         if (auto.succeeded) {
           yield* Effect.log(`[StateMachine] Auto-action succeeded for ${stateId}, skipping LLM loop`);
         } else {
+          // agent_prompt_file (F4 #153) — same file-template alternative already
+          // supported for fanout lenses, generalized to regular agent states so
+          // e.g. `refutacao` can keep its prompt in its own .md file.
+          let promptTemplate: string;
+          if (state.agent_prompt !== undefined) {
+            promptTemplate = state.agent_prompt;
+          } else {
+            try {
+              promptTemplate = readFileSync(state.agent_prompt_file!, "utf-8");
+            } catch (err) {
+              return yield* fail(`agent_prompt_file read failed for state ${stateId}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
           const context: TemplateContext = buildContext(inputs, outputs, templateOutputPath);
-          const prompt = renderTemplate(state.agent_prompt, context);
+          const prompt = renderTemplate(promptTemplate, context);
           yield* Effect.log(`[StateMachine] Rendered prompt for ${stateId}: ${prompt.slice(0, 300)}`);
 
           if (runStateRepository) {
@@ -337,65 +408,111 @@ export const runStateMachine = (
             })).pipe(Effect.ignore);
           }
 
-          // Resolve this state's provider from the registry (falls back to the default).
+          // Resolve this state's provider. Dynamic routing (F4 #185) runs first
+          // for states declaring `dynamic_provider: true`; a one-shot escalated
+          // route (F4 #159 tier escalation) takes precedence over the hook.
+          // Static provider:/model: from the YAML remain the fallback.
+          let routedProvider = state.provider;
+          let routedModel = state.model;
+          if (state.dynamic_provider && config.resolveDynamicProvider) {
+            const escalatedRoute = pendingEscalations[stateId];
+            if (escalatedRoute) delete pendingEscalations[stateId];
+            const route =
+              escalatedRoute ??
+              config.resolveDynamicProvider({ stateId, state, inputs, outputs, transitionCounts, escalated: false });
+            if (route) {
+              routedProvider = route.provider;
+              routedModel = route.model;
+              yield* Effect.log(`[StateMachine] Dynamic route for ${stateId}: ${routedProvider}:${routedModel ?? "default"}${escalatedRoute ? " (escalated)" : ""}`);
+            }
+          }
+
           // resolve() fails fast (throws) on an unknown name / missing credential;
           // route that through fail() so cost is still persisted, not a raw defect.
           let stateProvider: Provider;
-          if (state.provider && providerRegistry) {
+          if (routedProvider && providerRegistry) {
             try {
-              stateProvider = providerRegistry.resolve(state.provider as ProviderName, state.model);
+              stateProvider = providerRegistry.resolve(routedProvider as ProviderName, routedModel);
             } catch (err) {
               return yield* fail(`Provider resolution failed for state ${stateId}: ${err instanceof Error ? err.message : String(err)}`);
             }
           } else {
-            if (state.provider && !providerRegistry) {
-              yield* Effect.logWarning(`[StateMachine] State ${stateId} declares provider '${state.provider}' but no provider registry is wired; using the default provider`);
+            if (routedProvider && !providerRegistry) {
+              yield* Effect.logWarning(`[StateMachine] State ${stateId} declares provider '${routedProvider}' but no provider registry is wired; using the default provider`);
             }
             stateProvider = provider;
           }
 
-          // Money/rate-limit gate (F3 #147): only the real LLM invocation below
-          // is gated — script states and an already-succeeded auto_action never
-          // reach this branch at all.
-          const tier = state.model ?? state.provider ?? "default";
-          let budgetReservationId: string | undefined;
-          if (config.budgetGate) {
-            const gate = yield* Effect.promise(() => config.budgetGate!({ phase: stateId, tier, executionId }));
-            if (!gate.granted) {
-              return yield* fail(`orcamento: budget reservation denied for state ${stateId}`, "orcamento");
+          // Invocation loop (F4 #159 retry taxonomy): "format" (schema-invalid
+          // output) gets FORMAT_RETRY_CAP immediate fresh retries with a format
+          // reminder; residual "transient" provider errors (backoff already ran
+          // in the provider) get TRANSIENT_RETRY_CAP retries. Neither consumes
+          // the declarative logic cap on transitions. Anything else fails as
+          // before. Every real invocation passes the budget gate (F3 #147).
+          // ponytail: a composite judge provider (architecture-judge escalating
+          // to Fable) makes its extra internal call under this ONE reservation —
+          // accepted, no per-hop re-reserve.
+          const tier = routedModel ?? routedProvider ?? "default";
+          let formatRetriesUsed = 0;
+          let transientRetriesUsed = 0;
+          let attemptPrompt = prompt;
+          let stateOutput: unknown;
+          let stateCostUsd = 0;
+          for (;;) {
+            let budgetReservationId: string | undefined;
+            if (config.budgetGate) {
+              const gate = yield* Effect.promise(() => config.budgetGate!({ phase: stateId, tier, executionId }));
+              if (!gate.granted) {
+                return yield* fail(`orcamento: budget reservation denied for state ${stateId}`, "orcamento");
+              }
+              budgetReservationId = gate.reservationId;
             }
-            budgetReservationId = gate.reservationId;
-          }
 
-          const step = yield* executeLLMStep(stateProvider, skill.id, state, stateId, prompt, toolRegistry, worktreePath, executionId, config.maxToolIterations);
-          if (step.kind === "error") {
-            return yield* fail(step.error);
-          }
-          if (step.kind === "noResponse") {
-            return yield* fail(`No LLM response for state ${stateId}`);
-          }
+            const step = yield* executeLLMStep(stateProvider, skill.id, state, stateId, attemptPrompt, toolRegistry, worktreePath, executionId, config.maxToolIterations);
+            if (step.kind === "error") {
+              if (classifyFailure({ message: step.error }) === "transient" && transientRetriesUsed < TRANSIENT_RETRY_CAP) {
+                transientRetriesUsed++;
+                yield* Effect.log(`[StateMachine] Transient provider error in ${stateId}, retry ${transientRetriesUsed}/${TRANSIENT_RETRY_CAP}: ${step.error.slice(0, 200)}`);
+                continue;
+              }
+              return yield* fail(step.error);
+            }
+            if (step.kind === "noResponse") {
+              return yield* fail(`No LLM response for state ${stateId}`);
+            }
 
-          // Accumulate real USD cost summed across the tool loop (claude-cli reports it; others → 0).
-          const invocationCost = step.costUsd;
-          totalCostUsd += invocationCost;
-          const providerKey = state.provider ?? "default";
-          costByProvider[providerKey] = (costByProvider[providerKey] ?? 0) + invocationCost;
-          if (config.budgetSettle && budgetReservationId) {
-            yield* Effect.promise(() => config.budgetSettle!(budgetReservationId!, invocationCost)).pipe(Effect.ignore);
-          }
+            // Accumulate real USD cost summed across the tool loop (claude-cli reports it; others → 0).
+            // Keyed by `tier` (routedModel ?? routedProvider): one provider can
+            // serve several tiers (claude-cli runs sonnet AND opus), so keying
+            // by provider alone misattributed Opus spend to Sonnet (H11).
+            const invocationCost = step.costUsd;
+            totalCostUsd += invocationCost;
+            stateCostUsd += invocationCost;
+            costByProvider[tier] = (costByProvider[tier] ?? 0) + invocationCost;
+            if (config.budgetSettle && budgetReservationId) {
+              yield* Effect.promise(() => config.budgetSettle!(budgetReservationId!, invocationCost)).pipe(Effect.ignore);
+            }
 
-          const extracted = extractAndValidateOutput(
-            step.llmResponse,
-            step.emittedOutput,
-            step.lastStructuredToolResult,
-            state,
-            outputPath,
-            stateId
-          );
-          if (!extracted.ok) {
-            return yield* fail(extracted.error);
+            const extracted = extractAndValidateOutput(
+              step.llmResponse,
+              step.emittedOutput,
+              step.lastStructuredToolResult,
+              state,
+              outputPath,
+              stateId
+            );
+            if (!extracted.ok) {
+              if (extracted.schemaValidationFailed && formatRetriesUsed < FORMAT_RETRY_CAP) {
+                formatRetriesUsed++;
+                yield* Effect.log(`[StateMachine] Format failure in ${stateId}, immediate fresh retry ${formatRetriesUsed}/${FORMAT_RETRY_CAP}`);
+                attemptPrompt = `${prompt}\n\nFORMAT REMINDER: your previous output failed schema validation (${extracted.error.slice(0, 500)}). Emit ONLY output that matches the declared schema exactly.`;
+                continue;
+              }
+              return yield* fail(extracted.error);
+            }
+            stateOutput = applyReviewRejection(stateId, extracted.output, outputs, inputs);
+            break;
           }
-          const stateOutput = applyReviewRejection(stateId, extracted.output, outputs, inputs);
 
           outputs[stateId] = stateOutput;
           if (runStateRepository) {
@@ -406,12 +523,12 @@ export const runStateMachine = (
               output: stateOutput as Record<string, unknown>,
               outputValidated: !!state.output_schema,
               status: "completed",
-              costUsd: step.costUsd,
+              costUsd: stateCostUsd,
               startedAt: new Date(),
             })).pipe(Effect.ignore);
           }
           yield* Effect.log(`[StateMachine] State ${stateId} completed`);
-          yield* persistStateContext(repository, executionId, stateId, outputs, inputs, transitionCounts, totalCostUsd, costByProvider);
+          yield* persistStateContext(repository, executionId, snapshotContext(stateId));
           yield* persistImplementFileMetadata(fileMetadataRepository, stateId, stateOutput, inputs, executionId);
         }
       }
@@ -430,7 +547,7 @@ export const runStateMachine = (
         yield* Effect.log(`[StateMachine] No matching transition from state ${stateId}`);
         return yield* fail(`No matching transition from state ${stateId}`);
       }
-      const nextState = takenTransition.to;
+      let nextState = takenTransition.to;
 
       // Generic per-transition retry cap: `max_retries:` declared on the edge in
       // the skill YAML, counted by the runner keyed by `${from}->${to}`. Replaces
@@ -438,12 +555,56 @@ export const runStateMachine = (
       // preserved 1:1 by solve-issue.yaml declaring those caps on those edges.
       if (takenTransition.max_retries !== undefined) {
         const edgeKey = `${stateId}->${nextState}`;
+        // Stall detection (F4 #159): the SAME check failing with the SAME
+        // signature after the first correction — skip the remaining retries and
+        // exhaust immediately instead of burning attempts on a stuck loop. Only
+        // states that emit a `failureSignature` field participate.
+        const currentSignature = (outputs[stateId] as { failureSignature?: string } | undefined)?.failureSignature;
+        const stalled =
+          (transitionCounts[edgeKey] ?? 0) >= 1 && isSameFailureSignature(lastFailureSignatures[edgeKey], currentSignature);
+        if (currentSignature !== undefined) lastFailureSignatures[edgeKey] = currentSignature;
+
         transitionCounts[edgeKey] = (transitionCounts[edgeKey] ?? 0) + 1;
-        yield* Effect.log(`[StateMachine] transition ${edgeKey} count ${transitionCounts[edgeKey]}/${takenTransition.max_retries}`);
-        if (transitionCounts[edgeKey] > takenTransition.max_retries) {
-          const errMsg = `Max retries (${takenTransition.max_retries}) reached for transition ${edgeKey}. Manual intervention required.`;
-          yield* Effect.log(`[StateMachine] ${errMsg}`);
-          return yield* fail(errMsg);
+        yield* Effect.log(`[StateMachine] transition ${edgeKey} count ${transitionCounts[edgeKey]}/${takenTransition.max_retries}${stalled ? " (stalled)" : ""}`);
+        if (transitionCounts[edgeKey] > takenTransition.max_retries || stalled) {
+          // Tier escalation (F4 #159): when the logic cap exhausts on an edge
+          // whose target routes dynamically, grant ONE extra attempt at the next
+          // tier up (the routing hook owns the ladder). Never on stall — a stuck
+          // failure signature means retrying is noise at any tier.
+          let escalationGranted = false;
+          const targetState = skill.states[nextState];
+          if (!stalled && targetState?.dynamic_provider && config.resolveDynamicProvider && !escalatedEdges[edgeKey]) {
+            const escalatedRoute = config.resolveDynamicProvider({
+              stateId: nextState,
+              state: targetState,
+              inputs,
+              outputs,
+              transitionCounts,
+              escalated: true,
+            });
+            if (escalatedRoute) {
+              escalatedEdges[edgeKey] = true;
+              pendingEscalations[nextState] = escalatedRoute;
+              escalationGranted = true;
+              yield* Effect.log(`[StateMachine] Tier escalation on ${edgeKey}: one final attempt via ${escalatedRoute.provider}:${escalatedRoute.model ?? "default"}`);
+            }
+          }
+          if (!escalationGranted) {
+            if (takenTransition.on_exhausted) {
+              // Exhaustion escape (F4 #185): mark the source output and continue
+              // to the declared state instead of failing the whole execution.
+              const existing = typeof outputs[stateId] === "object" && outputs[stateId] !== null ? (outputs[stateId] as Record<string, unknown>) : {};
+              outputs[stateId] = { ...existing, exhausted: true, ...(stalled ? { stalled: true } : {}) };
+              yield* Effect.log(`[StateMachine] Retries exhausted on ${edgeKey}; escaping to '${takenTransition.on_exhausted}'`);
+              nextState = takenTransition.on_exhausted;
+            } else {
+              const errMsg = stalled
+                ? `Stalled on transition ${edgeKey}: same failure signature after correction. Manual intervention required.`
+                : `Max retries (${takenTransition.max_retries}) reached for transition ${edgeKey}. Manual intervention required.`;
+              yield* Effect.log(`[StateMachine] ${errMsg}`);
+              return yield* fail(errMsg);
+            }
+          }
         }
       }
 
@@ -497,11 +658,13 @@ export const resolveOutputPaths = (
   stateId: string
 ): { worktreePath: string | undefined; outputPath: string; templateOutputPath: string } => {
   // Legacy solve-issue stores the worktree under `create_worktree`; the F3
-  // thick-state skills (card-to-pr) store it under `preparacao`. Accept either
-  // so CLI states run inside the card's worktree, not the orchestrator's cwd.
+  // thick-state skills (card-to-pr) store it under `preparacao`; the rework
+  // flow (F4 #157) under `rework_preparacao`. Accept any so CLI states run
+  // inside the card's worktree, not the orchestrator's cwd.
   const worktreePath =
     (outputs.create_worktree as { worktree?: { path?: string } } | undefined)?.worktree?.path ??
-    (outputs.preparacao as { worktree?: { path?: string } } | undefined)?.worktree?.path;
+    (outputs.preparacao as { worktree?: { path?: string } } | undefined)?.worktree?.path ??
+    (outputs.rework_preparacao as { worktree?: { path?: string } } | undefined)?.worktree?.path;
   const outputPath = state.output_path ?? (worktreePath
     ? `${worktreePath}/.gates/outputs/${executionId}/${stateId}.output.yaml`
     : `.gates/outputs/${executionId}/${stateId}.output.yaml`);
@@ -617,12 +780,21 @@ export const runAutoActions = (
   });
 
 export interface FanoutResult {
-  output: { lentes: Array<Record<string, unknown>>; approved: boolean };
+  output: { lentes: Array<Record<string, unknown>>; approved: boolean } & Record<string, unknown>;
   costUsd: number;
   costByProvider: Record<string, number>;
+  /** Set when the fanout cannot honor its contract (e.g. missing aggregator) — the runner fails the state. */
+  error?: string;
 }
 
 type LensOutcome = { name: string; provider: string; output?: unknown; error?: string; costUsd: number };
+
+/** Per-lens money gate for runFanout (H6): 1 reservation per lens, tier = lens.model ?? lens.provider. */
+export interface FanoutBudget {
+  phase: string;
+  gate: NonNullable<StateMachineConfig["budgetGate"]>;
+  settle?: StateMachineConfig["budgetSettle"];
+}
 
 /**
  * Run all lenses of a `type: fanout` state in parallel (Effect.all, unbounded).
@@ -631,6 +803,12 @@ type LensOutcome = { name: string; provider: string; output?: unknown; error?: s
  * graph stays sequential; parallelism is internal to this one state. Aggregates
  * into `{lentes: [...], approved}` — `approved` is true when no lens errored, so
  * a transition can branch on `output.<state>.approved` without array indexing.
+ *
+ * F4 #153 extensions: a lens with `when:` is skipped entirely (not an error,
+ * not present in `lentes`) when the condition is false; `agent_prompt_file`
+ * loads the prompt template from disk; `tools:` becomes the CLI allowlist of
+ * the lens invocation (least privilege); `aggregate:` merges the named
+ * aggregator's result over the default envelope (aggregator fields win).
  */
 export const runFanout = (
   state: SkillStateMachineState,
@@ -640,10 +818,23 @@ export const runFanout = (
   providerRegistry: ProviderRegistry | undefined,
   defaultProvider: Provider,
   executionId: string,
-  worktreePath: string | undefined
+  worktreePath: string | undefined,
+  aggregators?: Record<string, FanoutAggregator>,
+  budget?: FanoutBudget
 ): Effect.Effect<FanoutResult, never> =>
   Effect.gen(function* () {
-    const lenses = state.lenses ?? [];
+    // A declared-but-unregistered aggregator must fail loudly BEFORE spending
+    // provider calls: transitions depend on the aggregated fields.
+    const aggregator = state.aggregate ? aggregators?.[state.aggregate] : undefined;
+    if (state.aggregate && !aggregator) {
+      return {
+        output: { lentes: [], approved: false },
+        costUsd: 0,
+        costByProvider: {},
+        error: `aggregator '${state.aggregate}' is not registered in fanoutAggregators`,
+      };
+    }
+    const lenses = (state.lenses ?? []).filter((lens) => !lens.when || evaluateCondition(lens.when, outputs));
     const ctx = buildContext(inputs, outputs, templateOutputPath);
     const lensEffects: Array<Effect.Effect<LensOutcome, never>> = lenses.map((lens) =>
       Effect.gen(function* () {
@@ -658,7 +849,30 @@ export const runFanout = (
         } catch (err) {
           return { name: lens.name, provider: lens.provider, error: err instanceof Error ? err.message : String(err), costUsd: 0 };
         }
-        const lensPrompt = renderTemplate(lens.agent_prompt, ctx);
+        let promptTemplate: string;
+        if (lens.agent_prompt !== undefined) {
+          promptTemplate = lens.agent_prompt;
+        } else {
+          try {
+            promptTemplate = readFileSync(lens.agent_prompt_file!, "utf-8");
+          } catch (err) {
+            return { name: lens.name, provider: lens.provider, error: `agent_prompt_file read failed: ${err instanceof Error ? err.message : String(err)}`, costUsd: 0 };
+          }
+        }
+        const lensPrompt = renderTemplate(promptTemplate, ctx);
+        // Money gate (H6): reserve 1 call per lens BEFORE invoking it. A denied
+        // reservation fails only THIS lens ({error}); the aggregation is
+        // fail-closed on an errored lens, so the state still resolves.
+        let budgetReservationId: string | undefined;
+        if (budget) {
+          const grant = yield* Effect.promise(() =>
+            budget.gate({ phase: budget.phase, tier: lens.model ?? lens.provider, executionId })
+          );
+          if (!grant.granted) {
+            return { name: lens.name, provider: lens.provider, error: `orcamento: budget reservation denied for lens ${lens.name}`, costUsd: 0 };
+          }
+          budgetReservationId = grant.reservationId;
+        }
         const res: { ok: true; resp: CompletionResponse } | { ok: false; error: string } = yield* lensProvider
           .complete({
             messages: [{ role: "user", content: lensPrompt }],
@@ -666,6 +880,7 @@ export const runFanout = (
             maxTokens: 4096,
             executionId,
             ...(worktreePath ? { workdir: worktreePath } : {}),
+            ...(lens.tools && lens.tools.length > 0 ? { allowedTools: lens.tools } : {}),
           })
           .pipe(
             Effect.matchEffect({
@@ -678,6 +893,9 @@ export const runFanout = (
         }
         const resp = res.resp;
         const cost = resp.costUsd ?? 0;
+        if (budget?.settle && budgetReservationId) {
+          yield* Effect.promise(() => budget.settle!(budgetReservationId, cost)).pipe(Effect.ignore);
+        }
         let lensOutput: unknown;
         try {
           lensOutput = extractOutput(resp.content);
@@ -709,7 +927,22 @@ export const runFanout = (
       return entry;
     });
     const approved = results.every((r) => !r.error);
-    return { output: { lentes, approved }, costUsd, costByProvider };
+    let output: FanoutResult["output"] = { lentes, approved };
+    if (aggregator) {
+      try {
+        // Aggregator fields win over the default envelope (it owns `approved`
+        // semantics when it emits one); `lentes` always survives for audit.
+        output = { ...output, ...aggregator(lentes), lentes };
+      } catch (err) {
+        return {
+          output: { lentes, approved: false },
+          costUsd,
+          costByProvider,
+          error: `aggregator '${state.aggregate}' threw: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+    }
+    return { output, costUsd, costByProvider };
   });
 
 /**
@@ -977,7 +1210,9 @@ export const extractAndValidateOutput = (
     stateOutput = lastStructuredToolResult;
   }
 
-  // Validate against schema
+  // Validate against schema. A schema-invalid output is the "format" retry
+  // class (F4 #159): flagged so the runner can re-invoke fresh with a reminder
+  // instead of failing the execution.
   if (state.output_schema) {
     try {
       const schemaContent = readFileSync(state.output_schema, "utf-8");
@@ -985,7 +1220,7 @@ export const extractAndValidateOutput = (
       validate(stateOutput, schema);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      return { ok: false, error: `Schema validation failed in state ${stateId}: ${errMsg}` };
+      return { ok: false, error: `Schema validation failed in state ${stateId}: ${errMsg}`, schemaValidationFailed: true };
     }
   }
 
@@ -1101,12 +1336,7 @@ const persistExecution = (
 export const persistStateContext = (
   repository: ExecutionRepository,
   executionId: string,
-  stateId: string,
-  outputs: Record<string, unknown>,
-  inputs: Record<string, unknown>,
-  transitionCounts: Record<string, number>,
-  totalCostUsd: number,
-  costByProvider: Record<string, number>
+  machineContext: StateMachineContext
 ): Effect.Effect<void, never> =>
   Effect.gen(function* () {
     yield* Effect.tryPromise({
@@ -1117,7 +1347,7 @@ export const persistStateContext = (
             ...existing,
             metadata: {
               ...(existing.metadata || {}),
-              stateMachineContext: { currentState: stateId, outputs, inputs, transitionCounts, totalCostUsd, costByProvider },
+              stateMachineContext: machineContext,
             },
           });
         }

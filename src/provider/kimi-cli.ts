@@ -2,6 +2,7 @@ import { Effect } from "effect";
 import { spawn } from "child_process";
 import type { CompletionRequest, CompletionResponse } from "./types.js";
 import { pickEnv, BASE_ENV_VARS } from "../util/env.js";
+import { withSupplyChainPath } from "../security/supply-chain-guard.js";
 
 export interface KimiCliConfig {
   model?: string;
@@ -32,8 +33,11 @@ export const makeKimiCliProvider = (config: KimiCliConfig) => {
           const child = spawn("kimi", args, {
             cwd: process.cwd(),
             // Minimal env: kimi CLI needs only its API key + share dir, never
-            // the orchestrator's GitHub/DB secrets.
-            env: { ...pickEnv([...BASE_ENV_VARS, "KIMI_API_KEY"]), KIMI_SHARE_DIR: process.env.KIMI_SHARE_DIR || "/home/lucian/.kimi-code" },
+            // the orchestrator's GitHub/DB secrets. PATH is prefixed with
+            // supplyChainShimDir() (F4 #156) so any npm/pnpm/npx the agent's
+            // Bash tool runs resolves to the supply-chain guard shims (Kimi
+            // has no native hooks, so this PATH boundary is load-bearing for it).
+            env: withSupplyChainPath({ ...pickEnv([...BASE_ENV_VARS, "KIMI_API_KEY"]), KIMI_SHARE_DIR: process.env.KIMI_SHARE_DIR || "/home/lucian/.kimi-code" }),
             stdio: ["ignore", "pipe", "pipe"],
             timeout: 300_000, // 5 minutes
           });

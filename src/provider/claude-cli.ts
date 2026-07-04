@@ -14,6 +14,7 @@ import { spawn } from "child_process";
 import type { CompletionRequest, CompletionResponse } from "./types.js";
 import type { ExecutionProcessRepository } from "../persistence/types.js";
 import { pickEnv, BASE_ENV_VARS } from "../util/env.js";
+import { withSupplyChainPath } from "../security/supply-chain-guard.js";
 
 export interface ClaudeCliConfig {
   binPath?: string;
@@ -73,8 +74,11 @@ const buildArgs = (config: ClaudeCliConfig, request: CompletionRequest, promptTe
   args.push("--exclude-dynamic-system-prompt-sections", "--strict-mcp-config");
   if (config.model) args.push("--model", config.model);
   args.push("--permission-mode", "dontAsk");
-  if (config.allowedTools && config.allowedTools.length > 0) {
-    args.push("--allowedTools", config.allowedTools.join(","));
+  // Per-request allowlist (F4 #153: lens least privilege) overrides the
+  // provider-level config; both are argv elements, never shell strings.
+  const allowedTools = request.allowedTools ?? config.allowedTools;
+  if (allowedTools && allowedTools.length > 0) {
+    args.push("--allowedTools", allowedTools.join(","));
   }
   if (config.settingsFile) args.push("--settings", config.settingsFile);
   if (request.workdir) args.push("--add-dir", request.workdir);
@@ -105,10 +109,12 @@ const runClaudeCli = (config: ClaudeCliConfig, request: CompletionRequest): Prom
       // orchestrator's DB/GitHub/webhook secrets, and deliberately NOT
       // ANTHROPIC_API_KEY — that would make the CLI bill via the paid API
       // instead of the subscription (D3/#133); the API key belongs to claude-api.
-      env: {
+      // PATH is prefixed with supplyChainShimDir() (F4 #156) so any npm/pnpm/npx
+      // the agent's Bash tool runs resolves to the supply-chain guard shims.
+      env: withSupplyChainPath({
         ...pickEnv([...BASE_ENV_VARS, "CLAUDE_CODE_OAUTH_TOKEN"]),
         ...(config.env ?? {}),
-      },
+      }),
       stdio: ["ignore", "pipe", "pipe"],
       // Own process group: makes `process.kill(-pid, ...)` below kill the
       // whole tree (claude + any tool subprocess it spawns), not just claude.

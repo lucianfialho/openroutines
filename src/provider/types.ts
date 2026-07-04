@@ -28,6 +28,12 @@ export interface CompletionRequest {
   maxBudgetUsd?: number;
   /** Execution owning this call — used to track spawned processes (F1). */
   executionId?: string;
+  /**
+   * Per-request CLI tool allowlist (F4 #153: lens least privilege, e.g.
+   * [Read, Grep, Glob]). Overrides the provider config's allowedTools for this
+   * call; providers without native tool gating ignore it.
+   */
+  allowedTools?: string[];
 }
 
 export interface CompletionResponse {

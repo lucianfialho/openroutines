@@ -5,17 +5,20 @@ import type { ExecutionRecord } from "./types.js";
 let mockRows: Array<Record<string, unknown>> = [];
 let lastQuery = "";
 let lastParams: unknown[] = [];
+let allQueries: string[] = [];
 
 vi.mock("pg", () => ({
   Pool: vi.fn(() => ({
     query: vi.fn(async (sql: string, params: unknown[]) => {
       lastQuery = sql;
       lastParams = params;
+      allQueries.push(sql);
       return { rows: mockRows };
     }),
     connect: vi.fn(async () => ({
       query: vi.fn(async (sql: string) => {
         lastQuery = sql;
+        allQueries.push(sql);
         return { rows: [] };
       }),
       release: vi.fn(),
@@ -28,6 +31,7 @@ describe("makePostgresRepository", () => {
     mockRows = [];
     lastQuery = "";
     lastParams = [];
+    allQueries = [];
     vi.clearAllMocks();
   });
 
@@ -36,7 +40,9 @@ describe("makePostgresRepository", () => {
       connectionString: "postgresql://test:test@localhost/test",
     });
     await repo.migrate();
-    expect(lastQuery).toContain("executions");
+    // Migrations run in lexicographic order; the executions table is 001, so it
+    // must appear among the executed statements (not necessarily last).
+    expect(allQueries.some((q) => q.includes("executions"))).toBe(true);
   });
 
   it("should save execution record", async () => {
@@ -82,6 +88,27 @@ describe("makePostgresRepository", () => {
     expect(lastQuery).toContain("ON CONFLICT (id) DO UPDATE");
   });
 
+  it("H3: the upsert COALESCEs metadata against the existing row — a save() with no metadata (succeed()/fail()'s shape) must never null out a previously-persisted stateMachineContext", async () => {
+    const repo = makePostgresRepository({
+      connectionString: "postgresql://test:test@localhost/test",
+    });
+    const record: ExecutionRecord = {
+      id: "exec-1",
+      routineId: "routine-a",
+      triggerType: "task_source",
+      skillName: "solve-issue",
+      status: "completed",
+      // No metadata — exactly what state-machine.ts's succeed()/fail() persist.
+      startedAt: new Date("2024-01-01T00:00:00Z"),
+    };
+
+    await repo.save(record);
+
+    expect(lastQuery).toContain("metadata = COALESCE(EXCLUDED.metadata, executions.metadata)");
+    expect(lastQuery).not.toContain("metadata = EXCLUDED.metadata,"); // the old, clobbering clause is gone
+    expect(lastParams).toContain(null); // metadata VALUES param stays null when absent — COALESCE is what protects it
+  });
+
   it("should find by id", async () => {
     mockRows = [
       {
@@ -109,6 +136,29 @@ describe("makePostgresRepository", () => {
     expect(result?.id).toBe("exec-1");
     expect(result?.status).toBe("completed");
     expect(lastQuery).toContain("WHERE id = $1");
+  });
+
+  it("H7: maps night_id -> nightId on read (set once by the night-coordinator's raw INSERT), but save() never writes it back", async () => {
+    mockRows = [
+      {
+        id: "exec-1",
+        routine_id: "routine-a",
+        trigger_type: "card-execution",
+        skill_name: "card-to-pr",
+        status: "running",
+        started_at: new Date("2024-01-01"),
+        night_id: "night-42",
+      },
+    ];
+
+    const repo = makePostgresRepository({
+      connectionString: "postgresql://test:test@localhost/test",
+    });
+    const result = await repo.findById("exec-1");
+    expect(result?.nightId).toBe("night-42");
+
+    await repo.save({ ...result!, status: "completed" });
+    expect(lastQuery).not.toContain("night_id"); // save()'s INSERT/UPDATE column lists omit it on purpose
   });
 
   it("should return undefined for unknown id", async () => {

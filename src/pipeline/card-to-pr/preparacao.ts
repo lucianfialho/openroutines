@@ -14,6 +14,7 @@ import type { RepoConfig, RepoRegistry } from "../../repo-registry/schema.js";
 import { checkBranchProtection } from "../../preflight/branch-protection.js";
 import { getOrCreateBaseline } from "../../verify/baseline.js";
 import type { VerifyResults } from "../../verify/run-commands.js";
+import { ensureIgnoreScripts } from "../../security/supply-chain-guard.js";
 import { defaultRunGit, type CardToPrDeps } from "./index.js";
 
 export interface PreparacaoOutput {
@@ -71,6 +72,13 @@ export const makePreparacao = (deps: CardToPrDeps): ScriptHandler => async (ctx)
   if (!existsSync(worktreePath)) {
     await runGit(["worktree", "add", "-b", branch, worktreePath, repoConfig.baseBranch], repoConfig.clonePath);
   } // else: crash-resume of preparacao — reuse the worktree already on disk.
+
+  // F4 #156: every install in this worktree runs with --ignore-scripts by
+  // default from here on (implementacao/rework, and any verify install step
+  // that touches this same worktree). Re-asserted on crash-resume too — cheap
+  // no-op once already merged in.
+  ensureIgnoreScripts({ worktree: worktreePath });
+
   const { stdout } = await runGit(["rev-parse", "HEAD"], worktreePath);
   const baseSha = stdout.trim();
 

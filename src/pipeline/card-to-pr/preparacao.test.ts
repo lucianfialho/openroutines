@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import { readFileSync, rmSync } from "fs";
+import { join } from "path";
 import { makePreparacao } from "./preparacao.js";
 import type { CardToPrDeps } from "./index.js";
+import type { PreparacaoOutput } from "./preparacao.js";
 import { makeInMemoryActionLedgerRepository } from "../../persistence/action-ledger-in-memory.js";
 import { makeInMemoryPrLinkRepository } from "../../persistence/pr-links-in-memory.js";
 import type { RepoRegistry } from "../../repo-registry/schema.js";
@@ -58,5 +61,28 @@ describe("makePreparacao", () => {
     expect(checkProtection).toHaveBeenCalledTimes(1);
     // No fetch, no worktree add, no rev-parse — no runGit call happens past the protection check.
     expect(runGit).not.toHaveBeenCalled();
+  });
+
+  it("F4 #156: merges ignore-scripts=true into the new worktree's .npmrc before returning", async () => {
+    const worktreePath = "/tmp/or-preparacao-test-worktrees/card-t1";
+    rmSync(worktreePath, { recursive: true, force: true });
+
+    const runGit = vi.fn(async (args: string[]) => (args[0] === "rev-parse" ? { stdout: "abc123\n", stderr: "" } : { stdout: "", stderr: "" }));
+    const checkProtection = vi.fn(async () => ({ protected: true }));
+    const handler = makePreparacao(baseDeps({ runGit, checkProtection }));
+
+    try {
+      const r = (await handler({ inputs, outputs: {}, executionId: "e1", stateId: "preparacao" })) as PreparacaoOutput;
+
+      expect(r.branchProtected).toBe(true);
+      expect(r.worktree).toEqual({ path: worktreePath, branch: "openroutines/card-t1" });
+      expect(r.baseSha).toBe("abc123");
+      // git worktree add is mocked (a no-op on disk here), so this .npmrc can
+      // only exist if preparacao itself called ensureIgnoreScripts against
+      // worktreePath — proves the guard is wired into the real success path.
+      expect(readFileSync(join(worktreePath, ".npmrc"), "utf-8")).toContain("ignore-scripts=true");
+    } finally {
+      rmSync(worktreePath, { recursive: true, force: true });
+    }
   });
 });

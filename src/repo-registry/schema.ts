@@ -25,6 +25,8 @@ export const RepoConfigSchema = z.object({
   }),
   compose: z.string().nullable().optional(),
   labels: z.array(z.string()).optional(),
+  /** F4 #158 (D29): repos exempt from the green lane regardless of how clean the diff is. */
+  critical: z.boolean().default(false),
 });
 
 export const RepoRegistrySchema = z.object({

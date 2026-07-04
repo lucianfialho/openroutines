@@ -1,4 +1,5 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, vi } from "vitest";
+import type { Pool } from "pg";
 import { isWithinWindow, enforceHardStop } from "./hard-stop.js";
 import { acquireNightLock } from "./lock.js";
 import { makePostgresRepository } from "../persistence/postgres.js";
@@ -11,7 +12,7 @@ import {
   cleanupNight,
   TEST_DB_URL,
 } from "../persistence/db.test-helpers.js";
-import type { ExecutionProcess, ExecutionProcessRepository } from "../persistence/types.js";
+import type { ExecutionProcess, ExecutionProcessRepository, ExecutionRepository } from "../persistence/types.js";
 
 describe("isWithinWindow", () => {
   const at = (hh: number, mm: number) => new Date(Date.UTC(2026, 0, 1, hh, mm));
@@ -72,13 +73,16 @@ describe.skipIf(!hasTestDb())("enforceHardStop (real DB)", () => {
     const executionId = crypto.randomUUID();
     await insertExecution(pool, executionId, { nightId, repo: "acme-widgets", status: "running" });
     const processRepo = makeFakeProcessRepo([{ id: "proc-1", executionId, pid: 999999 }]);
+    const sendAlert = vi.fn(async () => {});
 
-    await enforceHardStop({ executionRepo, executionProcessRepo: processRepo, pool, nightId });
+    await enforceHardStop({ executionRepo, executionProcessRepo: processRepo, pool, nightId, sendAlert });
 
     // Process-group handling is delegated entirely to killExecutionProcessGroup
     // (already unit-tested) — this just proves enforceHardStop drives it, with
     // no separate call to any worktree-removal tool (none is injected here at all).
     expect(processRepo.finishedIds).toEqual(["proc-1"]);
+    // D22/F4 #186: 1 execution actually interrupted -> exactly 1 aggregated alert.
+    expect(sendAlert).toHaveBeenCalledTimes(1);
 
     const { rows } = await pool.query(
       `SELECT status, night_id, repo, metadata FROM executions WHERE id = $1`,
@@ -103,13 +107,18 @@ describe.skipIf(!hasTestDb())("enforceHardStop (real DB)", () => {
     await insertExecution(pool, otherNightExec, { nightId: nightB, status: "running" });
     const completedExec = crypto.randomUUID();
     await insertExecution(pool, completedExec, { nightId: nightA, status: "completed" });
+    const sendAlert = vi.fn(async () => {});
 
     await enforceHardStop({
       executionRepo,
       executionProcessRepo: makeFakeProcessRepo([]),
       pool,
       nightId: nightA,
+      sendAlert,
     });
+
+    // nightA has 0 `running` executions (only a `completed` one) -> 0 alerts.
+    expect(sendAlert).not.toHaveBeenCalled();
 
     const { rows } = await pool.query(
       `SELECT id, status FROM executions WHERE id = ANY($1) ORDER BY id`,
@@ -117,5 +126,54 @@ describe.skipIf(!hasTestDb())("enforceHardStop (real DB)", () => {
     );
     expect(rows.find((r) => r.id === otherNightExec)?.status).toBe("running");
     expect(rows.find((r) => r.id === completedExec)?.status).toBe("completed");
+  });
+});
+
+// Mock-pool coverage (no real DB required) for the D22/F4 #186 aggregated
+// alert — the counting/gating logic doesn't need real transactional
+// guarantees, just the row count `enforceHardStop` already reads.
+describe("enforceHardStop — aggregated Telegram alert (D22, F4 #186)", () => {
+  const makeMockPool = (runningIds: string[]): Pool =>
+    ({
+      query: vi.fn(async () => ({ rows: runningIds.map((id) => ({ id })) })),
+    }) as unknown as Pool;
+
+  const noopExecutionRepo: ExecutionRepository = {
+    save: async () => {},
+    findById: async () => undefined,
+    findByRoutine: async () => [],
+    findByTask: async () => [],
+    findAll: async () => [],
+  };
+
+  it("AC: fires exactly ONE alert (aggregated, not one per execution) when N>=1 running executions were killed", async () => {
+    const sendAlert = vi.fn(async () => {});
+    const pool = makeMockPool(["exec-1", "exec-2"]);
+
+    await enforceHardStop({
+      executionRepo: noopExecutionRepo,
+      executionProcessRepo: makeFakeProcessRepo([]),
+      pool,
+      nightId: "night-1",
+      sendAlert,
+    });
+
+    expect(sendAlert).toHaveBeenCalledTimes(1);
+    expect(sendAlert.mock.calls[0][0]).toContain("2 execução");
+  });
+
+  it("AC: fires zero alerts when zero executions were running at window close", async () => {
+    const sendAlert = vi.fn(async () => {});
+    const pool = makeMockPool([]);
+
+    await enforceHardStop({
+      executionRepo: noopExecutionRepo,
+      executionProcessRepo: makeFakeProcessRepo([]),
+      pool,
+      nightId: "night-1",
+      sendAlert,
+    });
+
+    expect(sendAlert).not.toHaveBeenCalled();
   });
 });

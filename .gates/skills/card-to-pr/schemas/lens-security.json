@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "card-to-pr revisao security lens output (security-judge provider)",
+  "type": "object",
+  "required": ["approved", "findings", "criticalArea"],
+  "properties": {
+    "approved": { "type": "boolean" },
+    "criticalArea": { "type": "boolean" },
+    "model": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["description", "status"],
+        "properties": {
+          "description": { "type": "string" },
+          "file": { "type": "string" },
+          "line": { "type": "number" },
+          "status": { "type": "string" },
+          "confidence": { "type": "number" }
+        }
+      }
+    },
+    "secondJudge": {
+      "type": "object",
+      "properties": {
+        "diverged": { "type": "boolean" }
+      }
+    }
+  }
+}

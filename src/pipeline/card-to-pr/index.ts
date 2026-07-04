@@ -19,10 +19,21 @@ import { checkBranchProtection } from "../../preflight/branch-protection.js";
 import { runVerifyCommands } from "../../verify/run-commands.js";
 import { getOrCreateBaseline } from "../../verify/baseline.js";
 import { pickEnv, BASE_ENV_VARS } from "../../util/env.js";
+import { sendTelegramAlert } from "../../notify/telegram.js";
+import { aggregateRevisao } from "../../review/aggregate.js";
 import { makePreparacao } from "./preparacao.js";
 import { makeVerify } from "./verify.js";
 import { makePr } from "./pr.js";
 import { makeBloqueado } from "./bloqueado.js";
+import { makeReworkPreparacao, makeReworkPergunta } from "./rework.js";
+
+/**
+ * Named `type: fanout` aggregators for card-to-pr (F4 #153) — resolved by the
+ * runner via `StateMachineConfig.fanoutAggregators` when a state declares
+ * `aggregate: aggregateRevisao` (see skill.yaml's `revisao` state). Wiring
+ * this into StateMachineConfig at boot is the next agent's job (app.ts).
+ */
+export const cardToPrFanoutAggregators = { aggregateRevisao };
 
 const execFileAsync = promisify(execFile);
 
@@ -40,6 +51,14 @@ export interface CardToPrDeps {
   runGit?: (args: string[], cwd: string) => Promise<{ stdout: string; stderr: string }>;
   runVerify?: typeof runVerifyCommands;
   getBaseline?: typeof getOrCreateBaseline;
+  /** Telegram alert seam (D22, F4 #186) — defaults to the real sender; tests inject a mock. */
+  sendAlert?: typeof sendTelegramAlert;
+  /**
+   * Agent commit identity for the rework human-commit guard (F4 #157) —
+   * matched against git log %an/%ae. Defaults to DEFAULT_AGENT_GIT_AUTHORS
+   * (the identity git-worktree-tools configures in worktrees).
+   */
+  agentGitAuthors?: string[];
 }
 
 /**
@@ -65,4 +84,6 @@ export const registerCardToPrHandlers = (reg: ScriptRegistry, deps: CardToPrDeps
   reg.register("card-to-pr-verify", makeVerify(deps));
   reg.register("card-to-pr-pr", makePr(deps));
   reg.register("card-to-pr-bloqueado", makeBloqueado(deps));
+  reg.register("card-to-pr-rework-preparacao", makeReworkPreparacao(deps));
+  reg.register("card-to-pr-rework-pergunta", makeReworkPergunta(deps));
 };

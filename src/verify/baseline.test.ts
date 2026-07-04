@@ -7,6 +7,7 @@ import { hasTestDb, makeTestPool, ensureSchema, uniqueDate, cleanupNight } from 
 import { acquireNightLock } from "../night-coordinator/lock.js";
 import type { RepoConfig } from "../repo-registry/schema.js";
 import { getOrCreateBaseline } from "./baseline.js";
+import { emptySastResult, type SastResult } from "./sast.js";
 
 // execFile is wrapped (not fully faked) so getOrCreateBaseline still does REAL
 // git/echo work against a real temp repo — we only need the call count, per
@@ -59,6 +60,10 @@ describe.skipIf(!hasTestDb())("getOrCreateBaseline (real DB)", () => {
   const pool = makeTestPool();
   const created: string[] = [];
   const tempDirs: string[] = [];
+  // These tests are about the build/test baseline machinery, not SAST — stub
+  // runSast so they never spawn a real semgrep/gitleaks/npm audit (no
+  // real network calls in tests) and stay fast/deterministic.
+  const stubRunSast = async (): Promise<SastResult> => emptySastResult();
 
   beforeEach(() => {
     state.execFileCalls = 0;
@@ -82,7 +87,7 @@ describe.skipIf(!hasTestDb())("getOrCreateBaseline (real DB)", () => {
     const repoConfig = makeRepoConfig(dir, branch, { build: "echo build-ok", test: "echo test-ok" });
     const repo = "verify-baseline-repo";
 
-    const first = await getOrCreateBaseline({ pool }, { repo, nightId, repoConfig });
+    const first = await getOrCreateBaseline({ pool, runSast: stubRunSast }, { repo, nightId, repoConfig });
     expect(first.baseSha).toMatch(/^[0-9a-f]{40}$/);
     expect(first.results.build?.passed).toBe(true);
     expect(first.results.test?.passed).toBe(true);
@@ -95,7 +100,7 @@ describe.skipIf(!hasTestDb())("getOrCreateBaseline (real DB)", () => {
     expect(rows).toHaveLength(1);
 
     state.execFileCalls = 0;
-    const second = await getOrCreateBaseline({ pool }, { repo, nightId, repoConfig });
+    const second = await getOrCreateBaseline({ pool, runSast: stubRunSast }, { repo, nightId, repoConfig });
     expect(state.execFileCalls).toBe(0); // cached — no checkout, no verify commands
     expect(second).toEqual(first);
   });
@@ -124,8 +129,8 @@ describe.skipIf(!hasTestDb())("getOrCreateBaseline (real DB)", () => {
     const configB = makeRepoConfig(dirB, branch, { build: "echo b", test: "echo b" });
 
     const [a, b] = await Promise.all([
-      getOrCreateBaseline({ pool }, { repo, nightId, repoConfig: configA }),
-      getOrCreateBaseline({ pool }, { repo, nightId, repoConfig: configB }),
+      getOrCreateBaseline({ pool, runSast: stubRunSast }, { repo, nightId, repoConfig: configA }),
+      getOrCreateBaseline({ pool, runSast: stubRunSast }, { repo, nightId, repoConfig: configB }),
     ]);
 
     // Both callers converge on the SAME winner row — proves the loser re-read
@@ -137,5 +142,61 @@ describe.skipIf(!hasTestDb())("getOrCreateBaseline (real DB)", () => {
       [repo, nightId]
     );
     expect(rows).toHaveLength(1);
+  });
+
+  it("F4 #155: captures a SAST snapshot alongside build/test on first call and persists it in the same results JSONB", async () => {
+    await ensureSchema(pool);
+    const lock = await acquireNightLock(pool, uniqueDate(), { budgetCapUsd: 30, prCap: 6 });
+    expect(lock).not.toBeNull();
+    const nightId = lock!.nightId;
+    created.push(nightId);
+
+    const { dir, branch } = makeTempRepo();
+    tempDirs.push(dir);
+    const repoConfig = makeRepoConfig(dir, branch, { build: "echo build-ok", test: "echo test-ok" });
+    const repo = "verify-baseline-sast-repo";
+    const fakeSast: SastResult = {
+      ...emptySastResult(),
+      semgrepFindings: [{ ruleId: "prisma-raw-unsafe", file: "a.ts", line: 1, message: "m", severity: "ERROR" }],
+    };
+
+    const first = await getOrCreateBaseline(
+      { pool, runSast: async () => fakeSast },
+      { repo, nightId, repoConfig }
+    );
+    expect(first.results.sast).toEqual(fakeSast);
+
+    // Cached read (2nd call) must return the same persisted snapshot without
+    // calling runSast again — a distinct fake would prove that if it fired.
+    const second = await getOrCreateBaseline(
+      { pool, runSast: async () => ({ ...emptySastResult(), notes: ["should never be seen"] }) },
+      { repo, nightId, repoConfig }
+    );
+    expect(second.results.sast).toEqual(fakeSast);
+  });
+
+  it("F4 #155: a pre-#155 baseline row with no sast key reads back as sast: undefined, not a crash", async () => {
+    await ensureSchema(pool);
+    const lock = await acquireNightLock(pool, uniqueDate(), { budgetCapUsd: 30, prCap: 6 });
+    expect(lock).not.toBeNull();
+    const nightId = lock!.nightId;
+    created.push(nightId);
+
+    const repo = "verify-baseline-legacy-repo";
+    // Bypasses getOrCreateBaseline entirely to simulate a row written before
+    // #155 added the sast field — old results JSONB has no "sast" key at all.
+    await pool.query(
+      `INSERT INTO verify_baselines (repo, night_id, base_sha, results) VALUES ($1, $2, $3, $4)`,
+      [repo, nightId, "0".repeat(40), JSON.stringify({ build: { passed: true }, test: { passed: true } })]
+    );
+
+    const { dir, branch } = makeTempRepo();
+    tempDirs.push(dir);
+    const repoConfig = makeRepoConfig(dir, branch, { build: "echo build-ok", test: "echo test-ok" });
+
+    const baseline = await getOrCreateBaseline({ pool, runSast: stubRunSast }, { repo, nightId, repoConfig });
+
+    expect(baseline.results.sast).toBeUndefined();
+    expect(baseline.results.build?.passed).toBe(true);
   });
 });

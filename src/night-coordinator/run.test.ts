@@ -36,13 +36,18 @@ interface MockTask {
   task_id: string;
   body: string;
   labels: string[];
+  complexity?: string;
 }
 
 const makeMockPool = (opts: {
   lockGranted?: boolean;
   queuedTasks?: MockTask[];
   busyRepos?: string[];
-  taskContent?: Record<string, { title: string; body: string }>;
+  taskContent?: Record<string, { title: string; body: string; labels?: string[] }>;
+  /** D22/F4 #186: simulate a mid-cycle crash — claimReadyCards' own SELECT throws. */
+  claimThrows?: Error;
+  /** F4 #159: canned tier_circuit_state rows, keyed by tier. */
+  tierCircuitState?: Record<string, { cards_attempted: number; cards_failed: number }>;
 }) => {
   const queuedTasks = opts.queuedTasks ?? [];
   const claimedKeys = new Set<string>();
@@ -55,6 +60,7 @@ const makeMockPool = (opts: {
       return opts.lockGranted === false ? { rows: [] } : { rows: [{ id: "night-1" }] };
     }
     if (text.startsWith("SELECT source_id, task_id, body, labels")) {
+      if (opts.claimThrows) throw opts.claimThrows;
       return { rows: queuedTasks.filter((t) => !claimedKeys.has(`${t.source_id}:${t.task_id}`)) };
     }
     if (text.startsWith("UPDATE tasks SET claimed_by_night_id")) {
@@ -67,10 +73,10 @@ const makeMockPool = (opts: {
     if (text.startsWith("SELECT DISTINCT repo FROM executions")) {
       return { rows: (opts.busyRepos ?? []).map((r) => ({ repo: r })) };
     }
-    if (text.startsWith("SELECT title, body FROM tasks")) {
+    if (text.startsWith("SELECT title, body, labels, complexity FROM tasks")) {
       const [sourceId, taskId] = params as [string, string];
       const content = opts.taskContent?.[`${sourceId}:${taskId}`];
-      return { rows: content ? [content] : [{ title: "", body: "" }] };
+      return { rows: content ? [content] : [{ title: "", body: "", labels: [] }] };
     }
     if (text.startsWith("INSERT INTO executions")) {
       insertedExecutions.push(params);
@@ -79,6 +85,11 @@ const makeMockPool = (opts: {
     if (text.startsWith("SELECT id FROM executions WHERE status")) {
       hardStopQueried = true;
       return { rows: [] };
+    }
+    if (text.startsWith("SELECT cards_attempted, cards_failed FROM tier_circuit_state")) {
+      const [, tier] = params as [string, string];
+      const row = opts.tierCircuitState?.[tier];
+      return { rows: row ? [row] : [] };
     }
     return { rows: [] };
   });
@@ -128,6 +139,7 @@ const baseDeps = (pool: ReturnType<typeof makeMockPool>, overrides: Partial<RunN
   tz: "UTC",
   runGit: vi.fn(async () => ({ stdout: "", stderr: "" })),
   makeGithub: noopGithub,
+  sendAlert: vi.fn(async () => {}),
   now: () => new Date("2026-01-01T03:00:00Z"), // inside the default 01:00-06:30 window
   ...overrides,
 });
@@ -174,6 +186,39 @@ describe("runNightCycle", () => {
       skill: "card-to-pr",
     });
     expect(pool.insertedExecutions).toHaveLength(1);
+  });
+
+  it("F4 #185: carries the card's complexity and an 'altaImpl' label through to the enqueued payload", async () => {
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [
+        { source_id: "trello-main", task_id: "card1", body: cardBody("acme-widgets"), labels: [], complexity: "high" },
+      ],
+      taskContent: {
+        "trello-main:card1": { title: "Fix the bug", body: cardBody("acme-widgets"), labels: ["altaImpl"] },
+      },
+    });
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue });
+
+    await runNightCycle(deps);
+
+    expect(queue.jobs[0].trigger.payload).toMatchObject({ complexity: "high", altaImpl: true });
+  });
+
+  it("F4 #185: omits altaImpl from the payload when the task carries no such label (default false via absence)", async () => {
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [{ source_id: "trello-main", task_id: "card1", body: cardBody("acme-widgets"), labels: [] }],
+      taskContent: { "trello-main:card1": { title: "t", body: cardBody("acme-widgets") } },
+    });
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue });
+
+    await runNightCycle(deps);
+
+    expect((queue.jobs[0].trigger.payload as Record<string, unknown>).altaImpl).toBeUndefined();
+    expect((queue.jobs[0].trigger.payload as Record<string, unknown>).complexity).toBeUndefined();
   });
 
   it("respects the global PR cap: stops claiming once pr_links already has nightPrCap open", async () => {
@@ -327,5 +372,255 @@ describe("runNightCycle", () => {
 
     expect(summary.cardsSynced).toBe(2);
     expect(saved.map((t) => t.id)).toEqual(["c1", "c2"]);
+  });
+});
+
+describe("runNightCycle — F4 #159 circuit breaker by tier", () => {
+  it("enqueues at the card's own tier when its circuit is closed", async () => {
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [{ source_id: "trello-main", task_id: "card1", body: cardBody("acme-widgets"), labels: [], complexity: "lowest" }],
+    });
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.cardsEnqueued).toBe(1);
+    expect(queue.jobs[0].trigger.payload).toMatchObject({ tier: "kimi" });
+  });
+
+  it("escalates to the next tier (and still enqueues) when the original tier's circuit is open", async () => {
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [{ source_id: "trello-main", task_id: "card1", body: cardBody("acme-widgets"), labels: [], complexity: "lowest" }],
+      tierCircuitState: { kimi: { cards_attempted: 3, cards_failed: 3 } }, // 100% > 60%, kimi open
+    });
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.cardsEnqueued).toBe(1);
+    expect(queue.jobs[0].trigger.payload).toMatchObject({ tier: "sonnet" });
+  });
+
+  it("defers the card (never enqueues, unclaims it) when its tier is open with no next tier (opus at the ceiling)", async () => {
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [{ source_id: "trello-main", task_id: "card1", body: cardBody("acme-widgets"), labels: [], complexity: "highest" }],
+      tierCircuitState: { opus: { cards_attempted: 3, cards_failed: 3 } },
+    });
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.cardsClaimed).toBe(1); // the atomic claim happened...
+    expect(summary.cardsEnqueued).toBe(0); // ...but the ceiling tier is failing hard, so it's deferred
+    expect(queue.jobs).toHaveLength(0);
+    // Same UPDATE-release call the PR-cap/backpressure denial test above
+    // issues — the mock's claimedKeys tracker doesn't model the release's
+    // real effect (see that test's identical assertion), it only proves the
+    // release UPDATE was attempted (query call count) rather than a re-claim.
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining("claimed_by_night_id = NULL"),
+      expect.arrayContaining(["trello-main", "card1"])
+    );
+  });
+
+  it("defaults an unclassified card to the sonnet tier (D9 fallback)", async () => {
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [{ source_id: "trello-main", task_id: "card1", body: cardBody("acme-widgets"), labels: [] }], // no complexity
+    });
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue });
+
+    await runNightCycle(deps);
+
+    expect(queue.jobs[0].trigger.payload).toMatchObject({ tier: "sonnet" });
+  });
+});
+
+describe("runNightCycle — F4 #157 rework admission (D24)", () => {
+  const seedLink = async (
+    prLinks: ReturnType<typeof makeInMemoryPrLinkRepository>,
+    over: Partial<Parameters<typeof prLinks.create>[0]> = {}
+  ) => {
+    await prLinks.create({
+      sourceId: "trello-main",
+      taskId: "card1",
+      repo: "acme-widgets",
+      prNumber: 42,
+      branch: "openroutines/card-card1",
+      status: "open",
+      reviewState: "changes_requested",
+      lastAgentCommitSha: "agentsha",
+      ...over,
+    });
+  };
+
+  const taskContent = {
+    "trello-main:card1": { title: "Fix the bug", body: cardBody("acme-widgets"), labels: [] },
+  };
+
+  const makeTaskSourceMock = () => {
+    const moveTo = vi.fn(() => Effect.succeed(undefined));
+    const comment = vi.fn(() => Effect.succeed(undefined));
+    return { ts: { moveTo, comment } as unknown as ReturnType<NonNullable<RunNightCycleDeps["taskSourceFor"]>>, moveTo, comment };
+  };
+
+  it("admits an eligible changes_requested link: enqueues a card-execution with rework:true + prNumber + branch", async () => {
+    const pool = makeMockPool({ lockGranted: true, taskContent });
+    const prLinks = makeInMemoryPrLinkRepository();
+    await seedLink(prLinks);
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue, prLinks });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.reworkAdmitted).toBe(1);
+    expect(queue.jobs).toHaveLength(1);
+    const job = queue.jobs[0];
+    expect(job.trigger.type).toBe("card-execution");
+    expect(job.trigger.payload).toMatchObject({
+      source_id: "trello-main",
+      task_id: "card1",
+      repo: "acme-widgets",
+      title: "Fix the bug",
+      night_id: "night-1",
+      skill: "card-to-pr",
+      rework: true,
+      prNumber: 42,
+      branch: "openroutines/card-card1",
+    });
+    expect(pool.insertedExecutions).toHaveLength(1);
+  });
+
+  it("AC: a 2nd admission of the same card in the SAME night is refused (last_rework_night_id from a completed round)", async () => {
+    const pool = makeMockPool({ lockGranted: true, taskContent });
+    const prLinks = makeInMemoryPrLinkRepository();
+    await seedLink(prLinks, { lastReworkNightId: "night-1" }); // a round already ran tonight
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue, prLinks });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.reworkAdmitted).toBe(0);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  it("AC: a 2nd admission attempt while tonight's round is still in flight is refused by the per-night claim stamp", async () => {
+    const pool = makeMockPool({ lockGranted: true, taskContent });
+    const prLinks = makeInMemoryPrLinkRepository();
+    await seedLink(prLinks); // review_state stays changes_requested until pr.ts completes the round
+    const queue = makeFakeQueue();
+
+    const s1 = await runNightCycle(baseDeps(pool, { queue, prLinks }));
+    // 2nd cycle of the SAME night: the lock refuses it outright; force the
+    // admission path by re-running with the lock granted again (same mock pool
+    // keeps its claimedKeys, i.e. the claimed_by_night_id stamp).
+    const s2 = await runNightCycle(baseDeps(pool, { queue, prLinks }));
+
+    expect(s1.reworkAdmitted).toBe(1);
+    expect(s2.reworkAdmitted).toBe(0); // UPDATE ... RETURNING found no claimable row
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  it("AC: rework_count at the cap blocks the card with 'retrabalho-esgotado' — comment posted, review_state terminal, NO Telegram alert", async () => {
+    const pool = makeMockPool({ lockGranted: true, taskContent });
+    const prLinks = makeInMemoryPrLinkRepository();
+    await seedLink(prLinks, { reworkCount: 2 });
+    const queue = makeFakeQueue();
+    const sendAlert = vi.fn(async () => {});
+    const { ts, moveTo, comment } = makeTaskSourceMock();
+    const deps = baseDeps(pool, { queue, prLinks, sendAlert, taskSourceFor: () => ts });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.reworkAdmitted).toBe(0);
+    expect(queue.jobs).toHaveLength(0);
+    expect(moveTo).toHaveBeenCalledWith("card1", "blocked");
+    expect(comment).toHaveBeenCalledWith("card1", expect.stringContaining("retrabalho-esgotado"));
+    // D22 taxonomy: retrabalho-esgotado NEVER wakes anyone up (explicit negative)
+    expect(sendAlert).not.toHaveBeenCalled();
+    // terminal review_state: neither next night's admission nor the poller re-acts
+    expect((await prLinks.findByTask("trello-main", "card1"))[0].reviewState).toBe("rework-exhausted");
+  });
+
+  it("ignores open links whose review_state is not changes_requested", async () => {
+    const pool = makeMockPool({ lockGranted: true, taskContent });
+    const prLinks = makeInMemoryPrLinkRepository();
+    await seedLink(prLinks, { reviewState: "re-requested" });
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue, prLinks });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.reworkAdmitted).toBe(0);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  it("M10: two changes_requested links on the SAME repo — only one admitted this night (same-repo-in-series)", async () => {
+    const pool = makeMockPool({
+      lockGranted: true,
+      taskContent: {
+        "trello-main:card1": { title: "Fix the bug", body: cardBody("acme-widgets"), labels: [] },
+        "trello-main:card2": { title: "Fix another bug", body: cardBody("acme-widgets"), labels: [] },
+      },
+    });
+    const prLinks = makeInMemoryPrLinkRepository();
+    await seedLink(prLinks, { taskId: "card1", branch: "openroutines/card-card1", prNumber: 42 });
+    await seedLink(prLinks, { taskId: "card2", branch: "openroutines/card-card2", prNumber: 43 }); // same repo (acme-widgets)
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue, prLinks });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.reworkAdmitted).toBe(1);
+    expect(queue.jobs).toHaveLength(1);
+  });
+});
+
+describe("runNightCycle — D22/F4 #186 Telegram alert on night-run crash", () => {
+  it("acquireNightLock returning null (2nd process, same night) is NOT a failure — 0 alert calls", async () => {
+    const pool = makeMockPool({ lockGranted: false });
+    const sendAlert = vi.fn(async () => {});
+    const deps = baseDeps(pool, { sendAlert });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary).toEqual({ started: false, reason: "locked" });
+    expect(sendAlert).not.toHaveBeenCalled();
+  });
+
+  it("a full cycle with no errors fires 0 alert calls", async () => {
+    const pool = makeMockPool({ lockGranted: true, queuedTasks: [] });
+    const sendAlert = vi.fn(async () => {});
+    const deps = baseDeps(pool, { sendAlert });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.started).toBe(true);
+    expect(sendAlert).not.toHaveBeenCalled();
+  });
+
+  it("an uncaught error mid-cycle (claim query throws) fires the alert exactly once AND still propagates — never swallowed", async () => {
+    const boom = new Error("claim query exploded");
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [{ source_id: "trello-main", task_id: "card1", body: cardBody("acme-widgets"), labels: [] }],
+      claimThrows: boom,
+    });
+    const sendAlert = vi.fn(async () => {});
+    const deps = baseDeps(pool, { sendAlert });
+
+    await expect(runNightCycle(deps)).rejects.toThrow("claim query exploded");
+
+    expect(sendAlert).toHaveBeenCalledTimes(1);
+    expect(sendAlert.mock.calls[0][0]).toContain("night-run");
+    expect(sendAlert.mock.calls[0][0]).toContain("falhou");
+    expect(sendAlert.mock.calls[0][0]).toContain("claim query exploded");
   });
 });

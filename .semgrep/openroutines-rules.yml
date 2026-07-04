@@ -1,0 +1,15 @@
+# Orchestrator-owned Semgrep ruleset (F4 #155).
+#
+# Runs ALONGSIDE the public `p/owasp-top-ten` registry ruleset in
+# src/verify/sast.ts — this file only carries rules specific to this
+# codebase's stack that the public ruleset doesn't cover. Versioned in the
+# ORCHESTRATOR's own repo (a tool it ships with), never in a target repo.
+rules:
+  - id: prisma-raw-unsafe
+    languages: [typescript, javascript]
+    message: "$queryRawUnsafe/$executeRawUnsafe sem parametrização segura — use $queryRaw com template tag."
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: $PRISMA.$queryRawUnsafe(...)
+          - pattern: $PRISMA.$executeRawUnsafe(...)

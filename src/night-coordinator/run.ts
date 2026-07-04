@@ -25,9 +25,12 @@ import { isWithinWindow, enforceHardStop } from "./hard-stop.js";
 import { makeGitHubConnector } from "../connector/github.js";
 import { defaultRunGit } from "../pipeline/card-to-pr/index.js";
 import { cleanupZombieProcesses } from "../provider/process-cleanup.js";
+import { sendTelegramAlert } from "../notify/telegram.js";
+import { isTierOpen, tierForComplexity } from "../engine/circuit-breaker.js";
+import { nextTier } from "../engine/retry-classifier.js";
 import type { RepoRegistry } from "../repo-registry/schema.js";
-import type { ExecutionRepository, ExecutionProcessRepository, PrLinkRepository, TaskRepository } from "../persistence/types.js";
-import type { TaskSource } from "../task-source/types.js";
+import type { ExecutionRepository, ExecutionProcessRepository, PrLink, PrLinkRepository, TaskRepository } from "../persistence/types.js";
+import type { TaskSource, TaskComplexity } from "../task-source/types.js";
 import type { JobQueue } from "../queue/types.js";
 
 export interface NightSummary {
@@ -37,6 +40,8 @@ export interface NightSummary {
   cardsSynced?: number;
   cardsClaimed?: number;
   cardsEnqueued?: number;
+  /** Rework rounds admitted this night (F4 #157, D24). */
+  reworkAdmitted?: number;
 }
 
 export interface RunNightCycleDeps {
@@ -67,10 +72,16 @@ export interface RunNightCycleDeps {
   makeGithub?: (cfg: { token: string; repo: string }) => ReturnType<typeof makeGitHubConnector>;
   now?: () => Date;
   generateId?: () => string;
+  /** Telegram alert seam (D22, F4 #186) — defaults to the real sender; tests inject a mock. */
+  sendAlert?: typeof sendTelegramAlert;
 }
 
-/** "YYYY-MM-DD" of `now`'s wall-clock date in `tz` — the night_runs.date lock key. */
-const dateInTz = (now: Date, tz: string): string =>
+/**
+ * "YYYY-MM-DD" of `now`'s wall-clock date in `tz` — the night_runs.date lock
+ * key. Exported so the morning-report pipeline (F4 #159, 07:30 same calendar
+ * day) can resolve the SAME night_runs row without re-deriving this logic.
+ */
+export const dateInTz = (now: Date, tz: string): string =>
   new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
 
 const matchRegistryKey = (registry: RepoRegistry, candidate: string): string | undefined => {
@@ -120,17 +131,28 @@ const getBusyRepos = async (pool: Pool, nightId: string): Promise<Set<string>> =
  * ClaimedCard (Wave A) intentionally carries only identity + repo — enough
  * for the atomic claim and same-repo dedup. The card-to-pr skill also needs
  * title/description, so this hydrates them from `tasks` with the same pool.
+ *
+ * `altaImpl` (D9 "regra ALTA", F4 #185) has no upstream writer yet — no
+ * triage routine sets it and Task/TaskClassification (F2) carry no such
+ * field — so this is a best-effort bridge via a literal "altaImpl" label
+ * until that routine exists, not a designed contract.
  */
 const getTaskContent = async (
   pool: Pool,
   sourceId: string,
   taskId: string
-): Promise<{ title: string; description: string }> => {
-  const { rows } = await pool.query(`SELECT title, body FROM tasks WHERE source_id = $1 AND task_id = $2`, [
-    sourceId,
-    taskId,
-  ]);
-  return { title: String(rows[0]?.title ?? ""), description: String(rows[0]?.body ?? "") };
+): Promise<{ title: string; description: string; altaImpl: boolean; complexity?: TaskComplexity }> => {
+  const { rows } = await pool.query(
+    `SELECT title, body, labels, complexity FROM tasks WHERE source_id = $1 AND task_id = $2`,
+    [sourceId, taskId]
+  );
+  const labels = ((rows[0]?.labels as string[]) ?? []) as string[];
+  return {
+    title: String(rows[0]?.title ?? ""),
+    description: String(rows[0]?.body ?? ""),
+    altaImpl: labels.includes("altaImpl"),
+    complexity: (rows[0]?.complexity as TaskComplexity | null) ?? undefined,
+  };
 };
 
 const insertPendingExecution = async (
@@ -173,11 +195,116 @@ const syncQueuedCards = async (deps: RunNightCycleDeps): Promise<number> => {
   return synced;
 };
 
+/** Completed rework rounds allowed per card (D24) — the 3rd request blocks the card instead. */
+export const REWORK_MAX_ROUNDS = 2;
+
+/** Move an exhausted-rework card to Blocked. Deliberately NO Telegram alert — D22's taxonomy excludes it. */
+const blockExhaustedRework = async (deps: RunNightCycleDeps, link: PrLink): Promise<void> => {
+  const ts = deps.taskSourceFor?.(link.sourceId);
+  if (ts) {
+    await Effect.runPromise(ts.moveTo(link.taskId, "blocked"));
+    await Effect.runPromise(
+      ts.comment(
+        link.taskId,
+        `⛔ [Bloqueio]\nMotivo: retrabalho-esgotado\nO que falta: ${REWORK_MAX_ROUNDS} rodadas de retrabalho não satisfizeram o review do PR #${link.prNumber ?? "?"}\nPróximo passo: assumir o PR manualmente`
+      )
+    );
+  }
+  // Leaving 'changes_requested' would re-block every night AND let the poller
+  // re-open the card — this terminal review_state makes both skip it for good.
+  await deps.prLinks.update(
+    { sourceId: link.sourceId, taskId: link.taskId, branch: link.branch },
+    { reviewState: "rework-exhausted" }
+  );
+};
+
+/**
+ * Rework admission (F4 #157, D24) — runs BEFORE the normal claim loop. An open
+ * pr_link with review_state='changes_requested' is admitted at most when
+ * rework_count < REWORK_MAX_ROUNDS and it hasn't already reworked TONIGHT
+ * (last_rework_night_id — completed round — plus the claimed_by_night_id
+ * stamp below, which refuses a 2nd admission of the same card in the same
+ * night even before the first completes). At the cap it blocks with
+ * 'retrabalho-esgotado' instead.
+ */
+const admitReworkCards = async (deps: RunNightCycleDeps, nightId: string, generateId: () => string): Promise<number> => {
+  let admitted = 0;
+  // No prNumber -> the poller can never have marked it changes_requested; the
+  // filter is defense in depth against a hand-edited row.
+  const candidates = (await deps.prLinks.findOpen()).filter(
+    (l) => l.reviewState === "changes_requested" && l.prNumber !== undefined
+  );
+  // M10: same same-repo-in-series rule the normal claim loop enforces via
+  // getBusyRepos — without it, two rework rounds on the SAME clone run `git
+  // fetch`/`worktree add` in parallel and collide on index.lock. Seeded once
+  // (this loop isn't a re-queried `for(;;)` like the claim loop below) and
+  // grown in-memory as each rework is admitted.
+  const busyRepos = await getBusyRepos(deps.pool, nightId);
+  for (const link of candidates) {
+    if ((link.reworkCount ?? 0) >= REWORK_MAX_ROUNDS) {
+      await blockExhaustedRework(deps, link);
+      continue;
+    }
+    if (link.lastReworkNightId === nightId) continue; // max 1 completed round/card/night
+    if (busyRepos.has(link.repo)) continue; // same-repo-in-series — retry next night
+    // Atomic per-night claim: the card keeps its old claimed_by_night_id after
+    // the original night, so "not claimed" here means "not claimed by THIS
+    // night" — stamping it refuses any 2nd admission tonight.
+    const { rows } = await deps.pool.query(
+      `UPDATE tasks SET claimed_by_night_id = $1
+       WHERE source_id = $2 AND task_id = $3 AND (claimed_by_night_id IS NULL OR claimed_by_night_id != $1)
+       RETURNING task_id`,
+      [nightId, link.sourceId, link.taskId]
+    );
+    if (rows.length === 0) continue; // already claimed tonight
+    busyRepos.add(link.repo);
+
+    const { title, description, altaImpl, complexity } = await getTaskContent(deps.pool, link.sourceId, link.taskId);
+    const executionId = generateId();
+    await insertPendingExecution(deps.pool, {
+      executionId,
+      nightId,
+      repo: link.repo,
+      sourceId: link.sourceId,
+      taskId: link.taskId,
+    });
+    await deps.queue.enqueue({
+      id: executionId,
+      trigger: {
+        type: "card-execution",
+        executionId,
+        payload: {
+          source_id: link.sourceId,
+          task_id: link.taskId,
+          repo: link.repo,
+          title,
+          description,
+          night_id: nightId,
+          executionId,
+          skill: "card-to-pr",
+          tier: tierForComplexity(complexity),
+          ...(complexity ? { complexity } : {}),
+          ...(altaImpl ? { altaImpl: true } : {}),
+          // Rework markers: the queue handler starts the machine at
+          // rework_preparacao when it sees rework:true.
+          rework: true,
+          prNumber: link.prNumber,
+          branch: link.branch,
+        },
+      },
+    });
+    admitted++;
+  }
+  return admitted;
+};
+
 export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSummary> => {
   const now = deps.now ?? (() => new Date());
   const generateId = deps.generateId ?? randomUUID;
+  const sendAlert = deps.sendAlert ?? sendTelegramAlert;
+  const date = dateInTz(now(), deps.tz);
 
-  const lock = await acquireNightLock(deps.pool, dateInTz(now(), deps.tz), {
+  const lock = await acquireNightLock(deps.pool, date, {
     budgetCapUsd: deps.nightBudgetUsd,
     prCap: deps.nightPrCap,
   });
@@ -186,129 +313,188 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
   }
   const { nightId } = lock;
 
-  // 2. Sync clones + prune orphaned worktrees — best effort; one repo's failure
-  // never blocks the night. `git worktree prune` clears admin metadata for
-  // worktrees whose directory is gone (a crashed/cleaned prior run).
-  const runGit = deps.runGit ?? defaultRunGit(deps.githubToken);
-  for (const [slug, repoConfig] of Object.entries(deps.registry.repos)) {
-    try {
-      await runGit(["fetch"], repoConfig.clonePath);
-      await runGit(["worktree", "prune"], repoConfig.clonePath);
-    } catch (err) {
-      console.error(`[NightCoordinator] sync/prune failed for '${slug}':`, err instanceof Error ? err.message : err);
-    }
-  }
-
-  // 3. Reap zombie CLI processes left by a previous, now-dead orchestrator run.
-  await cleanupZombieProcesses(deps.executionProcessRepo);
-
-  // 3b. Ingest the sources' queued cards into `tasks` so the claim loop below
-  // has rows to claim (F2's poller runtime is unwired — the night-run syncs).
-  const cardsSynced = await syncQueuedCards(deps);
-
-  // 4. Baseline pre-warm: OPTIONAL for this wave, skipped by choice. Each
-  // card's preparacao computes its repo's baseline lazily and idempotently
-  // (getOrCreateBaseline, ON CONFLICT DO NOTHING), so the first card of a
-  // repo tonight pays one extra verify run instead of the coordinator paying
-  // it up front for every registered repo, including idle ones.
-
-  let cardsClaimed = 0;
-  let cardsEnqueued = 0;
-  let windowEnded = false;
-  // Repos denied by per-repo backpressure this cycle. Excluded from further
-  // claims so an unclaimed-on-denial card can't be re-claimed → denied → loop
-  // forever (a livelock): once a repo is blocked, its cards stay unclaimed and
-  // the drain terminates when nothing claimable remains.
-  const blockedRepos = new Set<string>();
-
-  // 5. Drain the currently-claimable backlog. Bounded and fast by design (see
-  // module docstring) — NOT a poll across the whole window.
-  for (;;) {
-    if (!isWithinWindow(now(), deps.nightWindowStart, deps.nightWindowEnd, deps.tz)) {
-      windowEnded = true;
-      break;
+  // D22/F4 #186: from here on, any uncaught error IS the night-run "crash" —
+  // alert once, then re-throw so the caller (cron tick / POST /trigger/night-run)
+  // still sees the failure and never silently swallows it. The null-lock return
+  // above is deliberately OUTSIDE this try — a second process finding the night
+  // already locked is normal backpressure, not a failure, so it alerts 0 times.
+  try {
+    // 2. Sync clones + prune orphaned worktrees — best effort; one repo's failure
+    // never blocks the night. `git worktree prune` clears admin metadata for
+    // worktrees whose directory is gone (a crashed/cleaned prior run).
+    const runGit = deps.runGit ?? defaultRunGit(deps.githubToken);
+    for (const [slug, repoConfig] of Object.entries(deps.registry.repos)) {
+      try {
+        await runGit(["fetch"], repoConfig.clonePath);
+        await runGit(["worktree", "prune"], repoConfig.clonePath);
+      } catch (err) {
+        console.error(`[NightCoordinator] sync/prune failed for '${slug}':`, err instanceof Error ? err.message : err);
+      }
     }
 
-    const openCount = await deps.prLinks.countOpenForNight(nightId);
-    if (openCount >= deps.nightPrCap) break; // global cap reached — nothing more to claim tonight
+    // 3. Reap zombie CLI processes left by a previous, now-dead orchestrator run.
+    await cleanupZombieProcesses(deps.executionProcessRepo);
 
-    const busyRepos = await getBusyRepos(deps.pool, nightId);
-    for (const r of blockedRepos) busyRepos.add(r);
-    const claimed = await claimReadyCards(deps.pool, nightId, deps.nightParallelism, {
-      resolveRepo: resolveRepoForClaim(deps.registry),
-      busyRepos,
-    });
-    if (claimed.length === 0) break; // nothing left to claim right now
-    cardsClaimed += claimed.length;
+    // 3b. Ingest the sources' queued cards into `tasks` so the claim loop below
+    // has rows to claim (F2's poller runtime is unwired — the night-run syncs).
+    const cardsSynced = await syncQueuedCards(deps);
 
-    for (const card of claimed) {
-      const ok = await canOpenPr(
-        {
-          prLinks: deps.prLinks,
-          nightPrCap: deps.nightPrCap,
-          githubToken: deps.githubToken,
-          registry: deps.registry,
-          makeGithub: deps.makeGithub,
-        },
-        { nightId, repo: card.repo }
-      );
-      if (!ok) {
-        // Release the claim so a FUTURE night can pick this card up — without
-        // this, a card denied by the PR cap/backpressure would keep
-        // claimed_by_night_id set forever and never be processed again. Mark the
-        // repo blocked-this-cycle so it isn't re-claimed into a livelock.
-        blockedRepos.add(card.repo);
-        await deps.pool.query(
-          `UPDATE tasks SET claimed_by_night_id = NULL WHERE source_id = $1 AND task_id = $2 AND claimed_by_night_id = $3`,
-          [card.sourceId, card.taskId, nightId]
-        );
-        console.log(
-          `[NightCoordinator] card ${card.sourceId}/${card.taskId} unclaimed (PR cap/backpressure on '${card.repo}') — retry next night`
-        );
-        continue;
+    // 3c. Rework admission (F4 #157, D24) — BEFORE the normal claim loop, so
+    // PRs waiting on human-requested corrections take priority over new cards.
+    // Window-guarded like the claim loop: an out-of-window invocation (the
+    // hard-stop path below) must not enqueue new work.
+    const reworkAdmitted = isWithinWindow(now(), deps.nightWindowStart, deps.nightWindowEnd, deps.tz)
+      ? await admitReworkCards(deps, nightId, generateId)
+      : 0;
+
+    // 4. Baseline pre-warm: OPTIONAL for this wave, skipped by choice. Each
+    // card's preparacao computes its repo's baseline lazily and idempotently
+    // (getOrCreateBaseline, ON CONFLICT DO NOTHING), so the first card of a
+    // repo tonight pays one extra verify run instead of the coordinator paying
+    // it up front for every registered repo, including idle ones.
+
+    let cardsClaimed = 0;
+    let cardsEnqueued = 0;
+    let windowEnded = false;
+    // Repos denied by per-repo backpressure this cycle. Excluded from further
+    // claims so an unclaimed-on-denial card can't be re-claimed → denied → loop
+    // forever (a livelock): once a repo is blocked, its cards stay unclaimed and
+    // the drain terminates when nothing claimable remains.
+    const blockedRepos = new Set<string>();
+
+    // 5. Drain the currently-claimable backlog. Bounded and fast by design (see
+    // module docstring) — NOT a poll across the whole window.
+    for (;;) {
+      if (!isWithinWindow(now(), deps.nightWindowStart, deps.nightWindowEnd, deps.tz)) {
+        windowEnded = true;
+        break;
       }
 
-      const { title, description } = await getTaskContent(deps.pool, card.sourceId, card.taskId);
-      const executionId = generateId();
-      await insertPendingExecution(deps.pool, {
-        executionId,
-        nightId,
-        repo: card.repo,
-        sourceId: card.sourceId,
-        taskId: card.taskId,
+      const openCount = await deps.prLinks.countOpenForNight(nightId);
+      if (openCount >= deps.nightPrCap) break; // global cap reached — nothing more to claim tonight
+
+      const busyRepos = await getBusyRepos(deps.pool, nightId);
+      for (const r of blockedRepos) busyRepos.add(r);
+      const claimed = await claimReadyCards(deps.pool, nightId, deps.nightParallelism, {
+        resolveRepo: resolveRepoForClaim(deps.registry),
+        busyRepos,
       });
-      await deps.queue.enqueue({
-        id: executionId,
-        trigger: {
-          type: "card-execution",
-          executionId,
-          payload: {
-            source_id: card.sourceId,
-            task_id: card.taskId,
-            repo: card.repo,
-            title,
-            description,
-            night_id: nightId,
-            executionId,
-            skill: "card-to-pr",
+      if (claimed.length === 0) break; // nothing left to claim right now
+      cardsClaimed += claimed.length;
+
+      for (const card of claimed) {
+        const ok = await canOpenPr(
+          {
+            prLinks: deps.prLinks,
+            nightPrCap: deps.nightPrCap,
+            githubToken: deps.githubToken,
+            registry: deps.registry,
+            makeGithub: deps.makeGithub,
           },
-        },
-      });
-      cardsEnqueued++;
+          { nightId, repo: card.repo }
+        );
+        if (!ok) {
+          // Release the claim so a FUTURE night can pick this card up — without
+          // this, a card denied by the PR cap/backpressure would keep
+          // claimed_by_night_id set forever and never be processed again. Mark the
+          // repo blocked-this-cycle so it isn't re-claimed into a livelock.
+          blockedRepos.add(card.repo);
+          await deps.pool.query(
+            `UPDATE tasks SET claimed_by_night_id = NULL WHERE source_id = $1 AND task_id = $2 AND claimed_by_night_id = $3`,
+            [card.sourceId, card.taskId, nightId]
+          );
+          console.log(
+            `[NightCoordinator] card ${card.sourceId}/${card.taskId} unclaimed (PR cap/backpressure on '${card.repo}') — retry next night`
+          );
+          continue;
+        }
+
+        // F4 #159 circuit breaker: a tier with >60% failure this night (over
+        // a minimum sample) stops receiving new cards. If a next tier exists,
+        // this card proceeds attributed to the ESCALATED tier — both for
+        // recordTierOutcome bookkeeping AND for the actual route: app.ts's
+        // resolveCardToPrDynamicProvider honors payload.tier when it outranks
+        // the complexity-derived tier. With no next tier (already at opus),
+        // there is nowhere safe to escalate — defer the card to a future
+        // night instead of retrying a tier that is already failing >60% of
+        // its attempts.
+        const originalTier = tierForComplexity(card.complexity);
+        let tier = originalTier;
+        if (await isTierOpen(deps.pool, nightId, originalTier)) {
+          const escalated = nextTier(originalTier);
+          if (!escalated) {
+            // Same "don't re-claim this cycle" fence as the PR-cap/backpressure
+            // denial above — without it, unclaiming here would let the very
+            // next claimReadyCards() call re-pick this same card into a
+            // defer-loop for the rest of the cycle.
+            blockedRepos.add(card.repo);
+            await deps.pool.query(
+              `UPDATE tasks SET claimed_by_night_id = NULL WHERE source_id = $1 AND task_id = $2 AND claimed_by_night_id = $3`,
+              [card.sourceId, card.taskId, nightId]
+            );
+            console.log(
+              `[NightCoordinator] card ${card.sourceId}/${card.taskId} deferred (tier '${originalTier}' circuit open, no next tier) — retry next night`
+            );
+            continue;
+          }
+          console.log(
+            `[NightCoordinator] card ${card.sourceId}/${card.taskId} escalated ${originalTier} -> ${escalated} (tier '${originalTier}' circuit open this night)`
+          );
+          tier = escalated;
+        }
+
+        const { title, description, altaImpl } = await getTaskContent(deps.pool, card.sourceId, card.taskId);
+        const executionId = generateId();
+        await insertPendingExecution(deps.pool, {
+          executionId,
+          nightId,
+          repo: card.repo,
+          sourceId: card.sourceId,
+          taskId: card.taskId,
+        });
+        await deps.queue.enqueue({
+          id: executionId,
+          trigger: {
+            type: "card-execution",
+            executionId,
+            payload: {
+              source_id: card.sourceId,
+              task_id: card.taskId,
+              repo: card.repo,
+              title,
+              description,
+              night_id: nightId,
+              executionId,
+              skill: "card-to-pr",
+              tier,
+              // F4 #185 (D9): consumed by card-to-pr's implementacao dynamic
+              // routing — independent of `tier` above (that one is the
+              // circuit breaker's night-level bookkeeping bucket).
+              complexity: card.complexity,
+              ...(altaImpl ? { altaImpl: true } : {}),
+            },
+          },
+        });
+        cardsEnqueued++;
+      }
     }
-  }
 
-  // 6. Only hard-stop when THIS call is still running once the window has
-  // actually closed — never right after a normal early drain, which would
-  // kill card executions that still have hours left (see module docstring).
-  if (windowEnded) {
-    await enforceHardStop({
-      executionRepo: deps.executionRepo,
-      executionProcessRepo: deps.executionProcessRepo,
-      pool: deps.pool,
-      nightId,
-    });
-  }
+    // 6. Only hard-stop when THIS call is still running once the window has
+    // actually closed — never right after a normal early drain, which would
+    // kill card executions that still have hours left (see module docstring).
+    if (windowEnded) {
+      await enforceHardStop({
+        executionRepo: deps.executionRepo,
+        executionProcessRepo: deps.executionProcessRepo,
+        pool: deps.pool,
+        nightId,
+      });
+    }
 
-  return { started: true, nightId, cardsSynced, cardsClaimed, cardsEnqueued };
+    return { started: true, nightId, cardsSynced, cardsClaimed, cardsEnqueued, reworkAdmitted };
+  } catch (err) {
+    console.error(`[NightCoordinator] night cycle ${date} failed:`, err);
+    await sendAlert(`🔥 night-run ${date} falhou: ${err instanceof Error ? err.message : String(err)}`);
+    throw err;
+  }
 };

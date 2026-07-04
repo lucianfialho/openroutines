@@ -23,6 +23,31 @@ export const BUDGET_UNIT_WEIGHTS = {
 
 export type BudgetTier = keyof typeof BUDGET_UNIT_WEIGHTS;
 
+/**
+ * The runner passes `tier = routedModel ?? routedProvider ?? "default"`
+ * (state-machine.ts) as the budget-gate lookup key. Since F4 #185, a
+ * dynamically-routed `implementacao` state passes the actual MODEL ID
+ * (e.g. "claude-opus-4-8", "kimi-k2.6"), which doesn't match
+ * BUDGET_UNIT_WEIGHTS' keys verbatim (dots vs. hyphens, "kimi-k2.6" vs.
+ * "kimi") — this is the one normalization point, so a routed Opus call is
+ * weighed 4, not silently miscounted as the sonnet default.
+ */
+const MODEL_ID_TO_BUDGET_TIER: Record<string, BudgetTier> = {
+  "claude-opus-4-8": "claude-opus-4.8",
+  "kimi-k2.6": "kimi",
+  "claude-sonnet-5": "claude-sonnet-5",
+  "claude-fable-5": "fable-5",
+};
+
+/**
+ * Normalizes a routed model/provider/tier string into a BUDGET_UNIT_WEIGHTS
+ * key. An unrecognized value (a static state's own `provider:` name, e.g.
+ * "claude-cli", or anything else unmapped) defaults to "claude-sonnet-5" —
+ * documented fallback, never denies budget outright for an unknown tier.
+ */
+export const normalizeBudgetTier = (tier: string): BudgetTier =>
+  MODEL_ID_TO_BUDGET_TIER[tier] ?? (tier in BUDGET_UNIT_WEIGHTS ? (tier as BudgetTier) : "claude-sonnet-5");
+
 export const reserveBudget = async (
   pool: Pool,
   args: {

@@ -1,0 +1,39 @@
+id: morning-report
+name: Morning Report
+description: >
+  07:30 digest (F4 #159, D29): 1 card único por dia, ordenado por risco —
+  bloqueios de segurança no topo, PRs por risk_score, faixa verde, custos por
+  tier, e o total de review estimado. Todos os estados são type:script (sem
+  LLM) — dispara como uma routine normal via engine.execute() (a mesma
+  resolução por routineId que já cobre pr-review/daily-pr-review), sem
+  interceptação especial no queueHandler (ao contrário de night-run/
+  night-hard-stop, que orquestram efeitos que não cabem num skill declarativo).
+
+initial_state: coletar_dados
+
+states:
+  coletar_dados:
+    description: Resolve o night_runs de hoje e reúne os dados da noite (gatherMorningReportData).
+    type: script
+    script: morning-report-coletar-dados
+    transitions:
+      - { to: montar_relatorio }
+
+  montar_relatorio:
+    description: Monta {title, body} na ordem exata do relatório (renderMorningReportCard).
+    type: script
+    script: morning-report-montar-relatorio
+    transitions:
+      - { to: publicar_card }
+
+  publicar_card:
+    description: >
+      Cria (uma vez por night_runs, guardado por report_card_id) ou reaproveita
+      o card do dia e publica o corpo como comentário 📊 [Relatório].
+    type: script
+    script: morning-report-publicar-card
+    transitions:
+      - { to: done }
+
+  done:
+    terminal: true

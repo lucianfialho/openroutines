@@ -3,7 +3,8 @@
  *
  * Simple interpolation for skill agent_prompts.
  * Supports: {{inputs.x}}, {{output.y.z}}, {{output_path}}
- * Arrays are formatted as bullet lists; objects as key: value lines.
+ * Arrays and objects render as JSON — downstream parsers (e.g. the
+ * security-judge's verify/contestacao blocks) consume the rendered text.
  */
 
 export interface TemplateContext {
@@ -47,13 +48,8 @@ const formatValue = (value: unknown): string => {
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
     return String(value);
   }
-  if (Array.isArray(value)) {
-    return value.map((item) => `- ${formatValue(item)}`).join("\n");
-  }
-  if (typeof value === "object") {
-    return Object.entries(value as Record<string, unknown>)
-      .map(([k, v]) => `${k}: ${formatValue(v)}`)
-      .join("\n");
+  if (Array.isArray(value) || typeof value === "object") {
+    return JSON.stringify(value, null, 2);
   }
   return String(value);
 };

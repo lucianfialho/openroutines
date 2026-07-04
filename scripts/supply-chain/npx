@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# scripts/supply-chain/npx (F4 #156) -- supply-chain guard shim for npx.
+# See _guard.sh in this directory for the shared logic.
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_guard.sh"
+run_guarded_shim "npx" "$@"

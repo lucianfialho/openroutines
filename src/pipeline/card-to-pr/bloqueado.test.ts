@@ -8,9 +8,15 @@ import type { TaskSource } from "../../task-source/types.js";
 
 const inputs = { source_id: "trello-main", task_id: "card1" };
 
-const makeDeps = (): { deps: CardToPrDeps; moveTo: ReturnType<typeof vi.fn>; comment: ReturnType<typeof vi.fn> } => {
+const makeDeps = (): {
+  deps: CardToPrDeps;
+  moveTo: ReturnType<typeof vi.fn>;
+  comment: ReturnType<typeof vi.fn>;
+  sendAlert: ReturnType<typeof vi.fn>;
+} => {
   const moveTo = vi.fn(() => Effect.succeed(undefined));
   const comment = vi.fn(() => Effect.succeed(undefined));
+  const sendAlert = vi.fn(async () => {});
   const taskSource = { moveTo, comment } as unknown as TaskSource;
   const deps: CardToPrDeps = {
     registry: { repos: {} },
@@ -19,8 +25,9 @@ const makeDeps = (): { deps: CardToPrDeps; moveTo: ReturnType<typeof vi.fn>; com
     ledger: makeInMemoryActionLedgerRepository(),
     prLinks: makeInMemoryPrLinkRepository(),
     taskSourceFor: () => taskSource,
+    sendAlert,
   };
-  return { deps, moveTo, comment };
+  return { deps, moveTo, comment, sendAlert };
 };
 
 describe("makeBloqueado", () => {
@@ -63,6 +70,143 @@ describe("makeBloqueado", () => {
     expect(body).toContain("Próximo passo: revisar os logs de verify, ajustar a implementação manualmente e reabrir o card");
   });
 
+  it("F4 #153: derives blockReason 'seguranca' from a reproved outputs.revisao.securityVerdict", async () => {
+    const { deps } = makeDeps();
+    const outputs = { preparacao: { branchProtected: true }, revisao: { approved: false, gaps: [], securityVerdict: { approved: false, findings: [], criticalArea: false } } };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "seguranca" });
+  });
+
+  it("F4 #153: derives blockReason 'seguranca-divergente' when securityVerdict.secondJudge.diverged is true", async () => {
+    const { deps } = makeDeps();
+    const outputs = {
+      preparacao: { branchProtected: true },
+      revisao: {
+        approved: false,
+        gaps: [],
+        securityVerdict: { approved: false, findings: [], criticalArea: true, secondJudge: { diverged: true } },
+      },
+    };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "seguranca-divergente" });
+  });
+
+  it("F4 #153: an approved (or absent) securityVerdict never derives a security blockReason", async () => {
+    const { deps } = makeDeps();
+    const outputs = {
+      preparacao: { branchProtected: true },
+      revisao: { approved: true, gaps: [], securityVerdict: { approved: true, findings: [], criticalArea: false } },
+    };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "desconhecido" });
+  });
+
+  it("F4 #185: derives blockReason 'plano-refutado-2x' from outputs.gate_plano.exhausted", async () => {
+    const { deps } = makeDeps();
+    const outputs = { preparacao: { branchProtected: true }, gate_plano: { verdict: "refutado", exhausted: true } };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "plano-refutado-2x" });
+  });
+
+  it("F4 #185: a non-exhausted gate_plano output never derives a blockReason from it", async () => {
+    const { deps } = makeDeps();
+    const outputs = { preparacao: { branchProtected: true }, gate_plano: { verdict: "refutado" } };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "desconhecido" });
+  });
+
+  it("H3/#186: revisao.exhausted with a remaining security gap derives 'seguranca-esgotada'", async () => {
+    const { deps } = makeDeps();
+    const outputs = {
+      preparacao: { branchProtected: true },
+      revisao: {
+        approved: false,
+        gaps: [{ lens: "security", description: "achado ainda aberto", contestable: true }],
+        securityVerdict: null,
+        exhausted: true,
+      },
+    };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "seguranca-esgotada" });
+  });
+
+  it("H3/#186: revisao.exhausted with no remaining security gap derives 'revisao-esgotada'", async () => {
+    const { deps } = makeDeps();
+    const outputs = {
+      preparacao: { branchProtected: true },
+      revisao: {
+        approved: false,
+        gaps: [{ lens: "correctness", description: "gap não resolvido", contestable: true }],
+        securityVerdict: null,
+        exhausted: true,
+      },
+    };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "revisao-esgotada" });
+  });
+
+  it("H3/#186: a non-exhausted revisao output never derives a blockReason from it", async () => {
+    const { deps } = makeDeps();
+    const outputs = {
+      preparacao: { branchProtected: true },
+      revisao: {
+        approved: false,
+        gaps: [{ lens: "security", description: "achado", contestable: true }],
+        securityVerdict: null,
+      },
+    };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "desconhecido" });
+  });
+
+  it("H3/#186: 'seguranca-esgotada' starts with 'seguranca' — fires the Telegram alert like the other security reasons", async () => {
+    const { deps, sendAlert } = makeDeps();
+    const securityInputs = { source_id: "trello-main", task_id: "card1", title: "T", repo: "r" };
+    const outputs = {
+      preparacao: { branchProtected: true },
+      revisao: {
+        approved: false,
+        gaps: [{ lens: "security", description: "achado", contestable: true }],
+        securityVerdict: null,
+        exhausted: true,
+      },
+    };
+
+    await makeBloqueado(deps)({ inputs: securityInputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(sendAlert).toHaveBeenCalledTimes(1);
+    expect(sendAlert.mock.calls[0][0]).toContain("blockReason=seguranca-esgotada");
+  });
+
+  it("F4 #185: preparacao/verify/security blockReason still win over gate_plano.exhausted (order preserved)", async () => {
+    const { deps } = makeDeps();
+    const outputs = {
+      preparacao: { branchProtected: true },
+      verify: { passed: false, blockReason: "verify-falhou" },
+      gate_plano: { verdict: "refutado", exhausted: true },
+    };
+
+    const r = await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+    expect(r).toEqual({ blocked: true, blockReason: "verify-falhou" });
+  });
+
   it("AC3: defaults blockReason to 'desconhecido' (unmapped detail) when neither preparacao nor verify carry one", async () => {
     const { deps, comment } = makeDeps();
 
@@ -86,5 +230,112 @@ describe("makeBloqueado", () => {
     expect(r1).toEqual(r2);
     expect(moveTo).toHaveBeenCalledTimes(1);
     expect(comment).toHaveBeenCalledTimes(1);
+  });
+
+  describe("D22/F4 #186: Telegram alert on blockReason: seguranca*", () => {
+    const securityInputs = { source_id: "trello-main", task_id: "card1", title: "Vazamento de segredo", repo: "acme-widgets" };
+
+    it("fires sendTelegramAlert once with source_id/task_id/blockReason/title/repo when blockReason is 'seguranca'", async () => {
+      const { deps, sendAlert } = makeDeps();
+      const outputs = { preparacao: { branchProtected: true, blockReason: "seguranca" } };
+
+      const r = await makeBloqueado(deps)({ inputs: securityInputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+      expect(r).toEqual({ blocked: true, blockReason: "seguranca" });
+      expect(sendAlert).toHaveBeenCalledTimes(1);
+      const [text] = sendAlert.mock.calls[0] as [string];
+      expect(text).toContain("trello-main/card1");
+      expect(text).toContain("blockReason=seguranca");
+      expect(text).toContain("Vazamento de segredo");
+      expect(text).toContain("acme-widgets");
+    });
+
+    it("fires sendTelegramAlert once when blockReason is 'seguranca-divergente'", async () => {
+      const { deps, sendAlert } = makeDeps();
+      const outputs = { verify: { passed: false, blockReason: "seguranca-divergente" } };
+
+      await makeBloqueado(deps)({ inputs: securityInputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+      expect(sendAlert).toHaveBeenCalledTimes(1);
+      expect(sendAlert.mock.calls[0][0]).toContain("blockReason=seguranca-divergente");
+    });
+
+    it("negative: does NOT call sendTelegramAlert when blockReason is 'verify-falhou'", async () => {
+      const { deps, sendAlert } = makeDeps();
+      const outputs = { verify: { passed: false, blockReason: "verify-falhou" } };
+
+      await makeBloqueado(deps)({ inputs: securityInputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+      expect(sendAlert).not.toHaveBeenCalled();
+    });
+
+    it("idempotent: re-running for the same executionId (post-crash resume) sends the alert only once", async () => {
+      const { deps, sendAlert } = makeDeps();
+      const outputs = { preparacao: { branchProtected: true, blockReason: "seguranca" } };
+      const handler = makeBloqueado(deps);
+
+      await handler({ inputs: securityInputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+      await handler({ inputs: securityInputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+      expect(sendAlert).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("M3/D24: rework-exhausted cap on pr_links", () => {
+    const reworkInputs = { ...inputs, rework: true, branch: "openroutines/card1" };
+    const outputs = { verify: { passed: false, blockReason: "verify-falhou" } };
+
+    it("a bloqueado reached via the rework flow (ctx.inputs.rework===true) marks the pr_link reviewState:'rework-exhausted'", async () => {
+      const { deps } = makeDeps();
+      await deps.prLinks.create({
+        sourceId: "trello-main",
+        taskId: "card1",
+        repo: "acme-widgets",
+        branch: "openroutines/card1",
+        status: "open",
+        reviewState: "changes_requested",
+      });
+
+      await makeBloqueado(deps)({ inputs: reworkInputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+      const [link] = await deps.prLinks.findByTask("trello-main", "card1");
+      expect(link.reviewState).toBe("rework-exhausted");
+    });
+
+    it("a normal (non-rework) bloqueado never touches pr_links", async () => {
+      const { deps } = makeDeps();
+      await deps.prLinks.create({
+        sourceId: "trello-main",
+        taskId: "card1",
+        repo: "acme-widgets",
+        branch: "openroutines/card1",
+        status: "open",
+        reviewState: "changes_requested",
+      });
+
+      await makeBloqueado(deps)({ inputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+      const [link] = await deps.prLinks.findByTask("trello-main", "card1");
+      expect(link.reviewState).toBe("changes_requested");
+    });
+
+    it("idempotent: re-running for the same executionId keeps the terminal reviewState (no crash, no double-effect)", async () => {
+      const { deps } = makeDeps();
+      await deps.prLinks.create({
+        sourceId: "trello-main",
+        taskId: "card1",
+        repo: "acme-widgets",
+        branch: "openroutines/card1",
+        status: "open",
+        reviewState: "changes_requested",
+      });
+      const handler = makeBloqueado(deps);
+
+      await handler({ inputs: reworkInputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+      await handler({ inputs: reworkInputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+      const [link] = await deps.prLinks.findByTask("trello-main", "card1");
+      expect(link.reviewState).toBe("rework-exhausted");
+    });
   });
 });

@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "card-to-pr gate_plano output",
+  "type": "object",
+  "required": ["verdict", "corrections", "escalate"],
+  "properties": {
+    "verdict": { "enum": ["aprovado", "refutado"] },
+    "corrections": { "type": "array", "items": { "type": "string" } },
+    "escalate": { "type": "boolean" }
+  }
+}

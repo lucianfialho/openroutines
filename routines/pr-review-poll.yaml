@@ -1,0 +1,12 @@
+# PR review poller (F4 #157, D24). Every 30min during the day (TZ from the
+# process env) it reads each open pr_link's review state via gh; a transition
+# to CHANGES_REQUESTED moves the card Review -> Working and marks it eligible
+# for the next night's rework admission. pipeline.skill is a placeholder — the
+# queue handler special-cases this routine (like night-run/night-hard-stop)
+# and calls runPrReviewPoll, not a skill.
+id: pr-review-poll
+triggers:
+  - type: schedule
+    cron: "*/30 8-22 * * *"
+pipeline:
+  skill: card-to-pr

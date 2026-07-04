@@ -1,0 +1,15 @@
+# Supply-chain guardrail allowlist (F4 #156).
+#
+# This is orchestrator config -- it lives in the OpenRoutines repo, never in a
+# target repo's own tree. Packages listed here may run npm/pnpm lifecycle
+# scripts (preinstall/postinstall/prepare) when the executor installs them
+# inside a card's worktree. Every other package installs with
+# --ignore-scripts, regardless of what the supply-chain checker (npq/socket)
+# reports -- the checker decides whether the install may proceed at all, this
+# list decides whether its lifecycle scripts may run.
+#
+# Keep this a SINGLE-LINE flow-style YAML list ([a, b, c]): the shims in
+# scripts/supply-chain/ parse it with grep/sed rather than a YAML library
+# (they run before any npm install in the worktree, so they can't assume one
+# is available yet). A block-style list here would silently fail that parse.
+allow_lifecycle_scripts: [prisma, "@prisma/client", esbuild, sharp]

@@ -13,11 +13,14 @@
  * Wave A keeps the atomic guarantee here and the domain wiring out.
  */
 import type { Pool } from "pg";
+import { TASK_COMPLEXITIES, type TaskComplexity } from "../task-source/types.js";
 
 export interface ClaimedCard {
   sourceId: string;
   taskId: string;
   repo: string;
+  /** Raw task complexity (F4 #159 circuit breaker / D9 tier routing) — undefined when unclassified. */
+  complexity?: TaskComplexity;
 }
 
 export interface ClaimCandidate {
@@ -47,14 +50,20 @@ export const claimReadyCards = async (
   );
 
   const candidates = rows
-    .map((r) => ({
-      sourceId: String(r.source_id),
-      taskId: String(r.task_id),
-      body: String(r.body ?? ""),
-      labels: ((r.labels as string[]) ?? []) as string[],
-      priorityRank: PRIORITY_RANK[String(r.priority ?? "").toLowerCase()] ?? 9,
-      complexityRank: COMPLEXITY_RANK[String(r.complexity ?? "").toLowerCase()] ?? 9,
-    }))
+    .map((r) => {
+      const rawComplexity = String(r.complexity ?? "").toLowerCase();
+      return {
+        sourceId: String(r.source_id),
+        taskId: String(r.task_id),
+        body: String(r.body ?? ""),
+        labels: ((r.labels as string[]) ?? []) as string[],
+        priorityRank: PRIORITY_RANK[String(r.priority ?? "").toLowerCase()] ?? 9,
+        complexityRank: COMPLEXITY_RANK[rawComplexity] ?? 9,
+        complexity: (TASK_COMPLEXITIES as readonly string[]).includes(rawComplexity)
+          ? (rawComplexity as TaskComplexity)
+          : undefined,
+      };
+    })
     .sort(
       (a, b) =>
         a.priorityRank - b.priorityRank ||
@@ -87,7 +96,7 @@ export const claimReadyCards = async (
     if (upd.rows.length === 0) continue; // lost the race to a concurrent coordinator
 
     pickedRepos.add(repo);
-    claimed.push({ sourceId: c.sourceId, taskId: c.taskId, repo });
+    claimed.push({ sourceId: c.sourceId, taskId: c.taskId, repo, complexity: c.complexity });
   }
 
   return claimed;

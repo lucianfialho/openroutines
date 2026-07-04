@@ -1,10 +1,16 @@
 id: card-to-pr
 name: Card to PR
 description: >
-  Thick-state pipeline (F3 pilot): 1 Trello card -> 1 PR. Each phase is one full
-  CLI-agent invocation or one deterministic script, not a micro-tool loop.
-  preparacao -> plano -> implementacao -> verify -> pr_gate (human) -> pr -> done,
-  diverting to bloqueado when the repo has no branch protection or verify stalls.
+  Thick-state pipeline (F3 pilot, F4 #153 adversarial review): 1 Trello card ->
+  1 PR. Each phase is one full CLI-agent invocation or one deterministic
+  script, not a micro-tool loop.
+  preparacao -> plano -> implementacao -> verify -> revisao -> pr -> done,
+  diverting to refutacao on a contestable gap and to bloqueado when the repo
+  has no branch protection, verify stalls, or the adversarial review/security
+  lens never clears. The old `pr_gate` (manual human gate) is REMOVED: the
+  fanout `revisao` state (correctness/conventions + data + security lenses)
+  now IS the pre-PR gate, and the human approval step moves to the GitHub PR
+  review itself (D13: merge still requires a human, just later in the flow).
 
 inputs:
   required:
@@ -15,6 +21,17 @@ inputs:
     - { name: description, type: string }
   optional:
     - { name: night_id, type: string }
+    # D9 (F4 #185) routing inputs — TaskComplexity (F2) and the "regra ALTA"
+    # triage flag. Both absent-safe: no complexity -> sonnet default (never
+    # kimi); no altaImpl -> false (routes by complexity alone).
+    - { name: complexity, type: string }
+    - { name: altaImpl, type: boolean }
+    # Rework loop (F4 #157, D24): set by the night-coordinator's rework
+    # admission; the queue handler then starts the machine at rework_preparacao
+    # instead of preparacao.
+    - { name: rework, type: boolean }
+    - { name: prNumber, type: integer }
+    - { name: branch, type: string }
 
 initial_state: preparacao
 
@@ -28,23 +45,60 @@ states:
       - { to: plano }
 
   plano:
-    description: Explore the repo and produce a plan.
+    description: >
+      Explore the repo and produce a plan; decides whether the architecture
+      gate (gate_plano) must approve it before implementation starts.
     provider: claude-cli
     model: claude-sonnet-5
     output_schema: .gates/skills/card-to-pr/schemas/plano.schema.json
     agent_prompt: |
       Card: {{inputs.title}}
       Descrição: {{inputs.description}}
+      Complexidade triada: {{inputs.complexity}}
       Worktree: {{outputs.preparacao.worktree.path}}
 
       Explore o repositório no worktree acima, produza um PLAN.md e emita um JSON com:
-      {summary, files[], estimatedLoc, dataChanges[], testStrategy, risks[]}.
-      Não altere código nesta fase — só planeje.
+      {summary, files[], estimatedLoc, dataChanges[], testStrategy, needsArchGate, risks[]}.
+      needsArchGate=true se a complexidade for High/Highest OU o plano tocar
+      schema/migration/autenticação/pagamento/dado sensível — mesmo em
+      complexidade menor. Não altere código nesta fase — só planeje.
     transitions:
+      - { to: gate_plano, when: "output.plano.needsArchGate == true" }
       - { to: implementacao }
+
+  gate_plano:
+    description: >
+      Architecture gate (F4 #185, D9): Opus judges the plan adversarially —
+      architecture A/B/C, raizes-architecture-principles, scope vs. card —
+      escalating to Fable only for an ambiguous/high-risk/unprecedented call,
+      never to avoid judging (the composite Opus(+Fable handoff) mechanics
+      live in the architecture-judge provider; here it's just a provider
+      name). Refuted once sends the plan back to `plano`; refuted twice
+      blocks the card (`on_exhausted`) instead of looping forever.
+    type: agent
+    provider: architecture-judge
+    model: claude-opus-4-8
+    output_schema: .gates/skills/card-to-pr/schemas/gate-plano.schema.json
+    agent_prompt: |
+      Julgue adversarialmente o plano abaixo: arquitetura A/B/C,
+      raizes-architecture-principles, escopo vs. card.
+
+      Card: {{inputs.title}} — {{inputs.description}}
+      Plano: {{outputs.plano}}
+
+      Emita um JSON com: {verdict: "aprovado"|"refutado", corrections: string[], escalate: boolean}.
+      escalate=true só se a decisão de arquitetura for nova/ambígua/de alto
+      risco/sem precedente — nunca para evitar julgar.
+    transitions:
+      - { to: implementacao, when: "output.gate_plano.verdict == 'aprovado'" }
+      - { to: plano, when: "output.gate_plano.verdict == 'refutado'", max_retries: 1, on_exhausted: bloqueado }
 
   implementacao:
     description: Implement the plan in the worktree and commit locally (never push).
+    # F4 #185 (D9): resolved per-card by the dispatcher's resolveDynamicProvider
+    # hook (complexity/altaImpl -> kimi/sonnet/opus). provider:/model: below
+    # are the static FALLBACK — used verbatim when no hook is wired.
+    dynamic_provider: true
     provider: claude-cli
     model: claude-sonnet-5
     output_schema: .gates/skills/card-to-pr/schemas/implementacao.schema.json
@@ -70,18 +124,150 @@ states:
     type: script
     script: card-to-pr-verify
     transitions:
-      - { to: pr_gate, when: "output.verify.passed == true" }
-      - { to: implementacao, when: "output.verify.retryable == true" }
+      # Ordered — first true `when` wins (condition.ts has no '&&'). A retryable
+      # failure in the REWORK flow (output.rework_preparacao only exists there)
+      # must re-enter `rework`, whose prompt interpolates rework_preparacao.* —
+      # re-entering implementacao there would leave {{outputs.plano}}/
+      # {{outputs.preparacao.*}} as literal placeholders (blind agent). Both
+      # retry edges carry max_retries so tier escalation (F4 #159) grants ONE
+      # escalated attempt on exhaustion before on_exhausted -> bloqueado;
+      # verify.ts's own attempt<=2 cap still sends the 3rd failure to bloqueado
+      # via the retryable != true edge.
+      - { to: revisao, when: "output.verify.passed == true" }
+      - { to: bloqueado, when: "output.verify.retryable != true" }
+      - { to: rework, when: "output.rework_preparacao.worktree.path", max_retries: 1, on_exhausted: bloqueado }
+      - { to: implementacao, max_retries: 1, on_exhausted: bloqueado }
+
+  revisao:
+    description: >
+      Adversarial multi-lens review (F4 #153), fresh context per lens: 3 lenses
+      in this order — correctness+conventions/raizes-docs (Kimi, always, 1
+      call/2 rubrics), data/Prisma (Sonnet, read-only tools, only when the
+      diff touches data files), security (security-judge provider, Opus,
+      always — the composite Opus(+Fable in critical areas)/confidence/
+      adjudication mechanics live in that provider, implemented by a separate
+      issue; here it's just a provider name). Replaces `pr_gate`: this state +
+      the security lens IS the pre-PR gate now.
+    type: fanout
+    lenses:
+      - name: correctness
+        provider: kimi-cli
+        model: kimi-k2.6
+        agent_prompt_file: .gates/skills/card-to-pr/prompts/revisao-correcao.md
+        output_schema: .gates/skills/card-to-pr/schemas/lens-correctness.json
+      - name: data
+        provider: claude-cli
+        model: claude-sonnet-5
+        tools: [Read, Grep, Glob]
+        when: "output.verify.dataChanges == true"
+        agent_prompt_file: .gates/skills/card-to-pr/prompts/revisao-dados.md
+        output_schema: .gates/skills/card-to-pr/schemas/lens-data.json
+      - name: security
+        provider: security-judge
+        model: claude-opus-4-8
+        agent_prompt_file: .gates/skills/card-to-pr/prompts/revisao-seguranca.md
+        output_schema: .gates/skills/card-to-pr/schemas/lens-security.json
+    aggregate: aggregateRevisao
+    transitions:
+      # Order matters (first true `when` wins): refutacao is ALWAYS checked
+      # before bloqueado — on the first pass gaps.length>0 is already true,
+      # before anything could have gone through adjudication yet. A security
+      # finding still `status:"open"` surfaces as a gap too, so it takes this
+      # SAME edge — never a direct shortcut to bloqueado.
+      - { to: refutacao, when: "output.revisao.gaps.length > 0", max_retries: 2, on_exhausted: bloqueado }
+      - { to: bloqueado, when: "output.revisao.securityVerdict.approved == false" }
+      - { to: pr, when: "output.revisao.approved == true" }
+      # F5 #160 adds the ValidacaoVisual edge here (approved + isUI).
       - { to: bloqueado }
 
-  pr_gate:
-    description: Human approval before any push/PR.
-    gate: manual_approval
+  refutacao:
+    description: >
+      Generic adversarial-gap responder (F4 #153): receives every contestable
+      gap from the last `revisao` pass (correctness/conventions/data/security,
+      including a security finding still open) as a delimited fix-list and
+      decides, for the batch, whether to fix or contest with evidence.
+      F4 #185's complexity routing covers plano/gate_plano/implementacao only
+      — refutacao deliberately stays static (claude-cli/claude-sonnet-5), not
+      a gap left for a future issue.
+    type: agent
+    provider: claude-cli
+    model: claude-sonnet-5
+    output_schema: .gates/skills/card-to-pr/schemas/refutacao.schema.json
+    agent_prompt_file: .gates/skills/card-to-pr/prompts/refutacao.md
+    tools:
+      - read_file
+      - emit_output
     transitions:
-      - { to: pr }
+      # Ordered — first true `when` wins (condition.ts has no '&&'):
+      # 'contestado' goes back to revisao in BOTH flows, so it is checked
+      # FIRST; then the rework-flow marker (output.rework_preparacao only
+      # exists in the rework flow) routes the remaining status — 'corrigir',
+      # the only other value refutacao.schema.json admits — to `rework`
+      # (whose prompt has the flow's real context); the last edge is the
+      # normal flow's 'corrigir' -> implementacao.
+      - { to: revisao, when: "output.refutacao.status == 'contestado'" }
+      - { to: rework, when: "output.rework_preparacao.worktree.path" }
+      - { to: implementacao, when: "output.refutacao.status == 'corrigir'" }
+
+  # ---- Rework loop (F4 #157, D24): PR got CHANGES_REQUESTED, the card came
+  # back for corrections ON THE SAME BRANCH. Entered directly (the queue
+  # handler starts at rework_preparacao for `rework: true` payloads); verify/
+  # revisao/pr are REUSED — pr detects the rework flow and pushes + re-requests
+  # review instead of creating a PR. The 2-round cap is per CARD (pr_links.
+  # rework_count, enforced by the night-coordinator's admission), not a
+  # max_retries of this graph.
+  rework_preparacao:
+    description: >
+      Recreate a worktree from the PR branch's remote head (detached, no new
+      branch), abort on any human commit since the agent's last push (never
+      overwrite — ask for direction instead), and build the delimited
+      fix-list from the review comments.
+    type: script
+    script: card-to-pr-rework-preparacao
+    transitions:
+      - { to: done, when: "output.rework_preparacao.aborted == true" }
+      - { to: rework }
+
+  rework:
+    description: >
+      Apply the human review's fix-list on the same branch (commit-only, D13:
+      the orchestrator owns push/re-request). Routed by the card's ORIGINAL
+      D9 tier via the same resolveDynamicProvider hook as implementacao;
+      static provider:/model: below are the unrouted fallback. Ambiguous
+      feedback -> needsClarification (the orchestrator posts the question on
+      the PR thread; no rework round is counted).
+    type: agent
+    dynamic_provider: true
+    provider: claude-cli
+    model: claude-sonnet-5
+    output_schema: .gates/skills/card-to-pr/schemas/rework.schema.json
+    agent_prompt_file: .gates/skills/card-to-pr/prompts/rework.md
+    tools:
+      - read_file
+      - edit_file
+      - write_file
+      - run_shell
+      - git_commit
+      - emit_output
+    transitions:
+      - { to: rework_pergunta, when: "output.rework.needsClarification == true" }
+      - { to: verify }
+
+  rework_pergunta:
+    description: >
+      Orchestrator-side effect of an ambiguous review: post the agent's
+      question on the PR thread (D13) and end without counting a round.
+    type: script
+    script: card-to-pr-rework-pergunta
+    transitions:
+      - { to: done }
 
   pr:
-    description: Push, open PR to the integration branch, hand the card off to Review — all idempotent.
+    description: >
+      Push, open PR to the integration branch, hand the card off to Review —
+      all idempotent. In the rework flow: push to the SAME branch (never
+      --force) + re-request review, NEVER a new PR; completing the round
+      increments pr_links.rework_count.
     type: script
     script: card-to-pr-pr
     transitions:
