@@ -81,6 +81,27 @@ describe("RepoConfigSchema.critical (F4 #158, D29)", () => {
   });
 });
 
+describe("RepoConfigSchema.family (F5 #164, D26)", () => {
+  const base = {
+    clonePath: "/x",
+    githubRepo: "owner/repo",
+    baseBranch: "development",
+    verify: { build: "npm run build", test: "npm test" },
+  };
+
+  it("is absent (undefined) when not declared", () => {
+    const result = RepoConfigSchema.safeParse(base);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.family).toBeUndefined();
+  });
+
+  it("is preserved when declared", () => {
+    const result = RepoConfigSchema.safeParse({ ...base, family: "whatsapp-agent" });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.family).toBe("whatsapp-agent");
+  });
+});
+
 describe("loadRepoRegistry", () => {
   const originalEnv = process.env.REPOS_REGISTRY_PATH;
   const dirs: string[] = [];
