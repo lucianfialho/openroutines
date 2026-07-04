@@ -58,12 +58,17 @@ import { makePostgresActionLedgerRepository } from "./persistence/action-ledger-
 import { makeInMemoryPrLinkRepository } from "./persistence/pr-links-in-memory.js";
 import { makePostgresPrLinkRepository } from "./persistence/pr-links-postgres.js";
 import { makePostgresTaskRepository } from "./persistence/task-postgres.js";
+import { makeInMemoryTaskRepository } from "./persistence/task-in-memory.js";
+import { makeInMemoryRepoLearningRepository } from "./persistence/repo-learnings-in-memory.js";
+import { makePostgresRepoLearningRepository } from "./persistence/repo-learnings-postgres.js";
+import { makeSimilarCards } from "./orchestrator/tactical-memory.js";
 import { loadTaskSources, type ResolvedTaskSource } from "./task-source/loader.js";
 import { makeTrelloTaskSource, makeTrelloCreateCard } from "./connector/trello.js";
 import { makeRestTaskSource } from "./task-source/rest-executor.js";
 import type { TaskSource, TaskComplexity } from "./task-source/types.js";
 import { registerCardToPrHandlers, cardToPrFanoutAggregators } from "./pipeline/card-to-pr/index.js";
 import { registerPesquisaHandlers } from "./pipeline/pesquisa/index.js";
+import { registerMapeamentoHandlers } from "./pipeline/mapeamento/index.js";
 import { resolveCardToPrProvider, resolveImplementationTier, resolveEscalatedProvider } from "./pipeline/card-to-pr/routing.js";
 import { registerMorningReportHandlers, MORNING_REPORT_TRELLO_LIST } from "./pipeline/morning-report/index.js";
 import { runStateMachine, type StateMachineConfig, type StateMachineContext, type DynamicProviderContext } from "./engine/state-machine.js";
@@ -476,6 +481,11 @@ export const createApp = async (config: AppConfig) => {
   // script handlers and the night-coordinator's PR-cap check below.
   const prLinks = pgPool ? makePostgresPrLinkRepository(pgPool) : makeInMemoryPrLinkRepository();
 
+  // F5 #166 tactical memory — optional StateMachineConfig deps; absent keeps
+  // the engine behavior identical, so constructing them unconditionally is safe.
+  const repoLearnings = pgPool ? makePostgresRepoLearningRepository(pgPool) : makeInMemoryRepoLearningRepository();
+  const tacticalTasks = pgPool ? makePostgresTaskRepository(pgPool) : makeInMemoryTaskRepository();
+
   // 3. Setup provider(s)
   // Default provider — used by markdown/ReAct skills and by state-machine states
   // that do not declare `provider:`. State-machine states can override per state
@@ -613,12 +623,18 @@ export const createApp = async (config: AppConfig) => {
         }
       }
 
+      // One action ledger shared by every pipeline that fires idempotent
+      // external effects (card-to-pr PR/push/handoff, card-pesquisa delivery,
+      // card-mapeamento pr_docs). Keyed by (executionId, actionKey) so a single
+      // instance never collides across pipelines.
+      const actionLedger = pgPool ? makePostgresActionLedgerRepository(pgPool) : makeInMemoryActionLedgerRepository();
+
       registerCardToPrHandlers(scriptRegistry, {
         pool: pgPool,
         registry: repoRegistry,
         githubToken: config.githubToken,
         worktreeBase: process.env.WORKTREE_BASE ?? "/tmp/or-worktrees",
-        ledger: pgPool ? makePostgresActionLedgerRepository(pgPool) : makeInMemoryActionLedgerRepository(),
+        ledger: actionLedger,
         prLinks,
         taskSourceFor: (sourceId) => cardTaskSources?.get(sourceId),
         // Visual phase (F5 #160): Kimi-with-MCP navigates + judges; Sonnet
@@ -641,8 +657,28 @@ export const createApp = async (config: AppConfig) => {
         worktreeBase: process.env.WORKTREE_BASE ?? "/tmp/or-worktrees",
         taskSourceFor: (sourceId) => cardTaskSources?.get(sourceId),
         claudeApiKey: config.anthropicApiKey ?? "",
+        // F5 #162 hardening: makes entrega's issue/milestone creation idempotent
+        // (a crash mid-delivery + resume no longer duplicates GitHub issues).
+        ledger: actionLedger,
       });
       console.log("[App] Registered card-pesquisa script handlers");
+
+      // card-mapeamento (F5 #162): read-broad survey -> docs-only PR
+      // (REPO-PROFILE.md + visual profile). varredura runs on Sonnet CLI;
+      // captura_visual reuses card-to-pr's Kimi-with-Playwright-MCP provider and
+      // the shared compose-lifecycle. Wired whenever card-to-pr is (same
+      // GITHUB_TOKEN + repos.yaml gate).
+      registerMapeamentoHandlers(scriptRegistry, {
+        registry: repoRegistry,
+        githubToken: config.githubToken,
+        worktreeBase: process.env.WORKTREE_BASE ?? "/tmp/or-worktrees",
+        ledger: actionLedger,
+        taskSourceFor: (sourceId) => cardTaskSources?.get(sourceId),
+        visual: {
+          agentProvider: providerRegistry.resolve("kimi-cli", "kimi-k2.6"),
+        },
+      });
+      console.log("[App] Registered card-mapeamento script handlers");
 
       // The night-run coordinator dispatches card-execution jobs by calling
       // runStateMachine directly (queueHandler §6) rather than engine.execute():
@@ -677,6 +713,13 @@ export const createApp = async (config: AppConfig) => {
             // card's complexity/altaImpl (falls back to the YAML's static
             // claude-cli/claude-sonnet-5 for every other state, unchanged).
             resolveDynamicProvider: resolveCardToPrDynamicProvider,
+            repoLearnings,
+            similarCards: makeSimilarCards({
+              executions: persistence,
+              prLinks,
+              tasks: tacticalTasks,
+              runStates: runStateRepository,
+            }),
           };
         }
       } catch (err) {
