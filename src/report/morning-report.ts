@@ -26,7 +26,7 @@ const TRUNCATION_NOTE = "\n\n_(relatório truncado — corpo excedeu o limite de
 export interface MorningReportData {
   nightId: string;
   securityBlocks: Array<{ cardId: string; title: string; blockReason: string; trelloUrl: string }>;
-  prs: Array<{ cardId: string; prUrl: string; repo: string; riskScore: number; greenLane: boolean; estimatedMinutes: number }>;
+  prs: Array<{ cardId: string; prUrl: string; repo: string; riskScore: number; greenLane: boolean; estimatedMinutes: number; costUsd: number }>;
   costsByTier: Record<"kimi" | "sonnet" | "opus" | "fable", number>;
   cardsCompleted: number;
   cardsBlocked: number;
@@ -78,15 +78,11 @@ interface StateMachineOutputsShape {
 /**
  * Reads night_runs/executions/pr_links/tier_circuit_state for `nightId`.
  *
- * KNOWN GAP (discovered while implementing #159, not introduced by it):
- * `executions.metadata` (where `outputs.bloqueado.blockReason` lives) is only
- * reliably populated while an execution is IN FLIGHT — `state-machine.ts`'s
- * `succeed()`/`fail()` persist a fresh record without reading-merging the
- * existing `metadata` first (only `persistStateContext` does that merge), so
- * a normally-completed execution's metadata is nulled out by the time this
- * function runs. Until that's fixed upstream, `securityBlocks` will read
- * correctly against synthetic/seeded rows (as tested here) but may come back
- * empty in production. See openDecisions.
+ * `executions.metadata` (where `outputs.bloqueado.blockReason` lives) is safe
+ * to read here even for normally-completed executions: postgres.ts's upsert
+ * does `metadata = COALESCE(EXCLUDED.metadata, executions.metadata)`, so
+ * `succeed()`/`fail()`'s final write (state-machine.ts) never nulls out
+ * metadata a previous write already set.
  */
 export const gatherMorningReportData = async (
   pool: Pool,
@@ -96,22 +92,9 @@ export const gatherMorningReportData = async (
   const prLinks = deps.prLinks ?? makePostgresPrLinkRepository(pool);
   const links = await prLinks.findForNight(nightId); // already ORDER BY risk_score DESC NULLS LAST
 
-  const prs = links.map((l) => {
-    const githubRepo = deps.resolveGithubRepo?.(l.repo);
-    const prUrl = l.prNumber !== undefined ? `https://github.com/${githubRepo ?? l.repo}/pull/${l.prNumber}` : "";
-    return {
-      cardId: l.taskId,
-      prUrl,
-      repo: l.repo,
-      riskScore: l.riskScore ?? 0,
-      greenLane: l.greenLane ?? false,
-      estimatedMinutes: approximateReviewMinutes(l.riskScore),
-    };
-  });
-
   const { rows: execRows } = await pool.query(
     `SELECT e.task_id AS task_id, e.metadata AS metadata, e.provider_breakdown AS provider_breakdown,
-            t.title AS title, t.url AS url
+            e.cost_usd AS cost_usd, t.title AS title, t.url AS url
      FROM executions e
      LEFT JOIN tasks t ON t.source_id = e.source_id AND t.task_id = e.task_id
      WHERE e.night_id = $1`,
@@ -121,6 +104,9 @@ export const gatherMorningReportData = async (
   const securityBlocks: MorningReportData["securityBlocks"] = [];
   let cardsBlocked = 0;
   const costsByTier: MorningReportData["costsByTier"] = { kimi: 0, sonnet: 0, opus: 0, fable: 0 };
+  // Same (task_id) key card-to-pr / findForNight join on — summed in case a
+  // card ran more than once this night (rework, D24: max 1 extra round).
+  const costByTaskId = new Map<string, number>();
 
   for (const row of execRows) {
     const metadata = row.metadata as StateMachineOutputsShape | null;
@@ -141,7 +127,25 @@ export const gatherMorningReportData = async (
       const tier = PROVIDER_TO_TIER[providerName];
       if (tier) costsByTier[tier] += Number(usd);
     }
+    if (row.task_id != null && row.cost_usd != null) {
+      const taskId = String(row.task_id);
+      costByTaskId.set(taskId, (costByTaskId.get(taskId) ?? 0) + Number(row.cost_usd));
+    }
   }
+
+  const prs = links.map((l) => {
+    const githubRepo = deps.resolveGithubRepo?.(l.repo);
+    const prUrl = l.prNumber !== undefined ? `https://github.com/${githubRepo ?? l.repo}/pull/${l.prNumber}` : "";
+    return {
+      cardId: l.taskId,
+      prUrl,
+      repo: l.repo,
+      riskScore: l.riskScore ?? 0,
+      greenLane: l.greenLane ?? false,
+      estimatedMinutes: approximateReviewMinutes(l.riskScore),
+      costUsd: costByTaskId.get(l.taskId) ?? 0,
+    };
+  });
 
   const { rows: tierRows } = await pool.query(
     `SELECT tier, cards_attempted, cards_failed FROM tier_circuit_state WHERE night_id = $1`,
@@ -176,7 +180,7 @@ const renderPrs = (prs: MorningReportData["prs"]): string => {
   if (prs.length === 0) return "";
   const items = prs.map(
     (p) =>
-      `- **${p.repo}**${p.greenLane ? " 🟢" : ""} risk_score=${p.riskScore} (~${p.estimatedMinutes} min) — ${p.prUrl || "(PR sem URL registrada)"}`
+      `- **${p.repo}**${p.greenLane ? " 🟢" : ""} risk_score=${p.riskScore} (~${p.estimatedMinutes} min)${p.costUsd > 0 ? ` ~$${p.costUsd.toFixed(2)}` : ""} — ${p.prUrl || "(PR sem URL registrada)"}`
   );
   return ["## 🎯 PRs para revisar (por risco)", "", ...items].join("\n");
 };

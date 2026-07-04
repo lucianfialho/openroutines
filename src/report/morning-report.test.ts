@@ -25,8 +25,8 @@ const syntheticData = (): MorningReportData => ({
     { cardId: "card-sec", title: "Card com achado de segurança", blockReason: "seguranca", trelloUrl: "https://trello.com/c/sec" },
   ],
   prs: [
-    { cardId: "card-a", prUrl: "https://github.com/acme/widgets/pull/9", repo: "acme-widgets", riskScore: 50, greenLane: false, estimatedMinutes: 15 },
-    { cardId: "card-b", prUrl: "https://github.com/acme/beta/pull/5", repo: "beta-app", riskScore: 10, greenLane: true, estimatedMinutes: 3 },
+    { cardId: "card-a", prUrl: "https://github.com/acme/widgets/pull/9", repo: "acme-widgets", riskScore: 50, greenLane: false, estimatedMinutes: 15, costUsd: 0.42 },
+    { cardId: "card-b", prUrl: "https://github.com/acme/beta/pull/5", repo: "beta-app", riskScore: 10, greenLane: true, estimatedMinutes: 3, costUsd: 0 },
   ],
   costsByTier: { kimi: 0.05, sonnet: 1.23, opus: 0, fable: 0 },
   cardsCompleted: 2,
@@ -61,6 +61,15 @@ describe("renderMorningReportCard — exact section order (D29)", () => {
     expect(body).toContain("~18 min de review"); // 15 + 3
   });
 
+  it("shows per-card cost (~$X.XX) for a PR with cost, omits the suffix for one without", () => {
+    const { body } = renderMorningReportCard(syntheticData());
+    // "risk_score=" is unique to renderPrs's lines (renderGreenLane's own
+    // lines share the "- **" prefix but not this substring).
+    const prLines = body.split("\n").filter((l) => l.includes("risk_score="));
+    expect(prLines[0]).toContain("~$0.42"); // card-a, costUsd: 0.42
+    expect(prLines[1]).not.toContain("~$"); // card-b, costUsd: 0
+  });
+
   it("omits sections with no content instead of rendering an empty heading", () => {
     const data: MorningReportData = {
       ...syntheticData(),
@@ -89,7 +98,7 @@ describe("renderMorningReportCard — exact section order (D29)", () => {
       ...syntheticData(),
       prs: [
         ...syntheticData().prs,
-        { cardId: "card-c", prUrl: "", repo: "acme-widgets", riskScore: 5, greenLane: true, estimatedMinutes: 2 },
+        { cardId: "card-c", prUrl: "", repo: "acme-widgets", riskScore: 5, greenLane: true, estimatedMinutes: 2, costUsd: 0 },
       ],
     };
     const { body } = renderMorningReportCard(data);
@@ -105,6 +114,7 @@ describe("renderMorningReportCard — exact section order (D29)", () => {
       riskScore: i,
       greenLane: false,
       estimatedMinutes: 5,
+      costUsd: 0,
     }));
     const data: MorningReportData = { ...syntheticData(), prs: manyPrs };
 
@@ -137,6 +147,7 @@ describe("gatherMorningReportData (mocked pool, synthetic data)", () => {
           task_id: "card-sec",
           metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "seguranca" } } } },
           provider_breakdown: null,
+          cost_usd: null,
           title: "Card com achado de segurança",
           url: "https://trello.com/c/sec",
         },
@@ -145,6 +156,7 @@ describe("gatherMorningReportData (mocked pool, synthetic data)", () => {
           metadata: { stateMachineContext: { outputs: { bloqueado: { blockReason: "verify-falhou" } } } },
           // Legacy pre-H11 row: bare provider keys must still map via fallback.
           provider_breakdown: { "kimi-cli": 0.02 },
+          cost_usd: 0.02,
           title: "Card com verify falhando",
           url: "https://trello.com/c/vf",
         },
@@ -154,9 +166,11 @@ describe("gatherMorningReportData (mocked pool, synthetic data)", () => {
           // H11: model-keyed costs — claude-opus-4-8 must land on opus (never
           // sonnet) and the architecture-judge composite maps to opus too.
           provider_breakdown: { "claude-sonnet-5": 1.23, "kimi-k2.6": 0.03, "claude-opus-4-8": 0.5, "architecture-judge": 0.25 },
+          cost_usd: 1.81,
           title: null,
           url: null,
         },
+        // card-a: no execution cost row at all -> costUsd falls back to 0, no crash.
       ],
       tierRows: [
         { tier: "kimi", cards_attempted: 3, cards_failed: 3 },
@@ -184,6 +198,9 @@ describe("gatherMorningReportData (mocked pool, synthetic data)", () => {
 
     expect(data.costsByTier).toEqual({ kimi: 0.05, sonnet: 1.23, opus: 0.75, fable: 0 });
     expect(data.circuitBreakersTriggered).toEqual([{ tier: "kimi" }]); // 3/3 > 0.6; sonnet 1/3 stays closed
+
+    expect(data.prs[0].costUsd).toBe(1.81); // card-b's execution row
+    expect(data.prs[1].costUsd).toBe(0); // card-a — no matching execution row, no crash
   });
 
   it("builds a real GitHub PR URL when resolveGithubRepo is provided, falls back to the slug otherwise", async () => {
@@ -242,12 +259,13 @@ describe.skipIf(!hasTestDb())("gatherMorningReportData (real DB)", () => {
       [nightId, sourceId, JSON.stringify({ stateMachineContext: { outputs: { bloqueado: { blockReason: "seguranca-divergente" } } } })]
     );
     await pool.query(
-      `INSERT INTO executions (id, routine_id, trigger_type, skill_name, status, started_at, night_id, source_id, task_id, provider_breakdown)
-       VALUES (gen_random_uuid(), 'night-run', 'card-execution', 'card-to-pr', 'completed', NOW(), $1, $2, 'card-shipped', $3::jsonb)`,
+      `INSERT INTO executions (id, routine_id, trigger_type, skill_name, status, started_at, night_id, source_id, task_id, provider_breakdown, cost_usd)
+       VALUES (gen_random_uuid(), 'night-run', 'card-execution', 'card-to-pr', 'completed', NOW(), $1, $2, 'card-shipped', $3::jsonb, 7)`,
       [nightId, sourceId, JSON.stringify({ "claude-cli": 2, "security-judge": 1, "claude-opus-4-8": 4 })]
     );
     // findForNight JOINs pr_links to executions on (source_id, task_id) filtered
     // by night_id — every PR needs its own execution row too, not just card-shipped.
+    // No cost_usd here on purpose: card-green's per-card cost must fall back to 0, not crash.
     await pool.query(
       `INSERT INTO executions (id, routine_id, trigger_type, skill_name, status, started_at, night_id, source_id, task_id)
        VALUES (gen_random_uuid(), 'night-run', 'card-execution', 'card-to-pr', 'completed', NOW(), $1, $2, 'card-green')`,
@@ -273,6 +291,8 @@ describe.skipIf(!hasTestDb())("gatherMorningReportData (real DB)", () => {
 
     expect(data.prs).toHaveLength(2);
     expect(data.prs[0].riskScore).toBe(40); // ordered DESC
+    expect(data.prs[0].costUsd).toBe(7); // card-shipped's cost_usd
+    expect(data.prs[1].costUsd).toBe(0); // card-green — no cost_usd row, no crash
     expect(data.securityBlocks).toHaveLength(1);
     expect(data.securityBlocks[0]).toMatchObject({ cardId: "card-sec", blockReason: "seguranca-divergente" });
     expect(data.costsByTier.sonnet).toBe(2); // legacy provider-key fallback
