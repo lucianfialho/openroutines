@@ -19,6 +19,7 @@ import { checkBranchProtection } from "../../preflight/branch-protection.js";
 import { runVerifyCommands } from "../../verify/run-commands.js";
 import { getOrCreateBaseline } from "../../verify/baseline.js";
 import { pickEnv, BASE_ENV_VARS } from "../../util/env.js";
+import { sendTelegramAlert } from "../../notify/telegram.js";
 import { makePreparacao } from "./preparacao.js";
 import { makeVerify } from "./verify.js";
 import { makePr } from "./pr.js";
@@ -40,6 +41,8 @@ export interface CardToPrDeps {
   runGit?: (args: string[], cwd: string) => Promise<{ stdout: string; stderr: string }>;
   runVerify?: typeof runVerifyCommands;
   getBaseline?: typeof getOrCreateBaseline;
+  /** Telegram alert seam (D22, F4 #186) — defaults to the real sender; tests inject a mock. */
+  sendAlert?: typeof sendTelegramAlert;
 }
 
 /**

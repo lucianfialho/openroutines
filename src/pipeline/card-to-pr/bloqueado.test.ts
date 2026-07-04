@@ -8,9 +8,15 @@ import type { TaskSource } from "../../task-source/types.js";
 
 const inputs = { source_id: "trello-main", task_id: "card1" };
 
-const makeDeps = (): { deps: CardToPrDeps; moveTo: ReturnType<typeof vi.fn>; comment: ReturnType<typeof vi.fn> } => {
+const makeDeps = (): {
+  deps: CardToPrDeps;
+  moveTo: ReturnType<typeof vi.fn>;
+  comment: ReturnType<typeof vi.fn>;
+  sendAlert: ReturnType<typeof vi.fn>;
+} => {
   const moveTo = vi.fn(() => Effect.succeed(undefined));
   const comment = vi.fn(() => Effect.succeed(undefined));
+  const sendAlert = vi.fn(async () => {});
   const taskSource = { moveTo, comment } as unknown as TaskSource;
   const deps: CardToPrDeps = {
     registry: { repos: {} },
@@ -19,8 +25,9 @@ const makeDeps = (): { deps: CardToPrDeps; moveTo: ReturnType<typeof vi.fn>; com
     ledger: makeInMemoryActionLedgerRepository(),
     prLinks: makeInMemoryPrLinkRepository(),
     taskSourceFor: () => taskSource,
+    sendAlert,
   };
-  return { deps, moveTo, comment };
+  return { deps, moveTo, comment, sendAlert };
 };
 
 describe("makeBloqueado", () => {
@@ -86,5 +93,54 @@ describe("makeBloqueado", () => {
     expect(r1).toEqual(r2);
     expect(moveTo).toHaveBeenCalledTimes(1);
     expect(comment).toHaveBeenCalledTimes(1);
+  });
+
+  describe("D22/F4 #186: Telegram alert on blockReason: seguranca*", () => {
+    const securityInputs = { source_id: "trello-main", task_id: "card1", title: "Vazamento de segredo", repo: "acme-widgets" };
+
+    it("fires sendTelegramAlert once with source_id/task_id/blockReason/title/repo when blockReason is 'seguranca'", async () => {
+      const { deps, sendAlert } = makeDeps();
+      const outputs = { preparacao: { branchProtected: true, blockReason: "seguranca" } };
+
+      const r = await makeBloqueado(deps)({ inputs: securityInputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+      expect(r).toEqual({ blocked: true, blockReason: "seguranca" });
+      expect(sendAlert).toHaveBeenCalledTimes(1);
+      const [text] = sendAlert.mock.calls[0] as [string];
+      expect(text).toContain("trello-main/card1");
+      expect(text).toContain("blockReason=seguranca");
+      expect(text).toContain("Vazamento de segredo");
+      expect(text).toContain("acme-widgets");
+    });
+
+    it("fires sendTelegramAlert once when blockReason is 'seguranca-divergente'", async () => {
+      const { deps, sendAlert } = makeDeps();
+      const outputs = { verify: { passed: false, blockReason: "seguranca-divergente" } };
+
+      await makeBloqueado(deps)({ inputs: securityInputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+      expect(sendAlert).toHaveBeenCalledTimes(1);
+      expect(sendAlert.mock.calls[0][0]).toContain("blockReason=seguranca-divergente");
+    });
+
+    it("negative: does NOT call sendTelegramAlert when blockReason is 'verify-falhou'", async () => {
+      const { deps, sendAlert } = makeDeps();
+      const outputs = { verify: { passed: false, blockReason: "verify-falhou" } };
+
+      await makeBloqueado(deps)({ inputs: securityInputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+      expect(sendAlert).not.toHaveBeenCalled();
+    });
+
+    it("idempotent: re-running for the same executionId (post-crash resume) sends the alert only once", async () => {
+      const { deps, sendAlert } = makeDeps();
+      const outputs = { preparacao: { branchProtected: true, blockReason: "seguranca" } };
+      const handler = makeBloqueado(deps);
+
+      await handler({ inputs: securityInputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+      await handler({ inputs: securityInputs, outputs, executionId: "exec1", stateId: "bloqueado" });
+
+      expect(sendAlert).toHaveBeenCalledTimes(1);
+    });
   });
 });

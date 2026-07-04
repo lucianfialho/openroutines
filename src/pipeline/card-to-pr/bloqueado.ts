@@ -7,6 +7,7 @@
 import { Effect } from "effect";
 import type { ScriptHandler } from "../../script/registry.js";
 import { runIdempotent } from "../../persistence/idempotent-action.js";
+import { isSecurityBlockReason, sendTelegramAlert } from "../../notify/telegram.js";
 import type { CardToPrDeps } from "./index.js";
 import type { PreparacaoOutput } from "./preparacao.js";
 import type { VerifyOutput } from "./verify.js";
@@ -51,6 +52,24 @@ export const makeBloqueado = (deps: CardToPrDeps): ScriptHandler => async (ctx) 
       return {};
     }
   );
+
+  // D22/F4 #186: the ONE funnel every blockReason passes through before Blocked
+  // — covers `seguranca*` no matter which phase (preparacao/verify/future) set
+  // it. A sibling actionKey (not `card:blocked`) so a crash between the move
+  // above and this alert re-fires only the alert on resume, not the move/comment.
+  if (isSecurityBlockReason(blockReason)) {
+    const sendAlert = deps.sendAlert ?? sendTelegramAlert;
+    const title = String(ctx.inputs.title ?? "");
+    const repo = String(ctx.inputs.repo ?? "");
+    await runIdempotent(
+      deps.ledger,
+      { executionId: ctx.executionId, stateId: "bloqueado", actionKey: "notify:telegram" },
+      async () => {
+        await sendAlert(`⛔ [${sourceId}/${taskId}] blockReason=${blockReason}: ${title} — ${repo}`);
+        return {};
+      }
+    );
+  }
 
   return { blocked: true, blockReason };
 };

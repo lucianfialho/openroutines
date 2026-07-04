@@ -25,6 +25,7 @@ import { isWithinWindow, enforceHardStop } from "./hard-stop.js";
 import { makeGitHubConnector } from "../connector/github.js";
 import { defaultRunGit } from "../pipeline/card-to-pr/index.js";
 import { cleanupZombieProcesses } from "../provider/process-cleanup.js";
+import { sendTelegramAlert } from "../notify/telegram.js";
 import type { RepoRegistry } from "../repo-registry/schema.js";
 import type { ExecutionRepository, ExecutionProcessRepository, PrLinkRepository, TaskRepository } from "../persistence/types.js";
 import type { TaskSource } from "../task-source/types.js";
@@ -67,6 +68,8 @@ export interface RunNightCycleDeps {
   makeGithub?: (cfg: { token: string; repo: string }) => ReturnType<typeof makeGitHubConnector>;
   now?: () => Date;
   generateId?: () => string;
+  /** Telegram alert seam (D22, F4 #186) — defaults to the real sender; tests inject a mock. */
+  sendAlert?: typeof sendTelegramAlert;
 }
 
 /** "YYYY-MM-DD" of `now`'s wall-clock date in `tz` — the night_runs.date lock key. */
@@ -176,8 +179,10 @@ const syncQueuedCards = async (deps: RunNightCycleDeps): Promise<number> => {
 export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSummary> => {
   const now = deps.now ?? (() => new Date());
   const generateId = deps.generateId ?? randomUUID;
+  const sendAlert = deps.sendAlert ?? sendTelegramAlert;
+  const date = dateInTz(now(), deps.tz);
 
-  const lock = await acquireNightLock(deps.pool, dateInTz(now(), deps.tz), {
+  const lock = await acquireNightLock(deps.pool, date, {
     budgetCapUsd: deps.nightBudgetUsd,
     prCap: deps.nightPrCap,
   });
@@ -186,129 +191,140 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
   }
   const { nightId } = lock;
 
-  // 2. Sync clones + prune orphaned worktrees — best effort; one repo's failure
-  // never blocks the night. `git worktree prune` clears admin metadata for
-  // worktrees whose directory is gone (a crashed/cleaned prior run).
-  const runGit = deps.runGit ?? defaultRunGit(deps.githubToken);
-  for (const [slug, repoConfig] of Object.entries(deps.registry.repos)) {
-    try {
-      await runGit(["fetch"], repoConfig.clonePath);
-      await runGit(["worktree", "prune"], repoConfig.clonePath);
-    } catch (err) {
-      console.error(`[NightCoordinator] sync/prune failed for '${slug}':`, err instanceof Error ? err.message : err);
-    }
-  }
-
-  // 3. Reap zombie CLI processes left by a previous, now-dead orchestrator run.
-  await cleanupZombieProcesses(deps.executionProcessRepo);
-
-  // 3b. Ingest the sources' queued cards into `tasks` so the claim loop below
-  // has rows to claim (F2's poller runtime is unwired — the night-run syncs).
-  const cardsSynced = await syncQueuedCards(deps);
-
-  // 4. Baseline pre-warm: OPTIONAL for this wave, skipped by choice. Each
-  // card's preparacao computes its repo's baseline lazily and idempotently
-  // (getOrCreateBaseline, ON CONFLICT DO NOTHING), so the first card of a
-  // repo tonight pays one extra verify run instead of the coordinator paying
-  // it up front for every registered repo, including idle ones.
-
-  let cardsClaimed = 0;
-  let cardsEnqueued = 0;
-  let windowEnded = false;
-  // Repos denied by per-repo backpressure this cycle. Excluded from further
-  // claims so an unclaimed-on-denial card can't be re-claimed → denied → loop
-  // forever (a livelock): once a repo is blocked, its cards stay unclaimed and
-  // the drain terminates when nothing claimable remains.
-  const blockedRepos = new Set<string>();
-
-  // 5. Drain the currently-claimable backlog. Bounded and fast by design (see
-  // module docstring) — NOT a poll across the whole window.
-  for (;;) {
-    if (!isWithinWindow(now(), deps.nightWindowStart, deps.nightWindowEnd, deps.tz)) {
-      windowEnded = true;
-      break;
+  // D22/F4 #186: from here on, any uncaught error IS the night-run "crash" —
+  // alert once, then re-throw so the caller (cron tick / POST /trigger/night-run)
+  // still sees the failure and never silently swallows it. The null-lock return
+  // above is deliberately OUTSIDE this try — a second process finding the night
+  // already locked is normal backpressure, not a failure, so it alerts 0 times.
+  try {
+    // 2. Sync clones + prune orphaned worktrees — best effort; one repo's failure
+    // never blocks the night. `git worktree prune` clears admin metadata for
+    // worktrees whose directory is gone (a crashed/cleaned prior run).
+    const runGit = deps.runGit ?? defaultRunGit(deps.githubToken);
+    for (const [slug, repoConfig] of Object.entries(deps.registry.repos)) {
+      try {
+        await runGit(["fetch"], repoConfig.clonePath);
+        await runGit(["worktree", "prune"], repoConfig.clonePath);
+      } catch (err) {
+        console.error(`[NightCoordinator] sync/prune failed for '${slug}':`, err instanceof Error ? err.message : err);
+      }
     }
 
-    const openCount = await deps.prLinks.countOpenForNight(nightId);
-    if (openCount >= deps.nightPrCap) break; // global cap reached — nothing more to claim tonight
+    // 3. Reap zombie CLI processes left by a previous, now-dead orchestrator run.
+    await cleanupZombieProcesses(deps.executionProcessRepo);
 
-    const busyRepos = await getBusyRepos(deps.pool, nightId);
-    for (const r of blockedRepos) busyRepos.add(r);
-    const claimed = await claimReadyCards(deps.pool, nightId, deps.nightParallelism, {
-      resolveRepo: resolveRepoForClaim(deps.registry),
-      busyRepos,
-    });
-    if (claimed.length === 0) break; // nothing left to claim right now
-    cardsClaimed += claimed.length;
+    // 3b. Ingest the sources' queued cards into `tasks` so the claim loop below
+    // has rows to claim (F2's poller runtime is unwired — the night-run syncs).
+    const cardsSynced = await syncQueuedCards(deps);
 
-    for (const card of claimed) {
-      const ok = await canOpenPr(
-        {
-          prLinks: deps.prLinks,
-          nightPrCap: deps.nightPrCap,
-          githubToken: deps.githubToken,
-          registry: deps.registry,
-          makeGithub: deps.makeGithub,
-        },
-        { nightId, repo: card.repo }
-      );
-      if (!ok) {
-        // Release the claim so a FUTURE night can pick this card up — without
-        // this, a card denied by the PR cap/backpressure would keep
-        // claimed_by_night_id set forever and never be processed again. Mark the
-        // repo blocked-this-cycle so it isn't re-claimed into a livelock.
-        blockedRepos.add(card.repo);
-        await deps.pool.query(
-          `UPDATE tasks SET claimed_by_night_id = NULL WHERE source_id = $1 AND task_id = $2 AND claimed_by_night_id = $3`,
-          [card.sourceId, card.taskId, nightId]
-        );
-        console.log(
-          `[NightCoordinator] card ${card.sourceId}/${card.taskId} unclaimed (PR cap/backpressure on '${card.repo}') — retry next night`
-        );
-        continue;
+    // 4. Baseline pre-warm: OPTIONAL for this wave, skipped by choice. Each
+    // card's preparacao computes its repo's baseline lazily and idempotently
+    // (getOrCreateBaseline, ON CONFLICT DO NOTHING), so the first card of a
+    // repo tonight pays one extra verify run instead of the coordinator paying
+    // it up front for every registered repo, including idle ones.
+
+    let cardsClaimed = 0;
+    let cardsEnqueued = 0;
+    let windowEnded = false;
+    // Repos denied by per-repo backpressure this cycle. Excluded from further
+    // claims so an unclaimed-on-denial card can't be re-claimed → denied → loop
+    // forever (a livelock): once a repo is blocked, its cards stay unclaimed and
+    // the drain terminates when nothing claimable remains.
+    const blockedRepos = new Set<string>();
+
+    // 5. Drain the currently-claimable backlog. Bounded and fast by design (see
+    // module docstring) — NOT a poll across the whole window.
+    for (;;) {
+      if (!isWithinWindow(now(), deps.nightWindowStart, deps.nightWindowEnd, deps.tz)) {
+        windowEnded = true;
+        break;
       }
 
-      const { title, description } = await getTaskContent(deps.pool, card.sourceId, card.taskId);
-      const executionId = generateId();
-      await insertPendingExecution(deps.pool, {
-        executionId,
-        nightId,
-        repo: card.repo,
-        sourceId: card.sourceId,
-        taskId: card.taskId,
+      const openCount = await deps.prLinks.countOpenForNight(nightId);
+      if (openCount >= deps.nightPrCap) break; // global cap reached — nothing more to claim tonight
+
+      const busyRepos = await getBusyRepos(deps.pool, nightId);
+      for (const r of blockedRepos) busyRepos.add(r);
+      const claimed = await claimReadyCards(deps.pool, nightId, deps.nightParallelism, {
+        resolveRepo: resolveRepoForClaim(deps.registry),
+        busyRepos,
       });
-      await deps.queue.enqueue({
-        id: executionId,
-        trigger: {
-          type: "card-execution",
-          executionId,
-          payload: {
-            source_id: card.sourceId,
-            task_id: card.taskId,
-            repo: card.repo,
-            title,
-            description,
-            night_id: nightId,
-            executionId,
-            skill: "card-to-pr",
+      if (claimed.length === 0) break; // nothing left to claim right now
+      cardsClaimed += claimed.length;
+
+      for (const card of claimed) {
+        const ok = await canOpenPr(
+          {
+            prLinks: deps.prLinks,
+            nightPrCap: deps.nightPrCap,
+            githubToken: deps.githubToken,
+            registry: deps.registry,
+            makeGithub: deps.makeGithub,
           },
-        },
-      });
-      cardsEnqueued++;
+          { nightId, repo: card.repo }
+        );
+        if (!ok) {
+          // Release the claim so a FUTURE night can pick this card up — without
+          // this, a card denied by the PR cap/backpressure would keep
+          // claimed_by_night_id set forever and never be processed again. Mark the
+          // repo blocked-this-cycle so it isn't re-claimed into a livelock.
+          blockedRepos.add(card.repo);
+          await deps.pool.query(
+            `UPDATE tasks SET claimed_by_night_id = NULL WHERE source_id = $1 AND task_id = $2 AND claimed_by_night_id = $3`,
+            [card.sourceId, card.taskId, nightId]
+          );
+          console.log(
+            `[NightCoordinator] card ${card.sourceId}/${card.taskId} unclaimed (PR cap/backpressure on '${card.repo}') — retry next night`
+          );
+          continue;
+        }
+
+        const { title, description } = await getTaskContent(deps.pool, card.sourceId, card.taskId);
+        const executionId = generateId();
+        await insertPendingExecution(deps.pool, {
+          executionId,
+          nightId,
+          repo: card.repo,
+          sourceId: card.sourceId,
+          taskId: card.taskId,
+        });
+        await deps.queue.enqueue({
+          id: executionId,
+          trigger: {
+            type: "card-execution",
+            executionId,
+            payload: {
+              source_id: card.sourceId,
+              task_id: card.taskId,
+              repo: card.repo,
+              title,
+              description,
+              night_id: nightId,
+              executionId,
+              skill: "card-to-pr",
+            },
+          },
+        });
+        cardsEnqueued++;
+      }
     }
-  }
 
-  // 6. Only hard-stop when THIS call is still running once the window has
-  // actually closed — never right after a normal early drain, which would
-  // kill card executions that still have hours left (see module docstring).
-  if (windowEnded) {
-    await enforceHardStop({
-      executionRepo: deps.executionRepo,
-      executionProcessRepo: deps.executionProcessRepo,
-      pool: deps.pool,
-      nightId,
-    });
-  }
+    // 6. Only hard-stop when THIS call is still running once the window has
+    // actually closed — never right after a normal early drain, which would
+    // kill card executions that still have hours left (see module docstring).
+    if (windowEnded) {
+      await enforceHardStop({
+        executionRepo: deps.executionRepo,
+        executionProcessRepo: deps.executionProcessRepo,
+        pool: deps.pool,
+        nightId,
+      });
+    }
 
-  return { started: true, nightId, cardsSynced, cardsClaimed, cardsEnqueued };
+    return { started: true, nightId, cardsSynced, cardsClaimed, cardsEnqueued };
+  } catch (err) {
+    console.error(`[NightCoordinator] night cycle ${date} failed:`, err);
+    await sendAlert(`🔥 night-run ${date} falhou: ${err instanceof Error ? err.message : String(err)}`);
+    throw err;
+  }
 };

@@ -43,6 +43,8 @@ const makeMockPool = (opts: {
   queuedTasks?: MockTask[];
   busyRepos?: string[];
   taskContent?: Record<string, { title: string; body: string }>;
+  /** D22/F4 #186: simulate a mid-cycle crash — claimReadyCards' own SELECT throws. */
+  claimThrows?: Error;
 }) => {
   const queuedTasks = opts.queuedTasks ?? [];
   const claimedKeys = new Set<string>();
@@ -55,6 +57,7 @@ const makeMockPool = (opts: {
       return opts.lockGranted === false ? { rows: [] } : { rows: [{ id: "night-1" }] };
     }
     if (text.startsWith("SELECT source_id, task_id, body, labels")) {
+      if (opts.claimThrows) throw opts.claimThrows;
       return { rows: queuedTasks.filter((t) => !claimedKeys.has(`${t.source_id}:${t.task_id}`)) };
     }
     if (text.startsWith("UPDATE tasks SET claimed_by_night_id")) {
@@ -128,6 +131,7 @@ const baseDeps = (pool: ReturnType<typeof makeMockPool>, overrides: Partial<RunN
   tz: "UTC",
   runGit: vi.fn(async () => ({ stdout: "", stderr: "" })),
   makeGithub: noopGithub,
+  sendAlert: vi.fn(async () => {}),
   now: () => new Date("2026-01-01T03:00:00Z"), // inside the default 01:00-06:30 window
   ...overrides,
 });
@@ -327,5 +331,47 @@ describe("runNightCycle", () => {
 
     expect(summary.cardsSynced).toBe(2);
     expect(saved.map((t) => t.id)).toEqual(["c1", "c2"]);
+  });
+});
+
+describe("runNightCycle — D22/F4 #186 Telegram alert on night-run crash", () => {
+  it("acquireNightLock returning null (2nd process, same night) is NOT a failure — 0 alert calls", async () => {
+    const pool = makeMockPool({ lockGranted: false });
+    const sendAlert = vi.fn(async () => {});
+    const deps = baseDeps(pool, { sendAlert });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary).toEqual({ started: false, reason: "locked" });
+    expect(sendAlert).not.toHaveBeenCalled();
+  });
+
+  it("a full cycle with no errors fires 0 alert calls", async () => {
+    const pool = makeMockPool({ lockGranted: true, queuedTasks: [] });
+    const sendAlert = vi.fn(async () => {});
+    const deps = baseDeps(pool, { sendAlert });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.started).toBe(true);
+    expect(sendAlert).not.toHaveBeenCalled();
+  });
+
+  it("an uncaught error mid-cycle (claim query throws) fires the alert exactly once AND still propagates — never swallowed", async () => {
+    const boom = new Error("claim query exploded");
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [{ source_id: "trello-main", task_id: "card1", body: cardBody("acme-widgets"), labels: [] }],
+      claimThrows: boom,
+    });
+    const sendAlert = vi.fn(async () => {});
+    const deps = baseDeps(pool, { sendAlert });
+
+    await expect(runNightCycle(deps)).rejects.toThrow("claim query exploded");
+
+    expect(sendAlert).toHaveBeenCalledTimes(1);
+    expect(sendAlert.mock.calls[0][0]).toContain("night-run");
+    expect(sendAlert.mock.calls[0][0]).toContain("falhou");
+    expect(sendAlert.mock.calls[0][0]).toContain("claim query exploded");
   });
 });
