@@ -9,8 +9,9 @@
 import { existsSync } from "fs";
 import { join } from "path";
 import type { ScriptHandler } from "../../script/registry.js";
-import { resolveRepo, resolveRepoBySlug } from "../../repo-registry/registry.js";
-import type { RepoConfig, RepoRegistry } from "../../repo-registry/schema.js";
+import { resolveRepoBySlug, resolveSlug } from "../../repo-registry/registry.js";
+import { ensureRepoAvailable } from "../../repo-registry/ensure-clone.js";
+import type { RepoConfig } from "../../repo-registry/schema.js";
 import { checkBranchProtection } from "../../preflight/branch-protection.js";
 import { getOrCreateBaseline } from "../../verify/baseline.js";
 import type { VerifyResults } from "../../verify/run-commands.js";
@@ -32,17 +33,6 @@ export interface PreparationOutput {
   };
 }
 
-// RepoConfig (repo-registry/schema.ts) carries no key of its own — repos.yaml
-// maps key -> config — but verify/pr/pr_links need that key ("slug") carried
-// forward. Recovered here by reference rather than re-deriving the resolution
-// logic that resolveRepo/resolveRepoBySlug already own.
-const findRegistrySlug = (registry: RepoRegistry, config: RepoConfig): string | undefined => {
-  for (const [key, candidate] of Object.entries(registry.repos)) {
-    if (candidate === config) return key;
-  }
-  return undefined;
-};
-
 const slugifyTaskId = (id: string): string => id.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40);
 
 export const makePreparation = (deps: CardToPrDeps): ScriptHandler => async (ctx) => {
@@ -50,11 +40,20 @@ export const makePreparation = (deps: CardToPrDeps): ScriptHandler => async (ctx
   const repoField = String(ctx.inputs.repo);
   const nightId = typeof ctx.inputs.night_id === "string" && ctx.inputs.night_id ? ctx.inputs.night_id : undefined;
 
-  const repoConfig = resolveRepoBySlug(deps.registry, repoField) ?? resolveRepo(deps.registry, repoField);
-  if (!repoConfig) {
-    return { branchProtected: false, blockReason: "repo-unresolvable" } satisfies PreparationOutput;
+  // Resolve the repo, cloning it lazily if the card names one this install
+  // doesn't have yet (Bloco 1). A registry hit (repos.yaml/auto-discovery) is
+  // assumed present; an unknown name is cloned into REPOS_BASE_DIR.
+  const known = resolveRepoBySlug(deps.registry, repoField);
+  const slug = resolveSlug(deps.registry, repoField);
+  const ensured = await ensureRepoAvailable(slug, known, {
+    baseDir: deps.reposBaseDir,
+    allowedOwners: deps.allowedOwners,
+    githubToken: deps.githubToken,
+  });
+  if (!ensured.config) {
+    return { branchProtected: false, blockReason: ensured.blockReason ?? "repo-unresolvable" } satisfies PreparationOutput;
   }
-  const slug = findRegistrySlug(deps.registry, repoConfig) ?? repoField;
+  const repoConfig = ensured.config;
 
   const [owner, name] = repoConfig.githubRepo.split("/");
   const checkProtection = deps.checkProtection ?? checkBranchProtection;

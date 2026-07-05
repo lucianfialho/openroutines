@@ -43,6 +43,10 @@ export interface CardToPrDeps {
   registry: RepoRegistry;
   githubToken: string;
   worktreeBase: string; // env WORKTREE_BASE, e.g. /tmp/or-worktrees
+  /** REPOS_BASE_DIR — root for resolving/cloning a card's repo by name (Bloco 1). */
+  reposBaseDir?: string;
+  /** ALLOWED_REPO_OWNERS — owners a bare card repo name may be cloned from (Bloco 1). */
+  allowedOwners?: string[];
   ledger: ActionLedgerRepository;
   prLinks: PrLinkRepository;
   taskSourceFor: (sourceId: string) => TaskSource | undefined;

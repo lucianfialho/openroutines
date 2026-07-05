@@ -661,6 +661,9 @@ export const createApp = async (config: AppConfig) => {
         registry: repoRegistry,
         githubToken: config.githubToken,
         worktreeBase: process.env.WORKTREE_BASE ?? "/tmp/or-worktrees",
+        // Bloco 1 — resolve/clone a card's repo by name under REPOS_BASE_DIR.
+        reposBaseDir: process.env.REPOS_BASE_DIR,
+        allowedOwners: (process.env.ALLOWED_REPO_OWNERS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
         ledger: actionLedger,
         prLinks,
         taskSourceFor: (sourceId) => cardTaskSources?.get(sourceId),
