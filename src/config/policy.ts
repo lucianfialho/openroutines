@@ -35,7 +35,6 @@ const PolicySchema = z
         max_prs_per_night: z.number(),
         circuit_breaker_failure_rate: z.number(),
         max_opus_calls_per_night: z.number(),
-        max_fable_calls_per_night: z.number(),
         budget_usd: z.number(),
       })
       .strict(),
@@ -63,10 +62,8 @@ export const BOUNDS: Record<string, { min: number; max: number }> = {
   "night.max_prs_per_night": { min: 1, max: 8 },
   "night.circuit_breaker_failure_rate": { min: 0.3, max: 0.9 },
   "night.max_opus_calls_per_night": { min: 1, max: 30 },
-  "night.max_fable_calls_per_night": { min: 1, max: 5 },
-  // Judgment call (like the bounds above): default is 30, ~1 fable-tier call
-  // (weight 10, see budget.ts's BUDGET_UNIT_WEIGHTS) floors the minimum useful
-  // night, 2.5x default caps a runaway calibration proposal.
+  // Judgment call (like the bounds above): default is 30; the floor keeps a
+  // minimally useful night and 2.5x default caps a runaway calibration proposal.
   "night.budget_usd": { min: 10, max: 75 },
   "day.max_auto_proposed_cards_per_week": { min: 1, max: 10 },
   "backpressure.max_open_prs_per_repo": { min: 1, max: 6 },
@@ -77,7 +74,6 @@ const flatten = (policy: Policy): Record<string, number> => ({
   "night.max_prs_per_night": policy.night.max_prs_per_night,
   "night.circuit_breaker_failure_rate": policy.night.circuit_breaker_failure_rate,
   "night.max_opus_calls_per_night": policy.night.max_opus_calls_per_night,
-  "night.max_fable_calls_per_night": policy.night.max_fable_calls_per_night,
   "night.budget_usd": policy.night.budget_usd,
   "day.max_auto_proposed_cards_per_week": policy.day.max_auto_proposed_cards_per_week,
   "backpressure.max_open_prs_per_repo": policy.backpressure.max_open_prs_per_repo,

@@ -3,19 +3,13 @@
  *
  * The `gate_plan` state's provider: Opus judges the plan adversarially
  * (architecture A/B/C, raizes-architecture-principles, scope vs. card) and
- * returns {verdict, corrections[], escalate}. Unlike security-judge
- * (independent verification + divergence check), this is a SEQUENTIAL
- * HANDOFF: escalate:true triggers exactly one Fable call with the SAME
- * original request — Fable never sees Opus's verdict (isolation by
- * construction: the second call is built from the untouched incoming
- * `request`, not from Opus's response) — and Fable's response becomes the
- * final one. escalate is meant for an ambiguous/high-risk/unprecedented
- * decision, never as a way to avoid judging (prompt-level contract, not
- * enforced here).
+ * returns {verdict, corrections[], escalate}. Opus is the apex — its verdict is
+ * FINAL. `escalate` is now an informational flag (the plan is ambiguous/high
+ * risk), no longer a handoff to a stronger model.
  *
- * Anti-bypass: same as security-judge — the response's reported `model` must
- * match the model actually requested, or the call is rejected (no silently
- * downgraded verdict ever governs the architecture gate).
+ * Anti-bypass: the response's reported `model` must match the model actually
+ * requested, or the call is rejected (no silently downgraded verdict ever
+ * governs the architecture gate).
  */
 import { Effect } from "effect";
 import type { CompletionRequest, CompletionResponse } from "./types.js";
@@ -31,15 +25,12 @@ export interface ArchitectureVerdict {
 }
 
 export const DEFAULT_JUDGE_MODEL = "claude-opus-4-8";
-export const DEFAULT_SECOND_JUDGE_MODEL = "claude-fable-5";
 
 export interface ArchitectureJudgeConfig {
   /** Billed API creds — OPTIONAL (Bloco 2): absent means the CLI-first inner runs. */
   claudeApi?: { apiKey?: string; baseURL?: string };
-  /** Primary judge model (from the state's `model:`); default claude-opus-4-8. */
+  /** Judge model (from the state's `model:`); default claude-opus-4-8. */
   model?: string;
-  /** Escalation judge model; default claude-fable-5. */
-  secondJudgeModel?: string;
   /** Builds the per-model inner adapter (registry injects CLI-first; default: makeClaudeProvider). */
   makeInnerProvider?: (config: { apiKey?: string; baseURL?: string; model: string }) => ProviderAdapter;
 }
@@ -56,7 +47,6 @@ const VERDICT_SCHEMA: JsonSchema = {
 
 export const makeArchitectureJudgeProvider = (config: ArchitectureJudgeConfig): ProviderAdapter => {
   const model = config.model ?? DEFAULT_JUDGE_MODEL;
-  const secondModel = config.secondJudgeModel ?? DEFAULT_SECOND_JUDGE_MODEL;
   const makeInner =
     config.makeInnerProvider ??
     ((c: { apiKey?: string; baseURL?: string; model: string }) => {
@@ -64,7 +54,6 @@ export const makeArchitectureJudgeProvider = (config: ArchitectureJudgeConfig): 
       return makeClaudeProvider({ apiKey: c.apiKey, baseURL: c.baseURL, model: c.model });
     });
   const primary = makeInner({ ...config.claudeApi, model });
-  const second = makeInner({ ...config.claudeApi, model: secondModel });
 
   /**
    * One judge call with the anti-bypass check: the response's reported model
@@ -93,11 +82,10 @@ export const makeArchitectureJudgeProvider = (config: ArchitectureJudgeConfig): 
     Effect.gen(function* () {
       const opusResponse = yield* completeChecked(primary, model, request);
 
-      // Parsed only to read `escalate` — the runner independently validates
-      // whichever response (Opus or Fable) ends up as the final output
-      // against gate-plan.schema.json. A verdict that fails to parse/validate
-      // here must still fail loudly, never silently default to "no escalation".
-      const verdict = yield* Effect.try({
+      // Opus is the apex: its verdict is final (no escalation). Still parse +
+      // validate here so a malformed verdict fails loudly instead of reaching
+      // the runner as a silent pass.
+      yield* Effect.try({
         try: (): ArchitectureVerdict => {
           const parsed = extractOutput(opusResponse.content);
           validate(parsed, VERDICT_SCHEMA);
@@ -107,11 +95,7 @@ export const makeArchitectureJudgeProvider = (config: ArchitectureJudgeConfig): 
           new Error(`architecture-judge: invalid opus verdict — ${err instanceof Error ? err.message : String(err)}`),
       });
 
-      if (!verdict.escalate) return opusResponse;
-
-      // Fable receives the ORIGINAL request untouched (same plan+card) — it
-      // never sees Opus's verdict; isolation by construction, not prompting.
-      return yield* completeChecked(second, secondModel, request);
+      return opusResponse;
     });
 
   return { complete };

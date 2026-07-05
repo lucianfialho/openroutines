@@ -69,17 +69,16 @@ const buildProvider = (
       return makeClaudeProvider({ ...config.claudeApi, ...(model !== undefined ? { model } : {}) });
     }
     case "security-judge": {
-      // Composite judge (F4 #154) — CLI-first (Bloco 2), API opt-in. The model
-      // param is the PRIMARY (Opus) judge; the Fable second judge is internal.
+      // Composite judge (F4 #154) — CLI-first (Bloco 2), API opt-in. Opus is
+      // the apex judge (round-1 findings + round-2 per-finding verification).
       return makeSecurityJudgeProvider({
         makeInnerProvider: judgeInnerFactory(config),
         ...(model !== undefined ? { model } : {}),
       });
     }
     case "architecture-judge": {
-      // Composite judge (F4 #185) — CLI-first (Bloco 2), API opt-in. The Fable
-      // escalation judge is internal (sequential handoff, not independent
-      // verification like security-judge's second judge).
+      // Composite judge (F4 #185) — CLI-first (Bloco 2), API opt-in. Opus is
+      // the apex; it judges the plan and its verdict is final (no escalation).
       return makeArchitectureJudgeProvider({
         makeInnerProvider: judgeInnerFactory(config),
         ...(model !== undefined ? { model } : {}),

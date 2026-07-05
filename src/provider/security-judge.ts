@@ -10,10 +10,8 @@
  *   normal mode    — round 1: one Opus call for raw findings (confidence
  *                    1-10, anti-bias framing, default exclusions + repo FP
  *                    file); round 2: one INDEPENDENT fresh Opus call per
- *                    finding with confidence >= 8 ("is it a false positive?");
- *                    critical area additionally runs a Fable judge in PARALLEL
- *                    with round 1 (isolated by construction — it can never see
- *                    the Opus verdict), divergence => diverged:true.
+ *                    finding with confidence >= 8 ("is it a false positive?").
+ *                    Opus is the apex — there is no second judge.
  *   adjudication   — when the prompt's <contestacao_refutacao> block carries
  *                    contested security gaps ({status:"contestado",
  *                    evidencia}), one fresh Opus call PER contested finding
@@ -22,8 +20,7 @@
  * `approved` only reflects TERMINAL post-adjudication state: a freshly found
  * blocking finding stays status:"open" and does NOT flip approved (the generic
  * refutation state routes it to the implementer); approved goes false only on
- * adjudicado-bloqueia or on second-judge divergence (=> blockReason
- * "security-divergent" downstream).
+ * adjudicado-bloqueia.
  *
  * Anti-bypass: the `model` reported by EVERY response is checked against the
  * requested one — a mismatch rejects the verdict (an overloaded API silently
@@ -76,13 +73,9 @@ export interface SecurityVerdict {
   approved: boolean;
   findings: SecurityFinding[];
   criticalArea: boolean;
-  secondJudge?: { model: "fable-5"; findings: SecurityFinding[]; diverged: boolean };
 }
 
 export const DEFAULT_JUDGE_MODEL = "claude-opus-4-8";
-export const DEFAULT_SECOND_JUDGE_MODEL = "claude-fable-5";
-/** Literal reported in SecurityVerdict.secondJudge.model (budget.ts cost key). */
-const SECOND_JUDGE_VERDICT_MODEL = "fable-5" as const;
 /** Findings at or above this confidence block (and get a round-2 verification call). */
 export const BLOCKING_CONFIDENCE = 8;
 
@@ -91,8 +84,6 @@ export interface SecurityJudgeConfig {
   claudeApi?: { apiKey?: string; baseURL?: string };
   /** Primary judge model (from the lens' `model:`); default claude-opus-4-8. */
   model?: string;
-  /** Second (critical-area) judge model; default claude-fable-5. */
-  secondJudgeModel?: string;
   /** Builds the per-model inner adapter (registry injects CLI-first; default: makeClaudeProvider). */
   makeInnerProvider?: (config: { apiKey?: string; baseURL?: string; model: string }) => ProviderAdapter;
 }
@@ -350,22 +341,10 @@ const parseJudgeOutput = (round: string, content: string, schema: JsonSchema): E
 // --- divergence --------------------------------------------------------------
 
 /** Equivalence key for cross-judge comparison: same category on the same file. */
-const findingKey = (f: SecurityFinding): string => `${f.category}::${f.file.trim()}`;
-
-/** True when the set of blocking finding-keys differs between the two judges. */
-export const judgesDiverge = (primary: SecurityFinding[], second: SecurityFinding[]): boolean => {
-  const a = new Set(primary.filter((f) => f.blocking).map(findingKey));
-  const b = new Set(second.filter((f) => f.blocking).map(findingKey));
-  if (a.size !== b.size) return true;
-  for (const k of a) if (!b.has(k)) return true;
-  return false;
-};
-
 // --- provider ----------------------------------------------------------------
 
 export const makeSecurityJudgeProvider = (config: SecurityJudgeConfig): ProviderAdapter => {
   const model = config.model ?? DEFAULT_JUDGE_MODEL;
-  const secondModel = config.secondJudgeModel ?? DEFAULT_SECOND_JUDGE_MODEL;
   const makeInner =
     config.makeInnerProvider ??
     ((c: { apiKey?: string; baseURL?: string; model: string }) => {
@@ -373,7 +352,6 @@ export const makeSecurityJudgeProvider = (config: SecurityJudgeConfig): Provider
       return makeClaudeProvider({ apiKey: c.apiKey, baseURL: c.baseURL, model: c.model });
     });
   const primary = makeInner({ ...config.claudeApi, model });
-  const second = makeInner({ ...config.claudeApi, model: secondModel });
 
   /**
    * One judge call with the anti-bypass check: the response's reported model
@@ -469,7 +447,7 @@ export const makeSecurityJudgeProvider = (config: SecurityJudgeConfig): Provider
           criticalArea,
         };
       } else {
-        // --- normal mode: round 1 (+ isolated second judge) then round 2 ----
+        // --- normal mode: round 1 then round 2 (per-finding verification) ----
         const dataBlock = [
           '<dados_revisao baixa_confianca="true">',
           text.replace(CONTESTACAO_RE, "").trim(),
@@ -506,17 +484,7 @@ export const makeSecurityJudgeProvider = (config: SecurityJudgeConfig): Provider
             });
           });
 
-        // Second judge runs IN PARALLEL with round 1 on the same base prompt:
-        // isolation by construction — its request exists before any Opus output.
-        const [primaryFindings, secondFindings] = yield* Effect.all(
-          [
-            runJudge(primary, model, "sec"),
-            criticalArea
-              ? runJudge(second, secondModel, "fable")
-              : Effect.succeed(undefined as SecurityFinding[] | undefined),
-          ],
-          { concurrency: "unbounded" }
-        );
+        const primaryFindings = yield* runJudge(primary, model, "sec");
 
         // Round 2: one INDEPENDENT fresh call per still-blocking finding.
         const verified = yield* Effect.all(
@@ -545,20 +513,14 @@ export const makeSecurityJudgeProvider = (config: SecurityJudgeConfig): Provider
           { concurrency: "unbounded" }
         );
 
-        // Divergence compares SYMMETRIC round-1 outputs (both post-FP-file):
-        // a finding legitimately demoted by round 2 must not read as divergence.
-        const diverged = secondFindings !== undefined ? judgesDiverge(primaryFindings, secondFindings) : false;
         verdict = {
           model,
           // Fresh findings stay status:"open" and do NOT flip approved — the
-          // generic refutation state owns their resolution. Only second-judge
-          // divergence blocks here (=> blockReason "security-divergent").
-          approved: !diverged,
+          // generic refutation state owns their resolution (round-2 already gave
+          // each blocking finding a second independent Opus pass).
+          approved: true,
           findings: verified,
           criticalArea,
-          ...(secondFindings !== undefined
-            ? { secondJudge: { model: SECOND_JUDGE_VERDICT_MODEL, findings: secondFindings, diverged } }
-            : {}),
         };
       }
 

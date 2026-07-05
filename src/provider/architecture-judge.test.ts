@@ -6,7 +6,6 @@ import { makeProviderRegistry } from "./registry.js";
 import {
   makeArchitectureJudgeProvider,
   DEFAULT_JUDGE_MODEL,
-  DEFAULT_SECOND_JUDGE_MODEL,
   type ArchitectureVerdict,
 } from "./architecture-judge.js";
 
@@ -77,55 +76,15 @@ describe("architecture-judge — escalate:false (Opus is terminal)", () => {
   });
 });
 
-describe("architecture-judge — escalate:true (handoff to Fable)", () => {
-  it("triggers exactly a 2nd call to Fable with the SAME original request — Fable never sees Opus's verdict", async () => {
-    const OPUS_MARKER = "OPUS_ONLY_MARKER_XYZ";
-    const calls: RecordedCall[] = [];
-    const { run } = makeJudge((c) => {
-      if (c.model === DEFAULT_JUDGE_MODEL) {
-        return verdict({ verdict: "refutado", escalate: true, corrections: [OPUS_MARKER] });
-      }
-      return verdict({ verdict: "aprovado" }); // Fable's own answer
-    }, calls);
-    const out = await run(PLAN_PROMPT);
-
-    expect(calls).toHaveLength(2);
-    const fableCall = calls.find((c) => c.model === DEFAULT_SECOND_JUDGE_MODEL);
-    expect(fableCall).toBeDefined();
-    // Isolation by construction: the 2nd request is the untouched original —
-    // Opus's verdict/corrections/marker never appear in it.
-    expect(fableCall!.text).not.toContain(OPUS_MARKER);
-    expect(fableCall!.text).not.toContain("refutado");
-    expect(fableCall!.text).toContain("Add validation");
-
-    // The FINAL response is Fable's, not Opus's.
-    expect(out).toEqual({ verdict: "aprovado", corrections: [], escalate: false });
-  });
-
-  it("Fable's response is final even when Fable itself sets escalate:true (no further handoff loop)", async () => {
-    const calls: RecordedCall[] = [];
-    const { run } = makeJudge((c) => {
-      if (c.model === DEFAULT_JUDGE_MODEL) return verdict({ escalate: true });
-      return verdict({ verdict: "refutado", escalate: true, corrections: ["fable also unsure"] });
-    }, calls);
-    const out = await run(PLAN_PROMPT);
-    expect(calls).toHaveLength(2);
-    expect(out).toEqual({ verdict: "refutado", corrections: ["fable also unsure"], escalate: true });
-  });
-});
-
 describe("architecture-judge — model anti-bypass", () => {
-  it("accepts a versioned alias echo of the requested model on both hops (M1)", async () => {
+  it("accepts a versioned alias echo of the requested model (M1)", async () => {
     const calls: RecordedCall[] = [];
     const { run } = makeJudge(
-      (c) =>
-        c.model === DEFAULT_JUDGE_MODEL
-          ? { content: verdict({ escalate: true }), model: "claude-opus-4-8-20260101" }
-          : { content: verdict({ verdict: "aprovado" }), model: "claude-fable-5-20260301" },
+      () => ({ content: verdict({ verdict: "aprovado" }), model: "claude-opus-4-8-20260101" }),
       calls
     );
     const out = await run(PLAN_PROMPT);
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(1);
     expect(out.verdict).toBe("aprovado");
   });
 
@@ -137,23 +96,10 @@ describe("architecture-judge — model anti-bypass", () => {
     ).rejects.toThrow(/model mismatch/);
   });
 
-  it("rejects a Fable response answered by the wrong model", async () => {
-    const calls: RecordedCall[] = [];
-    const { judge } = makeJudge(
-      (c) =>
-        c.model === DEFAULT_JUDGE_MODEL
-          ? verdict({ escalate: true })
-          : { content: verdict(), model: "claude-sonnet-4-5" },
-      calls
-    );
-    await expect(
-      Effect.runPromise(judge.complete({ messages: [{ role: "user", content: PLAN_PROMPT }] }))
-    ).rejects.toThrow(/model mismatch/);
-  });
 });
 
 describe("architecture-judge — output contract", () => {
-  it("fails loudly on an unparseable/invalid Opus verdict instead of defaulting escalate to false", async () => {
+  it("fails loudly on an unparseable/invalid Opus verdict", async () => {
     const calls: RecordedCall[] = [];
     const { judge } = makeJudge(() => "not json at all {{{", calls);
     await expect(
@@ -161,7 +107,7 @@ describe("architecture-judge — output contract", () => {
     ).rejects.toThrow(/invalid opus verdict/);
   });
 
-  it("reports the response's own model (Opus when terminal, Fable when escalated) and sums nothing extra", async () => {
+  it("reports the response's own model (Opus is terminal)", async () => {
     const calls: RecordedCall[] = [];
     const { judge } = makeJudge(() => verdict({ verdict: "aprovado" }), calls);
     const resp = await Effect.runPromise(judge.complete({ messages: [{ role: "user", content: PLAN_PROMPT }] }));

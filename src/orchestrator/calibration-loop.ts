@@ -6,7 +6,7 @@
  * + review comments, written by the PR-review poller's merge write-path) plus the
  * week's 🧭 steering (card_steering, produced by #169 — consumed here, never
  * produced) — asks Kimi to cluster them, keeps only patterns seen >= 2 times,
- * has Fable 5 veto anything that contradicts the current docs / raizes-docs, and
+ * has Opus veto anything that contradicts the current docs / raizes-docs, and
  * opens ONE calibration PR that adds those rules as bullets:
  *   - scope "global"    -> `## Regras aprendidas` of the machine's CLAUDE.md;
  *   - scope "repo:<slug>"-> `Instruções para Agentes de IA` of that repo's
@@ -18,8 +18,8 @@
  * the cron that calls it weekly, and the REAL implementations of those seams,
  * are F6:
  *   - `cluster`  : Kimi (cheap) — build one prompt from the corpus, parse
- *                  `{ clusters: [...] }`. Kimi, never Fable — mining is not apex.
- *   - `validate` : Fable 5 via src/provider/claude.ts — the ONLY apex call here;
+ *                  `{ clusters: [...] }`. Kimi, never the apex — mining is not apex.
+ *   - `validate` : Opus via src/provider/claude.ts — the ONLY apex call here;
  *                  sees the proposed rules + current docs + applicable raizes-docs
  *                  slugs and returns `{ approved, contradictions[] }`.
  *   - `openCalibrationPr` : clone + edit ONLY CLAUDE.md / docs/REPO-PROFILE.md +
@@ -114,7 +114,7 @@ export interface CalibrationDeps {
   cardSteering?: Pick<CardSteeringRepository, "findUnapplied">;
   /** Kimi clustering (F6 wires the real call). */
   cluster: (corpus: MiningItem[]) => Promise<ClusterResult>;
-  /** Fable 5 non-contradiction gate (F6 wires the real claude.ts call). */
+  /** Opus non-contradiction gate (F6 wires the real claude.ts call). */
   validate: (rules: FeedbackCluster[]) => Promise<ValidationVerdict>;
   /** Opens the single weekly calibration PR from the plan (F6 wires the real git/gh). */
   openCalibrationPr: (plan: CalibrationChangePlan) => Promise<{ url: string }>;
@@ -242,7 +242,7 @@ export const runWeeklyCalibration = async (
   // 4. Cap at 5, cutting the lowest-occurrence candidates first.
   const ranked = [...withinBounds].sort((a, b) => b.occurrences - a.occurrences).slice(0, MAX_RULES_PER_WEEK);
 
-  // 5. Fable veto (apex, skipped when there is nothing to validate) — a rule that
+  // 5. Opus veto (apex, skipped when there is nothing to validate) — a rule that
   // contradicts current docs / raizes-docs waits for next week.
   const verdict = ranked.length > 0 ? await deps.validate(ranked) : { approved: true, contradictions: [] };
   const contradicted = new Set(verdict.contradictions);

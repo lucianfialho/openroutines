@@ -102,7 +102,7 @@ describe("makeBuildReport", () => {
       nightId: "night-1",
       securityBlocks: [],
       prs: [],
-      costsByTier: { kimi: 0, sonnet: 0, opus: 0, fable: 0 },
+      costsByTier: { kimi: 0, sonnet: 0, opus: 0 },
       cardsCompleted: 0,
       cardsBlocked: 0,
       circuitBreakersTriggered: [],

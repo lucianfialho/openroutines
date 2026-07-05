@@ -5,8 +5,8 @@
  * `rework` states from the card's Complexity + the `altaImpl` triage flag
  * ("Regra ALTA", 03-PIPELINE-EXECUCAO.md). `plan` and `gate_plan` are FIXED
  * — Sonnet always explores/proposes first, Opus always owns the architecture
- * gate (Fable escalation is internal to the architecture-judge provider, not a
- * tier swap here) — `implementation` and `rework` (F4 #157: the card's original
+ * gate (Opus is the apex — its verdict is final, no escalation) —
+ * `implementation` and `rework` (F4 #157: the card's original
  * tier) actually route by tier. Reuses
  * circuit-breaker's `tierForComplexity` as the single source of truth for the
  * D9 table instead of a second copy of the same complexity->tier map.
@@ -52,7 +52,7 @@ export const resolveCardToPrProvider = (stateId: CardToPrRoutedState, input: Rou
     case "plan":
       return { provider: "claude-cli", model: "claude-sonnet-5" }; // fixed — doc 03 fase 1
     case "gate_plan":
-      return { provider: "architecture-judge", model: "claude-opus-4-8" }; // Fable escalation is internal to the provider
+      return { provider: "architecture-judge", model: "claude-opus-4-8" }; // Opus is the architecture apex (no escalation)
     case "implementation":
     // rework (F4 #157, D24) runs at the card's ORIGINAL tier — same D9 route
     // as implementation, from the same complexity/altaImpl inputs.

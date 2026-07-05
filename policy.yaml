@@ -17,9 +17,8 @@ night:
   circuit_breaker_failure_rate: 0.6
   # Declared + bounds-checked, but NOT enforced yet: there is no per-night
   # call-count gate today (spend is capped by budget_usd). Enforcement lands
-  # with the F6 budget wiring; until then these two are inert on purpose.
+  # with the F6 budget wiring; until then this is inert on purpose.
   max_opus_calls_per_night: 12
-  max_fable_calls_per_night: 3
   # Effort-unit ceiling for the whole night (historical "_usd" name — under
   # subscription login, D3, these are effort units, not real dollars; see
   # night-coordinator/budget.ts). Was NIGHT_BUDGET_USD in app.ts (F3 #147);

@@ -83,7 +83,7 @@ export const reserveDayBudget = async (
 
 /**
  * ≤ Medium — the daytime-eligible research complexities (#170). Above this
- * (high/highest/not_sure) waits for the night, which orders the Fable judge
+ * (high/highest/not_sure) waits for the night, which orders the Opus judge
  * against the night cap (inherited F2 behavior, unchanged).
  */
 export const DAYTIME_RESEARCH_COMPLEXITIES: readonly TaskComplexity[] = ["lowest", "low", "medium"];

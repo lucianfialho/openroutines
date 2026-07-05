@@ -79,22 +79,6 @@ describe("makeBlocked", () => {
     expect(r).toEqual({ blocked: true, blockReason: "security" });
   });
 
-  it("F4 #153: derives blockReason 'security-divergent' when securityVerdict.secondJudge.diverged is true", async () => {
-    const { deps } = makeDeps();
-    const outputs = {
-      preparation: { branchProtected: true },
-      review: {
-        approved: false,
-        gaps: [],
-        securityVerdict: { approved: false, findings: [], criticalArea: true, secondJudge: { diverged: true } },
-      },
-    };
-
-    const r = await makeBlocked(deps)({ inputs, outputs, executionId: "exec1", stateId: "blocked" });
-
-    expect(r).toEqual({ blocked: true, blockReason: "security-divergent" });
-  });
-
   it("F4 #153: an approved (or absent) securityVerdict never derives a security blockReason", async () => {
     const { deps } = makeDeps();
     const outputs = {
@@ -248,16 +232,6 @@ describe("makeBlocked", () => {
       expect(text).toContain("blockReason=security");
       expect(text).toContain("Vazamento de segredo");
       expect(text).toContain("acme-widgets");
-    });
-
-    it("fires sendTelegramAlert once when blockReason is 'security-divergent'", async () => {
-      const { deps, sendAlert } = makeDeps();
-      const outputs = { verify: { passed: false, blockReason: "security-divergent" } };
-
-      await makeBlocked(deps)({ inputs: securityInputs, outputs, executionId: "exec1", stateId: "blocked" });
-
-      expect(sendAlert).toHaveBeenCalledTimes(1);
-      expect(sendAlert.mock.calls[0][0]).toContain("blockReason=security-divergent");
     });
 
     it("negative: does NOT call sendTelegramAlert when blockReason is 'verify-failed'", async () => {

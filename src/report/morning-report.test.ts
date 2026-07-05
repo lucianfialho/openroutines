@@ -28,7 +28,7 @@ const syntheticData = (): MorningReportData => ({
     { cardId: "card-a", prUrl: "https://github.com/acme/widgets/pull/9", repo: "acme-widgets", riskScore: 50, greenLane: false, estimatedMinutes: 15, costUsd: 0.42 },
     { cardId: "card-b", prUrl: "https://github.com/acme/beta/pull/5", repo: "beta-app", riskScore: 10, greenLane: true, estimatedMinutes: 3, costUsd: 0 },
   ],
-  costsByTier: { kimi: 0.05, sonnet: 1.23, opus: 0, fable: 0 },
+  costsByTier: { kimi: 0.05, sonnet: 1.23, opus: 0 },
   cardsCompleted: 2,
   cardsBlocked: 2,
   circuitBreakersTriggered: [{ tier: "kimi" }],
@@ -75,7 +75,7 @@ describe("renderMorningReportCard — exact section order (D29)", () => {
       ...syntheticData(),
       securityBlocks: [],
       circuitBreakersTriggered: [],
-      costsByTier: { kimi: 0, sonnet: 0, opus: 0, fable: 0 },
+      costsByTier: { kimi: 0, sonnet: 0, opus: 0 },
     };
     const { body } = renderMorningReportCard(data);
     expect(body).not.toContain("Bloqueios de segurança");
@@ -196,7 +196,7 @@ describe("gatherMorningReportData (mocked pool, synthetic data)", () => {
     expect(data.cardsBlocked).toBe(2);
     expect(data.cardsCompleted).toBe(2); // === prs.length
 
-    expect(data.costsByTier).toEqual({ kimi: 0.05, sonnet: 1.23, opus: 0.75, fable: 0 });
+    expect(data.costsByTier).toEqual({ kimi: 0.05, sonnet: 1.23, opus: 0.75 });
     expect(data.circuitBreakersTriggered).toEqual([{ tier: "kimi" }]); // 3/3 > 0.6; sonnet 1/3 stays closed
 
     expect(data.prs[0].costUsd).toBe(1.81); // card-b's execution row

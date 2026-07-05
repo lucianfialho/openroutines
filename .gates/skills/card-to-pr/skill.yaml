@@ -72,11 +72,10 @@ states:
   gate_plan:
     description: >
       Architecture gate (F4 #185, D9): Opus judges the plan adversarially —
-      architecture A/B/C, raizes-architecture-principles, scope vs. card —
-      escalating to Fable only for an ambiguous/high-risk/unprecedented call,
-      never to avoid judging (the composite Opus(+Fable handoff) mechanics
-      live in the architecture-judge provider; here it's just a provider
-      name). Refuted once sends the plan back to `plano`; refuted twice
+      architecture A/B/C, raizes-architecture-principles, scope vs. card. Opus
+      is the apex, so its verdict is final (no escalation); the mechanics live
+      in the architecture-judge provider — here it's just a provider name.
+      Refuted once sends the plan back to `plano`; refuted twice
       blocks the card (`on_exhausted`) instead of looping forever.
     type: agent
     provider: architecture-judge
@@ -147,9 +146,9 @@ states:
       in this order — correctness+conventions/raizes-docs (Kimi, always, 1
       call/2 rubrics), data/Prisma (Sonnet, read-only tools, only when the
       diff touches data files), security (security-judge provider, Opus,
-      always — the composite Opus(+Fable in critical areas)/confidence/
-      adjudication mechanics live in that provider, implemented by a separate
-      issue; here it's just a provider name). Replaces `pr_gate`: this state +
+      always — the composite round-1 findings + round-2 per-finding /
+      confidence / adjudication mechanics live in that provider; here it's
+      just a provider name). Replaces `pr_gate`: this state +
       the security lens IS the pre-PR gate now.
     type: fanout
     lenses:

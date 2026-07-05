@@ -34,7 +34,6 @@ const execFileAsync = promisify(execFile);
 /** Models per phase (constants, not skill.yaml `model:` — these are script states). */
 export const SONNET_MODEL = "claude-sonnet-5";
 export const OPUS_MODEL = "claude-opus-4-8";
-export const FABLE_MODEL = "claude-fable-5";
 
 /**
  * Minimal provider seam: only `complete` is used. Both real factories
@@ -50,7 +49,7 @@ export interface ResearchDeps {
   githubToken: string;
   worktreeBase: string; // env WORKTREE_BASE, e.g. /tmp/or-worktrees
   taskSourceFor: (sourceId: string) => TaskSource | undefined;
-  /** Anthropic API key for the billed judge provider (claude.ts / Opus+Fable). */
+  /** Anthropic API key for the billed judge provider (claude.ts / Opus). */
   claudeApiKey: string;
   /**
    * Action ledger (F5 #162 hardening): when present, delivery wraps its GitHub
@@ -63,7 +62,7 @@ export interface ResearchDeps {
   makeGithub?: (cfg: { token: string; repo: string }) => ReturnType<typeof makeGitHubConnector>;
   /** CLI provider for the read-only survey (claude-cli / Sonnet). */
   makeCliProvider?: (cfg: { model: string }) => ResearchProvider;
-  /** Billed API provider for the architecture judgment (claude.ts / Opus, Fable). */
+  /** Billed API provider for the architecture judgment (claude.ts / Opus). */
   makeApiProvider?: (cfg: { apiKey: string; model: string }) => ResearchProvider;
   /** Read-only worktree git ops (fetch/worktree add/rev-parse). */
   runGit?: (args: string[], cwd: string) => Promise<{ stdout: string; stderr: string }>;

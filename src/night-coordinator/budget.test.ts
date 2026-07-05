@@ -4,10 +4,9 @@ import { acquireNightLock } from "./lock.js";
 import { hasTestDb, makeTestPool, ensureSchema, uniqueDate, insertExecution, cleanupNight } from "../persistence/db.test-helpers.js";
 
 describe("BUDGET_UNIT_WEIGHTS", () => {
-  it("orders effort by tier (kimi cheapest, fable apex)", () => {
+  it("orders effort by tier (kimi cheapest, opus apex)", () => {
     expect(BUDGET_UNIT_WEIGHTS.kimi).toBeLessThan(BUDGET_UNIT_WEIGHTS["claude-sonnet-5"]);
     expect(BUDGET_UNIT_WEIGHTS["claude-sonnet-5"]).toBeLessThan(BUDGET_UNIT_WEIGHTS["claude-opus-4.8"]);
-    expect(BUDGET_UNIT_WEIGHTS["claude-opus-4.8"]).toBeLessThan(BUDGET_UNIT_WEIGHTS["fable-5"]);
   });
 });
 
@@ -20,10 +19,6 @@ describe("normalizeBudgetTier (F4 #185: dynamically-routed model id -> budget ke
 
   it("maps a routed kimi model id to the kimi key", () => {
     expect(normalizeBudgetTier("kimi-k2.6")).toBe("kimi");
-  });
-
-  it("maps a routed fable model id to the fable-5 key", () => {
-    expect(normalizeBudgetTier("claude-fable-5")).toBe("fable-5");
   });
 
   it("passes an already-valid BUDGET_UNIT_WEIGHTS key straight through", () => {

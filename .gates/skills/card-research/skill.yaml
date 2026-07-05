@@ -16,7 +16,7 @@ description: >
   wires a per-phase CLI tool allowlist for `fanout` lenses — and
   levantamento_proposta REQUIRES a restricted allowlist (Read/Glob/Grep + a few
   read-only Bash prefixes, never Write/Edit). The handlers own the provider
-  calls (claude-cli for the survey, claude.ts/Opus+Fable for the judgment), so
+  calls (claude-cli for the survey, claude.ts/Opus for the judgment), so
   provider/model live in src/pipeline/research/, not here.
 
 inputs:
@@ -57,12 +57,10 @@ states:
 
   architecture_judgment:
     description: >
-      Opus 4.8 (src/provider/claude.ts) is the architecture owner: refutes or
-      refines, validating against raizes-architecture-principles + an explicit
-      security lens. On verdict "escalate" the handler makes ONE second call to
-      the SAME claude.ts with Fable 5 — Fable SEES the Opus parecer in its
-      prompt (deliberately unlike F4's blind adversarial adjudication; research
-      is judgment escalation, not adversarial review) and its verdict is final.
+      Opus 4.8 (src/provider/claude.ts) is the architecture owner and the apex:
+      refutes or refines, validating against raizes-architecture-principles +
+      an explicit security lens. Opus's verdict is final — "escalate" stays
+      only as an ambiguity signal (there is no stronger judge to hand off to).
       Output: {verdict, corrections[], securityOpinion{...}, escalateReason?}.
     type: script
     script: card-research-judgment

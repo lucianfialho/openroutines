@@ -27,7 +27,7 @@ export interface MorningReportData {
   nightId: string;
   securityBlocks: Array<{ cardId: string; title: string; blockReason: string; trelloUrl: string }>;
   prs: Array<{ cardId: string; prUrl: string; repo: string; riskScore: number; greenLane: boolean; estimatedMinutes: number; costUsd: number }>;
-  costsByTier: Record<"kimi" | "sonnet" | "opus" | "fable", number>;
+  costsByTier: Record<"kimi" | "sonnet" | "opus", number>;
   cardsCompleted: number;
   cardsBlocked: number;
   circuitBreakersTriggered: Array<{ tier: string }>;
@@ -50,7 +50,6 @@ const PROVIDER_TO_TIER: Record<string, keyof MorningReportData["costsByTier"]> =
   "kimi-k2.6": "kimi",
   "claude-sonnet-5": "sonnet",
   "claude-opus-4-8": "opus",
-  "claude-fable-5": "fable",
   // provider-name fallbacks (pre-H11 rows and fanout lens keys)
   "kimi-cli": "kimi",
   "kimi-coding-api": "kimi",
@@ -103,7 +102,7 @@ export const gatherMorningReportData = async (
 
   const securityBlocks: MorningReportData["securityBlocks"] = [];
   let cardsBlocked = 0;
-  const costsByTier: MorningReportData["costsByTier"] = { kimi: 0, sonnet: 0, opus: 0, fable: 0 };
+  const costsByTier: MorningReportData["costsByTier"] = { kimi: 0, sonnet: 0, opus: 0 };
   // Same (task_id) key card-to-pr / findForNight join on — summed in case a
   // card ran more than once this night (rework, D24: max 1 extra round).
   const costByTaskId = new Map<string, number>();

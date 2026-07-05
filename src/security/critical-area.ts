@@ -2,11 +2,11 @@
  * Critical-security-area heuristic (F4 #154)
  *
  * Deterministic, path-based decision (11-SEGURANCA.md bloco C): auth, payment,
- * webhook, RLS/policy code or PII-touching migrations. When true, the security
- * judge runs a second independent judge (Fable) in parallel with Opus —
- * divergence blocks the card. Deliberately over-triggers (an extra judge call)
- * rather than under-triggers; never reads file contents, only the diff's paths
- * plus flags the verify phase already derived from the real diff.
+ * webhook, RLS/policy code or PII-touching migrations. Surfaced on the
+ * SecurityVerdict as an informational `criticalArea` flag (the morning report /
+ * risk score can weigh it). Deliberately over-triggers rather than under-
+ * triggers; never reads file contents, only the diff's paths plus flags the
+ * verify phase already derived from the real diff.
  */
 
 export interface CriticalAreaFlags {

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { Effect } from "effect";
 import { runPesquisaJudgment } from "./judgment.js";
-import { OPUS_MODEL, FABLE_MODEL, type ResearchDeps } from "./index.js";
+import { OPUS_MODEL, type ResearchDeps } from "./index.js";
 import type { CompletionRequest, CompletionResponse } from "../../provider/types.js";
 
 const resp = (content: string, model: string): CompletionResponse => ({
@@ -29,35 +29,26 @@ const baseDeps = (makeApiProvider: ResearchDeps["makeApiProvider"]): ResearchDep
 });
 
 describe("card-research judgment (composite judge)", () => {
-  it("escalate triggers ONE second Fable call that SEES the Opus parecer (criterion 3)", async () => {
+  it("Opus's escalate verdict stays final — no handoff (Opus is the apex)", async () => {
     const calls: Array<{ model: string; prompt: string }> = [];
     const deps = baseDeps((cfg) => ({
       complete: (req: CompletionRequest) => {
         const prompt = req.messages![req.messages!.length - 1].content;
         calls.push({ model: cfg.model, prompt });
-        return Effect.succeed(
-          cfg.model === OPUS_MODEL
-            ? resp(JSON.stringify(escalate), OPUS_MODEL)
-            : resp(JSON.stringify(aprovado), FABLE_MODEL)
-        );
+        return Effect.succeed(resp(JSON.stringify(escalate), OPUS_MODEL));
       },
     }));
 
-    const verdict = await runPesquisaJudgment(deps, "BASE_PROMPT_OPUS_MARKER");
+    const verdict = await runPesquisaJudgment(deps, "BASE_PROMPT");
 
-    // exactly two distinct calls, Opus then Fable
-    expect(calls).toHaveLength(2);
+    // exactly ONE call — Opus is the apex, no escalation
+    expect(calls).toHaveLength(1);
     expect(calls[0].model).toBe(OPUS_MODEL);
-    expect(calls[1].model).toBe(FABLE_MODEL);
-    // the 2nd (Fable) prompt carries the base prompt AND the verbatim Opus parecer
-    expect(calls[1].prompt).toContain("BASE_PROMPT_OPUS_MARKER");
-    expect(calls[1].prompt).toContain("PARECER DO JUIZ PRIMÁRIO (Opus 4.8)");
-    expect(calls[1].prompt).toContain("decisão de arquitetura sem precedente"); // a field from the Opus escalate verdict
-    // Fable's verdict is the final one
-    expect(verdict.verdict).toBe("aprovado");
+    // Opus's verdict is returned as-is, "escalate" included (informational only)
+    expect(verdict.verdict).toBe("escalate");
   });
 
-  it("aprovado without escalate makes exactly ONE call and keeps securityOpinion (criterion 5)", async () => {
+  it("aprovado makes exactly ONE call and keeps securityOpinion (criterion 5)", async () => {
     const models: string[] = [];
     const deps = baseDeps((cfg) => ({
       complete: () => {
@@ -67,7 +58,7 @@ describe("card-research judgment (composite judge)", () => {
     }));
 
     const verdict = await runPesquisaJudgment(deps, "P");
-    expect(models).toEqual([OPUS_MODEL]); // Fable is never called
+    expect(models).toEqual([OPUS_MODEL]); // only Opus
     expect(verdict.verdict).toBe("aprovado");
     expect(verdict.securityOpinion).toEqual({ exposesNewSurface: false, notes: "ok" });
   });
@@ -92,17 +83,5 @@ describe("card-research judgment (composite judge)", () => {
     }));
     const verdict = await runPesquisaJudgment(deps, "P");
     expect(verdict.verdict).toBe("aprovado");
-  });
-
-  it("rejects a Fable escalation answered by the wrong model (anti-bypass on the 2nd hop too)", async () => {
-    const deps = baseDeps((cfg) => ({
-      complete: () =>
-        Effect.succeed(
-          cfg.model === OPUS_MODEL
-            ? resp(JSON.stringify(escalate), OPUS_MODEL)
-            : resp(JSON.stringify(aprovado), "claude-sonnet-5") // Fable slot answered by Sonnet
-        ),
-    }));
-    await expect(runPesquisaJudgment(deps, "P")).rejects.toThrow(/model mismatch/);
   });
 });

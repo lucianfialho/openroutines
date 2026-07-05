@@ -56,7 +56,7 @@ export interface StateMachineConfig {
    * invocation (agent_prompt states only — never for type:script or an
    * auto_action that already succeeded). Absent → no gating (manual/non-night
    * runs). `tier` is the state's `model` (falling back to `provider`, then
-   * "default") so the caller can weigh Opus/Fable calls heavier than Kimi/Sonnet.
+   * "default") so the caller can weigh Opus calls heavier than Kimi/Sonnet.
    */
   budgetGate?: (ctx: { phase: string; tier: string; executionId: string }) => Promise<{ granted: boolean; reservationId?: string }>;
   /** Settles a granted reservation with the invocation's actual cost. Best-effort. */
@@ -491,9 +491,9 @@ export const runStateMachine = (
           // in the provider) get TRANSIENT_RETRY_CAP retries. Neither consumes
           // the declarative logic cap on transitions. Anything else fails as
           // before. Every real invocation passes the budget gate (F3 #147).
-          // ponytail: a composite judge provider (architecture-judge escalating
-          // to Fable) makes its extra internal call under this ONE reservation —
-          // accepted, no per-hop re-reserve.
+          // ponytail: a composite judge provider (security-judge's round-1 +
+          // round-2 per-finding calls) makes its extra internal calls under this
+          // ONE reservation — accepted, no per-hop re-reserve.
           const tier = routedModel ?? routedProvider ?? "default";
           let formatRetriesUsed = 0;
           let transientRetriesUsed = 0;

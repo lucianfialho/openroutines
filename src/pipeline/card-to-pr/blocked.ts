@@ -30,10 +30,6 @@ const BLOCK_DETAILS: Record<string, { faltando: string; proximoPasso: string }> 
     faltando: "a revisão de segurança (security-judge) reprovou o diff",
     proximoPasso: "corrigir os achados de segurança apontados e reabrir o card",
   },
-  "security-divergent": {
-    faltando: "o 2º juiz de segurança divergiu do veredito do 1º em área crítica",
-    proximoPasso: "revisar manualmente os achados divergentes antes de reabrir o card",
-  },
   "security-exhausted": {
     faltando: "a revisão esgotou as tentativas de refutação com um gap de segurança ainda aberto",
     proximoPasso: "revisar o achado de segurança manualmente e reabrir o card",
@@ -58,16 +54,8 @@ export const makeBlocked = (deps: CardToPrDeps): ScriptHandler => async (ctx) =>
   const preparation = ctx.outputs.preparation as PreparationOutput | undefined;
   const verify = ctx.outputs.verify as VerifyOutput | undefined;
   const review = ctx.outputs.review as ReviewOutput | undefined;
-  // #153 security issue extends securityVerdict with `secondJudge` (independent
-  // 2nd judge in a critical area) — read defensively; aggregate.ts's exported
-  // type stays minimal (`{approved, findings, criticalArea}`) until that lands.
-  const securityVerdict = review?.securityVerdict as { approved: boolean; secondJudge?: { diverged?: boolean } } | null | undefined;
-  const securityBlockReason =
-    securityVerdict?.approved === false
-      ? securityVerdict.secondJudge?.diverged === true
-        ? "security-divergent"
-        : "security"
-      : undefined;
+  const securityVerdict = review?.securityVerdict as { approved: boolean } | null | undefined;
+  const securityBlockReason = securityVerdict?.approved === false ? "security" : undefined;
   // F4 #185: gate_plan refuted twice escapes via on_exhausted (state-machine.ts
   // marks outputs.gate_plan.exhausted=true and routes here instead of failing).
   const gatePlano = ctx.outputs.gate_plan as { exhausted?: boolean } | undefined;

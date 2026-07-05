@@ -3,7 +3,7 @@
  *
  * Under subscription login (D3) there is no per-token billing, so the "budget"
  * is counted in units of effort per tier — the scarce resource is the weekly
- * rate-limit window, and Opus/Fable calls cost more of it. The _usd column names
+ * rate-limit window, and Opus calls cost more of it. The _usd column names
  * are historical; the values are effort units, not dollars.
  *
  * The reservation runs inside a transaction that holds `FOR UPDATE` on the
@@ -17,7 +17,6 @@ export const BUDGET_UNIT_WEIGHTS = {
   kimi: 0.1,
   "claude-sonnet-5": 1,
   "claude-opus-4.8": 4,
-  "fable-5": 10,
 } as const;
 // Only 'claude-sonnet-5' is exercised in F3; the others prepare F4 routing.
 
@@ -36,7 +35,6 @@ const MODEL_ID_TO_BUDGET_TIER: Record<string, BudgetTier> = {
   "claude-opus-4-8": "claude-opus-4.8",
   "kimi-k2.6": "kimi",
   "claude-sonnet-5": "claude-sonnet-5",
-  "claude-fable-5": "fable-5",
 };
 
 /**

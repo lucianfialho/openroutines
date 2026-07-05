@@ -29,7 +29,6 @@ import { registerCardToPrHandlers, cardToPrFanoutAggregators, type CardToPrDeps 
 import {
   makeSecurityJudgeProvider,
   DEFAULT_JUDGE_MODEL,
-  DEFAULT_SECOND_JUDGE_MODEL,
 } from "../../provider/security-judge.js";
 import type { CompletionRequest, CompletionResponse } from "../../provider/types.js";
 import type { ProviderAdapter, ProviderRegistry } from "../../provider/registry.js";
@@ -302,30 +301,25 @@ const assertNoUnresolvedPlaceholders = (h: { innerCalls: RecordedCall[]; outerPr
 // --- H1: critical-area routing off the REAL render ------------------------------
 
 describe("security-gate E2E — critical-area routing (H1)", () => {
-  it("verify.changedFiles touching src/auth/* marks the area critical: the inner fake receives the SECOND judge (fable) call besides Opus round-1", async () => {
+  it("verify.changedFiles touching src/auth/* runs Opus round-1 and reaches PR (critical area, single judge)", async () => {
     const h = makeHarness({ respond: () => round1([]), changedFiles: ["src/auth/login.ts"] });
     const r = await h.run();
 
     expect(r.success).toBe(true);
     expect(r.logs.join(" ")).toContain("Reached terminal state: done");
-    // The second (Fable) judge ran in parallel with Opus round-1 — isCritical
-    // fired off the REAL verify->render->parseVerifyBlock chain, not a stub.
-    const fableCalls = h.innerCalls.filter((c) => c.model === DEFAULT_SECOND_JUDGE_MODEL);
     const opusCalls = h.innerCalls.filter((c) => c.model === DEFAULT_JUDGE_MODEL);
-    expect(fableCalls).toHaveLength(1);
     expect(opusCalls.filter(isRound1)).toHaveLength(1);
-    // Clean judges -> approved -> handed to Review, PR opened.
+    // Clean judge -> approved -> handed to Review, PR opened.
     expect(h.moveToCalls).toContainEqual(["card1", "review"]);
     expect(await h.prLinks.findByTask("trello-main", "card1")).toHaveLength(1);
     assertNoUnresolvedPlaceholders(h);
   });
 
-  it("neutral changedFiles (src/report/*) stay non-critical: NO second-judge call (contrast)", async () => {
+  it("neutral changedFiles (src/report/*) also run a single Opus round-1 and reach PR", async () => {
     const h = makeHarness({ respond: () => round1([]), changedFiles: ["src/report/x.ts"] });
     const r = await h.run();
 
     expect(r.success).toBe(true);
-    expect(h.innerCalls.filter((c) => c.model === DEFAULT_SECOND_JUDGE_MODEL)).toHaveLength(0);
     expect(h.innerCalls.filter((c) => c.model === DEFAULT_JUDGE_MODEL && isRound1(c))).toHaveLength(1);
     expect(h.moveToCalls).toContainEqual(["card1", "review"]);
     assertNoUnresolvedPlaceholders(h);

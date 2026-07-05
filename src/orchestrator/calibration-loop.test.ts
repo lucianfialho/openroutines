@@ -143,7 +143,7 @@ describe("runWeeklyCalibration (F5 #165, D27)", () => {
     for (const occ of [3, 2]) expect(kept.some((b) => b.includes(`regra-occ-${occ}`))).toBe(false);
   });
 
-  it("AC: a rule Fable flags as contradictory is dropped from this week's PR; the rest ship", async () => {
+  it("AC: a rule the validator flags as contradictory is dropped from this week's PR; the rest ship", async () => {
     const h = await makeHarness({
       clusters: [
         cluster({ occurrences: 3, proposedRule: "regra-ok" }),
@@ -219,7 +219,7 @@ describe("runWeeklyCalibration (F5 #165, D27)", () => {
     expect(removes[0].target).toBe("claude-md");
   });
 
-  it("opens a PR for removals alone in a quiet week (no new feedback) without calling Kimi or Fable", async () => {
+  it("opens a PR for removals alone in a quiet week (no new feedback) without calling Kimi or the validator", async () => {
     const h = await makeHarness({
       clusters: [],
       seedFeedback: [], // empty week: no pr_feedback at all
@@ -232,7 +232,7 @@ describe("runWeeklyCalibration (F5 #165, D27)", () => {
     expect(result.prUrl).toBeDefined();
     expect(removeBullets(h.capturedPlan()!)).toHaveLength(1);
     expect(h.cluster).not.toHaveBeenCalled(); // empty corpus -> Kimi skipped
-    expect(h.validate).not.toHaveBeenCalled(); // nothing to validate -> Fable skipped
+    expect(h.validate).not.toHaveBeenCalled(); // nothing to validate -> validator skipped
   });
 
   it("nothing survives -> no PR opened, no rules proposed", async () => {

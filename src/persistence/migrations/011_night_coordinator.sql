@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
   night_id UUID NOT NULL REFERENCES night_runs(id) ON DELETE CASCADE,
   execution_id UUID NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
   phase TEXT NOT NULL,
-  tier TEXT NOT NULL CHECK (tier IN ('kimi','claude-sonnet-5','claude-opus-4.8','fable-5')),
+  tier TEXT NOT NULL CHECK (tier IN ('kimi','claude-sonnet-5','claude-opus-4.8')),
   reserved_usd NUMERIC NOT NULL,
   actual_usd NUMERIC,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

@@ -9,9 +9,7 @@ import { makeProviderRegistry } from "./registry.js";
 import { renderTemplate } from "../engine/template.js";
 import {
   makeSecurityJudgeProvider,
-  judgesDiverge,
   DEFAULT_JUDGE_MODEL,
-  DEFAULT_SECOND_JUDGE_MODEL,
   type SecurityFinding,
   type SecurityVerdict,
 } from "./security-judge.js";
@@ -86,11 +84,6 @@ const BASE_PROMPT = [
   '<verify>{"changedFiles":["src/db/query.ts"],"dataChanges":false}</verify>',
   '<contestacao_refutacao baixa_confianca="true"></contestacao_refutacao>',
 ].join("\n");
-
-const CRITICAL_PROMPT = BASE_PROMPT.replace(
-  '<verify>{"changedFiles":["src/db/query.ts"],"dataChanges":false}</verify>',
-  '<verify>{"changedFiles":["src/auth/login.ts"],"dataChanges":false}</verify>'
-);
 
 // --- normal mode ---------------------------------------------------------------
 
@@ -211,79 +204,12 @@ describe("security-judge — false-positive file", () => {
 
 // --- critical area / second judge ------------------------------------------------
 
-describe("security-judge — critical area (second judge)", () => {
-  it("critical path triggers a parallel Fable judge whose request NEVER contains the Opus output (isolation)", async () => {
-    const OPUS_MARKER = "OPUS_MARKER_FINDING_XYZ";
-    const calls: RecordedCall[] = [];
-    const { run } = makeJudge((c) => {
-      if (c.model === DEFAULT_JUDGE_MODEL && isRound1(c)) {
-        return round1([finding({ description: OPUS_MARKER, confidence: 9 })]);
-      }
-      if (c.model === DEFAULT_SECOND_JUDGE_MODEL) {
-        return round1([finding({ id: "fbl", description: OPUS_MARKER, confidence: 9 })]);
-      }
-      return genuine;
-    }, calls);
-    const verdict = await run(CRITICAL_PROMPT);
-
-    expect(verdict.criticalArea).toBe(true);
-    expect(verdict.secondJudge).toBeDefined();
-    expect(verdict.secondJudge!.model).toBe("fable-5");
-    const fableCalls = calls.filter((c) => c.model === DEFAULT_SECOND_JUDGE_MODEL);
-    expect(fableCalls).toHaveLength(1);
-    // Isolation by construction: the Fable request was built before/independent
-    // of any Opus output — the marker must not appear anywhere in it.
-    expect(fableCalls[0].text).not.toContain(OPUS_MARKER);
-    // Same base prompt, same review data.
-    expect(fableCalls[0].text).toContain("<dados_revisao");
-    expect(fableCalls[0].text).toContain("Implementar filtro de busca");
-  });
-
-  it("agreeing judges (equivalent blocking finding on both) => diverged:false, approved stays true", async () => {
-    const calls: RecordedCall[] = [];
-    const { run } = makeJudge(
-      (c) => (isRound2(c) ? genuine : round1([finding({ confidence: 9 })])),
-      calls
-    );
-    const verdict = await run(CRITICAL_PROMPT);
-    expect(verdict.secondJudge!.diverged).toBe(false);
-    expect(verdict.approved).toBe(true);
-  });
-
-  it("divergence (Opus approves, Fable finds blocking) => approved:false + diverged:true", async () => {
-    const calls: RecordedCall[] = [];
-    const { run } = makeJudge((c) => {
-      if (c.model === DEFAULT_SECOND_JUDGE_MODEL) return round1([finding({ confidence: 9 })]);
-      return round1([]); // Opus: nothing found
-    }, calls);
-    const verdict = await run(CRITICAL_PROMPT);
-
-    expect(verdict.criticalArea).toBe(true);
-    expect(verdict.secondJudge!.diverged).toBe(true);
-    expect(verdict.secondJudge!.findings[0].blocking).toBe(true);
-    expect(verdict.approved).toBe(false);
-  });
-
-  it("a finding demoted by round 2 does NOT diverge — divergence compares symmetric round-1 outputs (M5)", async () => {
-    const calls: RecordedCall[] = [];
-    // Both judges find the same blocking finding in round 1; Opus's round 2 demotes it as FP.
-    const { run } = makeJudge(
-      (c) => (isRound2(c) ? falsePositive : round1([finding({ confidence: 9 })])),
-      calls
-    );
-    const verdict = await run(CRITICAL_PROMPT);
-
-    expect(verdict.findings[0].blocking).toBe(false); // demoted in round 2
-    expect(verdict.secondJudge!.diverged).toBe(false); // round-1 vs round-1: same blocking set
-    expect(verdict.approved).toBe(true);
-  });
-
-  it("non-critical diff never spawns the second judge", async () => {
+describe("security-judge — critical area (informational flag)", () => {
+  it("non-critical diff computes criticalArea:false", async () => {
     const calls: RecordedCall[] = [];
     const { run } = makeJudge(() => round1([]), calls);
     const verdict = await run(BASE_PROMPT);
     expect(verdict.criticalArea).toBe(false);
-    expect(verdict.secondJudge).toBeUndefined();
     expect(calls.every((c) => c.model === DEFAULT_JUDGE_MODEL)).toBe(true);
   });
 
@@ -296,7 +222,6 @@ describe("security-judge — critical area (second judge)", () => {
     const { run } = makeJudge(() => round1([]), calls);
     const verdict = await run(prompt);
     expect(verdict.criticalArea).toBe(true);
-    expect(verdict.secondJudge).toBeDefined();
   });
 
   it("malformed verify block degrades to non-critical instead of crashing (defensive parse)", async () => {
@@ -437,14 +362,12 @@ const renderLensPrompt = (outputs: Record<string, unknown>): string =>
   });
 
 describe("security-judge — real review-security.md render", () => {
-  it("parses changedFiles from the real render: src/auth/* marks the area critical and spawns the second judge (H1)", async () => {
+  it("parses changedFiles from the real render: src/auth/* marks the area critical (H1)", async () => {
     const calls: RecordedCall[] = [];
     const { run } = makeJudge(() => round1([]), calls);
     const verdict = await run(renderLensPrompt({ verify: realVerify(["src/auth/login.ts"]) }));
 
     expect(verdict.criticalArea).toBe(true);
-    expect(verdict.secondJudge).toBeDefined();
-    expect(calls.filter((c) => c.model === DEFAULT_SECOND_JUDGE_MODEL)).toHaveLength(1);
   });
 
   it("non-critical changedFiles in the real render stay non-critical (files really parsed, not defaulted)", async () => {
@@ -453,7 +376,6 @@ describe("security-judge — real review-security.md render", () => {
     const verdict = await run(renderLensPrompt({ verify: realVerify(["src/report/render.ts"]) }));
 
     expect(verdict.criticalArea).toBe(false);
-    expect(verdict.secondJudge).toBeUndefined();
     // Round 1 (unreplaced refutation/review placeholders) is normal mode.
     expect(calls.filter(isRound1)).toHaveLength(1);
     expect(calls.filter(isAdjudication)).toHaveLength(0);
@@ -539,20 +461,6 @@ describe("security-judge — model anti-bypass", () => {
     ).rejects.toThrow(/model mismatch/);
   });
 
-  it("rejects a second-judge response answered by the wrong model", async () => {
-    const calls: RecordedCall[] = [];
-    const { judge } = makeJudge(
-      (c) =>
-        c.model === DEFAULT_SECOND_JUDGE_MODEL
-          ? { content: round1([]), model: "claude-sonnet-4-5" }
-          : round1([]),
-      calls
-    );
-    await expect(
-      Effect.runPromise(judge.complete({ messages: [{ role: "user", content: CRITICAL_PROMPT }] }))
-    ).rejects.toThrow(/model mismatch/);
-  });
-
   it("rejects an adjudication response answered by the wrong model", async () => {
     const calls: RecordedCall[] = [];
     const { judge } = makeJudge(
@@ -612,35 +520,6 @@ describe("security-judge — output contract", () => {
     expect(resp.usage.totalTokens).toBe(30); // 2 calls x 15
     const verdict = JSON.parse(resp.content) as SecurityVerdict;
     expect(verdict.model).toBe(DEFAULT_JUDGE_MODEL);
-  });
-});
-
-// --- divergence helper ---------------------------------------------------------------
-
-describe("judgesDiverge", () => {
-  const f = (over: Partial<SecurityFinding>): SecurityFinding => ({
-    id: "x",
-    description: "d",
-    category: "injection",
-    file: "a.ts",
-    confidence: 9,
-    blocking: true,
-    status: "open",
-    ...over,
-  });
-
-  it("equivalent blocking findings (category+file) on both sides => no divergence", () => {
-    expect(judgesDiverge([f({})], [f({ id: "other" })])).toBe(false);
-  });
-
-  it("blocking on one side only => divergence", () => {
-    expect(judgesDiverge([f({})], [])).toBe(true);
-    expect(judgesDiverge([], [f({})])).toBe(true);
-    expect(judgesDiverge([f({ blocking: false })], [f({})])).toBe(true);
-  });
-
-  it("non-blocking noise on either side never diverges", () => {
-    expect(judgesDiverge([f({ blocking: false })], [f({ blocking: false, file: "b.ts" })])).toBe(false);
   });
 });
 
