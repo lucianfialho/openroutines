@@ -653,8 +653,9 @@ describe("provider registry — security-judge", () => {
     expect(typeof provider.complete).toBe("function");
   });
 
-  it("fails fast without an apiKey", () => {
-    const registry = makeProviderRegistry({ kimiCli: {} });
-    expect(() => registry.resolve("security-judge")).toThrowError(/security-judge.*apiKey|ANTHROPIC_API_KEY/);
+  it("resolves CLI-first without an apiKey (Bloco 2 — API is opt-in, not required)", () => {
+    const registry = makeProviderRegistry({ kimiCli: {}, claudeCli: {} });
+    const provider = registry.resolve("security-judge");
+    expect(typeof provider.complete).toBe("function");
   });
 });

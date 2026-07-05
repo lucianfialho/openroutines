@@ -35,6 +35,21 @@ export interface ProviderRegistry {
 const withModel = <T extends { model?: string }>(base: T | undefined, model: string | undefined): T =>
   ({ ...(base ?? ({} as T)), ...(model !== undefined ? { model } : {}) });
 
+/**
+ * Per-model inner adapter for the composite judges (security/architecture).
+ * CLI-first (Bloco 2): a judge is the SAME headless `claude` the pipeline
+ * already runs, just a different prompt — no API key required. `--model` is
+ * explicit and no fallback model is ever set, so a weaker model can't silently
+ * answer a security/architecture verdict. The billed claude-api is OPT-IN
+ * (ANTHROPIC_API_KEY): it restores the real `resp.model` anti-bypass check for
+ * anyone who wants it, but is never required.
+ */
+const judgeInnerFactory = (config: ProviderRegistryConfig) =>
+  (c: { apiKey?: string; baseURL?: string; model: string }): ProviderAdapter =>
+    config.claudeApi?.apiKey
+      ? makeClaudeProvider({ apiKey: config.claudeApi.apiKey, baseURL: config.claudeApi.baseURL, model: c.model })
+      : makeClaudeCliProvider({ ...config.claudeCli, model: c.model, fallbackModel: undefined });
+
 const buildProvider = (
   name: ProviderName,
   model: string | undefined,
@@ -54,31 +69,19 @@ const buildProvider = (
       return makeClaudeProvider({ ...config.claudeApi, ...(model !== undefined ? { model } : {}) });
     }
     case "security-judge": {
-      // Composite judge (F4 #154) — reuses the claude-api credential; the
-      // model param is the PRIMARY (Opus) judge, the Fable second judge is
-      // internal to the provider.
-      if (!config.claudeApi?.apiKey) {
-        throw new Error(
-          'Provider "security-judge" requested but no claude-api apiKey configured (set ANTHROPIC_API_KEY)'
-        );
-      }
+      // Composite judge (F4 #154) — CLI-first (Bloco 2), API opt-in. The model
+      // param is the PRIMARY (Opus) judge; the Fable second judge is internal.
       return makeSecurityJudgeProvider({
-        claudeApi: config.claudeApi,
+        makeInnerProvider: judgeInnerFactory(config),
         ...(model !== undefined ? { model } : {}),
       });
     }
     case "architecture-judge": {
-      // Composite judge (F4 #185) — reuses the claude-api credential; the
-      // model param is the PRIMARY (Opus) judge, the Fable escalation judge
-      // is internal to the provider (sequential handoff, not independent
+      // Composite judge (F4 #185) — CLI-first (Bloco 2), API opt-in. The Fable
+      // escalation judge is internal (sequential handoff, not independent
       // verification like security-judge's second judge).
-      if (!config.claudeApi?.apiKey) {
-        throw new Error(
-          'Provider "architecture-judge" requested but no claude-api apiKey configured (set ANTHROPIC_API_KEY)'
-        );
-      }
       return makeArchitectureJudgeProvider({
-        claudeApi: config.claudeApi,
+        makeInnerProvider: judgeInnerFactory(config),
         ...(model !== undefined ? { model } : {}),
       });
     }

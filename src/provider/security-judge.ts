@@ -87,13 +87,14 @@ const SECOND_JUDGE_VERDICT_MODEL = "fable-5" as const;
 export const BLOCKING_CONFIDENCE = 8;
 
 export interface SecurityJudgeConfig {
-  claudeApi: { apiKey: string; baseURL?: string };
+  /** Billed API creds — OPTIONAL (Bloco 2): absent means the CLI-first inner runs. */
+  claudeApi?: { apiKey?: string; baseURL?: string };
   /** Primary judge model (from the lens' `model:`); default claude-opus-4-8. */
   model?: string;
   /** Second (critical-area) judge model; default claude-fable-5. */
   secondJudgeModel?: string;
-  /** Test seam — builds the per-model inner adapter (default: makeClaudeProvider). */
-  makeInnerProvider?: (config: { apiKey: string; baseURL?: string; model: string }) => ProviderAdapter;
+  /** Builds the per-model inner adapter (registry injects CLI-first; default: makeClaudeProvider). */
+  makeInnerProvider?: (config: { apiKey?: string; baseURL?: string; model: string }) => ProviderAdapter;
 }
 
 const CATEGORIES: SecurityCategory[] = [
@@ -365,7 +366,12 @@ export const judgesDiverge = (primary: SecurityFinding[], second: SecurityFindin
 export const makeSecurityJudgeProvider = (config: SecurityJudgeConfig): ProviderAdapter => {
   const model = config.model ?? DEFAULT_JUDGE_MODEL;
   const secondModel = config.secondJudgeModel ?? DEFAULT_SECOND_JUDGE_MODEL;
-  const makeInner = config.makeInnerProvider ?? makeClaudeProvider;
+  const makeInner =
+    config.makeInnerProvider ??
+    ((c: { apiKey?: string; baseURL?: string; model: string }) => {
+      if (!c.apiKey) throw new Error("security-judge: no makeInnerProvider and no claudeApi.apiKey");
+      return makeClaudeProvider({ apiKey: c.apiKey, baseURL: c.baseURL, model: c.model });
+    });
   const primary = makeInner({ ...config.claudeApi, model });
   const second = makeInner({ ...config.claudeApi, model: secondModel });
 
