@@ -9,6 +9,7 @@ import "dotenv/config";
 
 import { createApp } from "./app.js";
 import { timezoneWarning } from "./util/timezone.js";
+import { maybeRunOnboarding } from "./onboarding/index.js";
 
 const config = {
   routinesDir: process.env.ROUTINES_DIR ?? "./routines",
@@ -28,6 +29,10 @@ const config = {
 
 async function main() {
   console.log("OpenRoutines starting...\n");
+
+  // Bloco 3: first-run wizard when config is incomplete and a TTY is attached
+  // (writes task-sources.yaml / connector.yaml / .env, then the boot continues).
+  await maybeRunOnboarding();
 
   const tzWarn = timezoneWarning(process.env.TZ);
   if (tzWarn) console.warn(`[Boot] WARNING: ${tzWarn}`);
