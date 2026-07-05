@@ -6,6 +6,8 @@
   "scripts": {
     "build": "tsc && mkdir -p dist/persistence/migrations dist/gate/migrations && cp src/persistence/migrations/*.sql dist/persistence/migrations/ && cp src/gate/migrations/*.sql dist/gate/migrations/",
     "dev": "tsx watch src/main.ts",
+    "local:db": "docker compose up -d postgres redis",
+    "local:down": "docker compose stop postgres redis",
     "start": "node dist/main.js",
     "test": "vitest",
     "lint": "eslint src --ext .ts",
