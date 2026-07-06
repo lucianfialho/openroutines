@@ -72,6 +72,36 @@ describe("checkBranchProtection", () => {
     expect(result).toEqual({ protected: false, reason: "protection ativa mas sem required_pull_request_reviews" });
   });
 
+  const fetchByUrl = (routes: Record<string, { status: number; body?: unknown }>) =>
+    vi.fn().mockImplementation((url: string) => {
+      const key = Object.keys(routes).find((k) => url.includes(k))!;
+      const { status, body = {} } = routes[key];
+      return Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body });
+    }) as unknown as typeof fetch;
+
+  it("rulesets fallback: classic 404 but a pull_request ruleset on the branch -> protected:true", async () => {
+    const fetchImpl = fetchByUrl({
+      "/branches/main/protection": { status: 404 },
+      "/rules/branches/main": { status: 200, body: [{ type: "creation" }, { type: "pull_request" }] },
+    });
+
+    const result = await checkBranchProtection({ token: "t", fetchImpl }, "acme", "widgets");
+
+    expect(result).toEqual({ protected: true });
+  });
+
+  it("rulesets fallback: classic 404 and rules without a pull_request rule -> protected:false", async () => {
+    const fetchImpl = fetchByUrl({
+      "/branches/main/protection": { status: 404 },
+      "/rules/branches/main": { status: 200, body: [{ type: "required_linear_history" }] },
+    });
+
+    const result = await checkBranchProtection({ token: "t", fetchImpl }, "acme", "widgets");
+
+    expect(result.protected).toBe(false);
+    expect(result.reason).toContain("sem branch protection");
+  });
+
   it("defaults to the main branch when none is given", async () => {
     const fetchImpl = fetchReturning(200, { required_pull_request_reviews: {} });
 
