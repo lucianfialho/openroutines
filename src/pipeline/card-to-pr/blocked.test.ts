@@ -33,22 +33,20 @@ const makeDeps = (): {
 describe("makeBlocked", () => {
   it("AC3: reads blockReason from outputs.preparation.blockReason, moves the card to blocked and comments the mapped detail", async () => {
     const { deps, moveTo, comment } = makeDeps();
-    const outputs = { preparation: { branchProtected: false, blockReason: "no-branch-protection" } };
+    const outputs = { preparation: { branchProtected: false, blockReason: "repo-unresolvable" } };
 
     const r = await makeBlocked(deps)({ inputs, outputs, executionId: "exec1", stateId: "blocked" });
 
-    expect(r).toEqual({ blocked: true, blockReason: "no-branch-protection" });
+    expect(r).toEqual({ blocked: true, blockReason: "repo-unresolvable" });
     expect(moveTo).toHaveBeenCalledTimes(1);
     expect(moveTo).toHaveBeenCalledWith("card1", "blocked");
     expect(comment).toHaveBeenCalledTimes(1);
     const [cardId, body] = comment.mock.calls[0] as [string, string];
     expect(cardId).toBe("card1");
     expect(body).toContain("⛔ [Bloqueio]");
-    expect(body).toContain("Motivo: no-branch-protection");
-    expect(body).toContain(
-      "O que falta: a branch principal do repositório não tem branch protection (required_pull_request_reviews) configurada"
-    );
-    expect(body).toContain("Próximo passo: configurar branch protection no GitHub e mover o card de volta para a Fila");
+    expect(body).toContain("Motivo: repo-unresolvable");
+    expect(body).toContain("O que falta: o campo Repositório do card não bate com nenhuma entrada de repos.yaml");
+    expect(body).toContain("Próximo passo: corrigir o campo Repositório do card ou cadastrar o repo em repos.yaml");
   });
 
   it("AC3: falls back to outputs.verify.blockReason when preparation carries none, mapping 'verify-failed' detail", async () => {
@@ -205,7 +203,7 @@ describe("makeBlocked", () => {
 
   it("AC3: idempotent — a second call for the same executionId short-circuits on the action_ledger and never re-fires moveTo/comment", async () => {
     const { deps, moveTo, comment } = makeDeps();
-    const outputs = { preparation: { branchProtected: false, blockReason: "no-branch-protection" } };
+    const outputs = { preparation: { branchProtected: false, blockReason: "repo-unresolvable" } };
     const handler = makeBlocked(deps);
 
     const r1 = await handler({ inputs, outputs, executionId: "exec1", stateId: "blocked" });

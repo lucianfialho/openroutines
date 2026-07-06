@@ -132,7 +132,6 @@ describe("card-to-pr visual E2E (#160)", () => {
       prLinks,
       taskSourceFor: (sourceId) => (sourceId === "trello-main" ? taskSource : undefined),
       makeGithub,
-      checkProtection: async () => ({ protected: true }),
       runGit,
       runVerify,
       getBaseline,

@@ -1,10 +1,13 @@
 /**
  * card-to-pr / preparation (F3 #146)
  *
- * Resolves the card's repo, preflights branch protection (fail-closed — no
- * protection means the phase ends here, not a degraded run), creates or
- * reuses the card's worktree, and captures the night's verify baseline for
- * that repo.
+ * Resolves the card's repo (cloning it lazily if new — Bloco 1), creates or
+ * reuses the card's worktree off the repo's baseBranch, and captures the
+ * night's verify baseline. The main branch is protected by CONSTRUCTION, not by
+ * a GitHub-side preflight: schema.ts forbids baseBranch being main/master and
+ * pr.ts refuses to open a PR against main/master — so the pipeline never targets
+ * main regardless of the repo's GitHub plan. Repo that can't be resolved ->
+ * blockReason, the phase ends before any git/LLM spend.
  */
 import { existsSync } from "fs";
 import { join } from "path";
@@ -12,14 +15,12 @@ import type { ScriptHandler } from "../../script/registry.js";
 import { resolveRepoBySlug, resolveSlug } from "../../repo-registry/registry.js";
 import { ensureRepoAvailable } from "../../repo-registry/ensure-clone.js";
 import type { RepoConfig } from "../../repo-registry/schema.js";
-import { checkBranchProtection } from "../../preflight/branch-protection.js";
 import { getOrCreateBaseline } from "../../verify/baseline.js";
 import type { VerifyResults } from "../../verify/run-commands.js";
 import { ensureIgnoreScripts } from "../../security/supply-chain-guard.js";
 import { defaultRunGit, type CardToPrDeps } from "./index.js";
 
 export interface PreparationOutput {
-  branchProtected: boolean;
   blockReason?: string;
   worktree?: { path: string; branch: string };
   baseSha?: string;
@@ -51,17 +52,9 @@ export const makePreparation = (deps: CardToPrDeps): ScriptHandler => async (ctx
     githubToken: deps.githubToken,
   });
   if (!ensured.config) {
-    return { branchProtected: false, blockReason: ensured.blockReason ?? "repo-unresolvable" } satisfies PreparationOutput;
+    return { blockReason: ensured.blockReason ?? "repo-unresolvable" } satisfies PreparationOutput;
   }
   const repoConfig = ensured.config;
-
-  const [owner, name] = repoConfig.githubRepo.split("/");
-  const checkProtection = deps.checkProtection ?? checkBranchProtection;
-  const bp = await checkProtection({ token: deps.githubToken }, owner, name, "main");
-  if (!bp.protected) {
-    // No budget spent past this point — the phase ends here (routes to blocked).
-    return { branchProtected: false, blockReason: "no-branch-protection" } satisfies PreparationOutput;
-  }
 
   const runGit = deps.runGit ?? defaultRunGit(deps.githubToken);
   await runGit(["fetch"], repoConfig.clonePath);
@@ -89,7 +82,6 @@ export const makePreparation = (deps: CardToPrDeps): ScriptHandler => async (ctx
   } // else: manual run, no night_id/pool — verify treats a missing baseline as strict.
 
   return {
-    branchProtected: true,
     worktree: { path: worktreePath, branch },
     baseSha,
     baselineResults,

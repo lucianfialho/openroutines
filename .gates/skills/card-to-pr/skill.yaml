@@ -41,7 +41,7 @@ states:
     type: script
     script: card-to-pr-preparation
     transitions:
-      - { to: blocked, when: "output.preparation.branchProtected == false" }
+      - { to: blocked, when: "output.preparation.blockReason" }
       - { to: plan }
 
   plan:

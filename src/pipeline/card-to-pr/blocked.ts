@@ -18,10 +18,6 @@ const BLOCK_DETAILS: Record<string, { faltando: string; proximoPasso: string }> 
     faltando: "o campo Repositório do card não bate com nenhuma entrada de repos.yaml",
     proximoPasso: "corrigir o campo Repositório do card ou cadastrar o repo em repos.yaml",
   },
-  "no-branch-protection": {
-    faltando: "a branch principal do repositório não tem branch protection (required_pull_request_reviews) configurada",
-    proximoPasso: "configurar branch protection no GitHub e mover o card de volta para a Fila",
-  },
   "verify-failed": {
     faltando: "o verify continua falhando após a tentativa de retry (mesma falha nas duas rodadas)",
     proximoPasso: "revisar os logs de verify, ajustar a implementação manualmente e reabrir o card",

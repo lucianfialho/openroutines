@@ -15,7 +15,6 @@ import type { RepoRegistry } from "../../repo-registry/schema.js";
 import type { ActionLedgerRepository, PrLinkRepository } from "../../persistence/types.js";
 import type { TaskSource } from "../../task-source/types.js";
 import { makeGitHubConnector } from "../../connector/github.js";
-import { checkBranchProtection } from "../../preflight/branch-protection.js";
 import { runVerifyCommands } from "../../verify/run-commands.js";
 import { getOrCreateBaseline } from "../../verify/baseline.js";
 import { pickEnv, BASE_ENV_VARS } from "../../util/env.js";
@@ -52,7 +51,6 @@ export interface CardToPrDeps {
   taskSourceFor: (sourceId: string) => TaskSource | undefined;
   // Injectable seams for tests (default to the real impls):
   makeGithub?: (cfg: { token: string; repo: string }) => ReturnType<typeof makeGitHubConnector>;
-  checkProtection?: typeof checkBranchProtection;
   runGit?: (args: string[], cwd: string) => Promise<{ stdout: string; stderr: string }>;
   runVerify?: typeof runVerifyCommands;
   getBaseline?: typeof getOrCreateBaseline;

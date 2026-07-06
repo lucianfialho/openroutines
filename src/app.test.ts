@@ -411,10 +411,10 @@ describe("runCardExecutionJob", () => {
   });
 
   describe("H9b: a pre-LLM script block never charges the tier", () => {
-    it("blockReason 'no-branch-protection' (preparation) skips recordTierOutcome entirely", async () => {
+    it("blockReason 'repo-unresolvable' (preparation) skips recordTierOutcome entirely", async () => {
       const { deps } = makeDeps();
       await seedExecution(deps.persistence, "exec-1", {
-        stateMachineContext: { outputs: { blocked: { blockReason: "no-branch-protection" } } },
+        stateMachineContext: { outputs: { blocked: { blockReason: "repo-unresolvable" } } },
       });
       const job = {
         trigger: {

@@ -288,7 +288,7 @@ export const runCardExecutionJob = async (
       // call at all) must not charge that tier a failure it never had a
       // chance at. blockReason lives at metadata.stateMachineContext.
       // outputs.blocked (same path morning-report.ts reads); the two
-      // pre-LLM blocks are "no-branch-protection" (preparation) and
+      // pre-LLM blocks are "repo-unresolvable" (preparation) and
       // "budget" (budget denial, state-machine.ts) — anything blocked
       // LATER (verify/security/review/...) did reach the tier, so it stays
       // chargeable.
@@ -296,7 +296,7 @@ export const runCardExecutionJob = async (
       const blocked = (
         finished?.metadata as { stateMachineContext?: { outputs?: { blocked?: { blockReason?: string } } } } | undefined
       )?.stateMachineContext?.outputs?.blocked;
-      const preLlmBlock = blocked?.blockReason === "no-branch-protection" || blocked?.blockReason === "budget";
+      const preLlmBlock = blocked?.blockReason === "repo-unresolvable" || blocked?.blockReason === "budget";
       if (!preLlmBlock) {
         // H9a: for a rework round the pr_link ALWAYS pre-exists (rework only
         // ever starts from one), so "shipped" can't be "a link exists" — it

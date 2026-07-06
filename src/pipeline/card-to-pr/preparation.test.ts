@@ -34,8 +34,7 @@ const inputs = { source_id: "s", task_id: "t1", repo: "acme-widgets" };
 describe("makePreparation", () => {
   it("returns repo-unresolvable without ever calling runGit when the card's repo field matches no repos.yaml entry", async () => {
     const runGit = vi.fn(async () => ({ stdout: "", stderr: "" }));
-    const checkProtection = vi.fn(async () => ({ protected: true }));
-    const handler = makePreparation(baseDeps({ runGit, checkProtection }));
+    const handler = makePreparation(baseDeps({ runGit }));
 
     const r = await handler({
       inputs: { ...inputs, repo: "does-not-exist" },
@@ -44,22 +43,8 @@ describe("makePreparation", () => {
       stateId: "preparation",
     });
 
-    expect(r).toEqual({ branchProtected: false, blockReason: "repo-unresolvable" });
-    // Unresolved repo short-circuits before any preflight/git spend at all.
-    expect(checkProtection).not.toHaveBeenCalled();
-    expect(runGit).not.toHaveBeenCalled();
-  });
-
-  it("returns no-branch-protection and never creates a worktree/baseline when checkProtection reports protected:false", async () => {
-    const runGit = vi.fn(async () => ({ stdout: "", stderr: "" }));
-    const checkProtection = vi.fn(async () => ({ protected: false, reason: "no rules configured" }));
-    const handler = makePreparation(baseDeps({ runGit, checkProtection }));
-
-    const r = await handler({ inputs, outputs: {}, executionId: "e1", stateId: "preparation" });
-
-    expect(r).toEqual({ branchProtected: false, blockReason: "no-branch-protection" });
-    expect(checkProtection).toHaveBeenCalledTimes(1);
-    // No fetch, no worktree add, no rev-parse — no runGit call happens past the protection check.
+    expect(r).toEqual({ blockReason: "repo-unresolvable" });
+    // Unresolved repo short-circuits before any git spend at all.
     expect(runGit).not.toHaveBeenCalled();
   });
 
@@ -68,13 +53,11 @@ describe("makePreparation", () => {
     rmSync(worktreePath, { recursive: true, force: true });
 
     const runGit = vi.fn(async (args: string[]) => (args[0] === "rev-parse" ? { stdout: "abc123\n", stderr: "" } : { stdout: "", stderr: "" }));
-    const checkProtection = vi.fn(async () => ({ protected: true }));
-    const handler = makePreparation(baseDeps({ runGit, checkProtection }));
+    const handler = makePreparation(baseDeps({ runGit }));
 
     try {
       const r = (await handler({ inputs, outputs: {}, executionId: "e1", stateId: "preparation" })) as PreparationOutput;
 
-      expect(r.branchProtected).toBe(true);
       expect(r.worktree).toEqual({ path: worktreePath, branch: "openroutines/card-t1" });
       expect(r.baseSha).toBe("abc123");
       // git worktree add is mocked (a no-op on disk here), so this .npmrc can
