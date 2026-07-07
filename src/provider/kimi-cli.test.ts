@@ -41,4 +41,16 @@ describe("kimi-cli provider — argv + minimal env", () => {
       delete process.env.KIMI_API_KEY;
     }
   });
+
+  it("runs in the card's worktree (request.workdir) so the agent edits the checkout, not the orchestrator repo", async () => {
+    const provider = makeKimiCliProvider({});
+    await Effect.runPromise(provider.complete({ prompt: "hi", workdir: "/tmp/wt-card-1" } as any));
+    expect(lastCall.options.cwd).toBe("/tmp/wt-card-1");
+  });
+
+  it("falls back to process.cwd() when no workdir is set", async () => {
+    const provider = makeKimiCliProvider({});
+    await Effect.runPromise(provider.complete({ prompt: "hi" } as any));
+    expect(lastCall.options.cwd).toBe(process.cwd());
+  });
 });

@@ -31,7 +31,12 @@ export const makeKimiCliProvider = (config: KimiCliConfig) => {
 
         return new Promise<CompletionResponse>((resolve, reject) => {
           const child = spawn("kimi", args, {
-            cwd: process.cwd(),
+            // Run INSIDE the card's worktree when one is set (card-to-pr's
+            // implementation) so the agent edits the card's checkout, not the
+            // orchestrator's repo. Without this the Kimi ran in the orchestrator
+            // cwd and produced an EMPTY diff — the review then had no code to
+            // approve and the card looped to Blocked. Mirrors claude-cli.ts.
+            cwd: request.workdir ?? process.cwd(),
             // Minimal env: kimi CLI needs only its API key + share dir, never
             // the orchestrator's GitHub/DB secrets. PATH is prefixed with
             // supplyChainShimDir() (F4 #156) so any npm/pnpm/npx the agent's
