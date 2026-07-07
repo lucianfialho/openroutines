@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { readFileSync, rmSync } from "fs";
+import { mkdirSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { makePreparation } from "./preparation.js";
 import type { CardToPrDeps } from "./index.js";
@@ -64,6 +64,65 @@ describe("makePreparation", () => {
       // only exist if preparation itself called ensureIgnoreScripts against
       // worktreePath — proves the guard is wired into the real success path.
       expect(readFileSync(join(worktreePath, ".npmrc"), "utf-8")).toContain("ignore-scripts=true");
+    } finally {
+      rmSync(worktreePath, { recursive: true, force: true });
+    }
+  });
+
+  it("idempotent retry: force-recreates when the dir on disk isn't a live worktree on the card's branch (crash mid `worktree add`, or a leftover from an earlier execution)", async () => {
+    const worktreePath = "/tmp/or-preparation-test-worktrees/card-t1";
+    const clonePath = "/tmp/or-preparation-test-clone";
+    rmSync(worktreePath, { recursive: true, force: true });
+    mkdirSync(worktreePath, { recursive: true }); // dir exists, but was never a real `git worktree add`
+
+    const calls: Array<{ args: string[]; cwd: string }> = [];
+    const runGit = vi.fn(async (args: string[], cwd: string) => {
+      calls.push({ args, cwd });
+      if (args[0] === "rev-parse" && args.includes("--abbrev-ref")) throw new Error("fatal: not a git repository");
+      if (args[0] === "rev-parse") return { stdout: "abc123\n", stderr: "" };
+      return { stdout: "", stderr: "" };
+    });
+    const handler = makePreparation(baseDeps({ runGit }));
+
+    try {
+      const r = (await handler({ inputs, outputs: {}, executionId: "e1", stateId: "preparation" })) as PreparationOutput;
+
+      expect(r.worktree).toEqual({ path: worktreePath, branch: "openroutines/card-t1" });
+      expect(r.baseSha).toBe("abc123");
+      // Force-clean before recreating — all against the ORIGIN clone, never the broken worktree dir.
+      expect(calls).toContainEqual({ args: ["worktree", "remove", "--force", worktreePath], cwd: clonePath });
+      expect(calls).toContainEqual({ args: ["worktree", "prune"], cwd: clonePath });
+      expect(calls).toContainEqual({ args: ["branch", "-D", "openroutines/card-t1"], cwd: clonePath });
+      expect(calls).toContainEqual({
+        args: ["worktree", "add", "-b", "openroutines/card-t1", worktreePath, "development"],
+        cwd: clonePath,
+      });
+    } finally {
+      rmSync(worktreePath, { recursive: true, force: true });
+    }
+  });
+
+  it("idempotent retry: reuses the worktree untouched (no remove/add/branch -D) when it's already checked out on the card's branch", async () => {
+    const worktreePath = "/tmp/or-preparation-test-worktrees/card-t1";
+    rmSync(worktreePath, { recursive: true, force: true });
+    mkdirSync(worktreePath, { recursive: true }); // simulates a crash-resume: worktree already live on `branch`
+
+    const calls: Array<{ args: string[]; cwd: string }> = [];
+    const runGit = vi.fn(async (args: string[], cwd: string) => {
+      calls.push({ args, cwd });
+      if (args[0] === "rev-parse" && args.includes("--abbrev-ref")) return { stdout: "openroutines/card-t1\n", stderr: "" };
+      if (args[0] === "rev-parse") return { stdout: "abc123\n", stderr: "" };
+      return { stdout: "", stderr: "" };
+    });
+    const handler = makePreparation(baseDeps({ runGit }));
+
+    try {
+      const r = (await handler({ inputs, outputs: {}, executionId: "e1", stateId: "preparation" })) as PreparationOutput;
+
+      expect(r.worktree).toEqual({ path: worktreePath, branch: "openroutines/card-t1" });
+      expect(calls.some((c) => c.args[0] === "worktree" && c.args[1] === "remove")).toBe(false);
+      expect(calls.some((c) => c.args[0] === "worktree" && c.args[1] === "add")).toBe(false);
+      expect(calls.some((c) => c.args[0] === "branch" && c.args[1] === "-D")).toBe(false);
     } finally {
       rmSync(worktreePath, { recursive: true, force: true });
     }
