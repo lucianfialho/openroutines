@@ -10,6 +10,7 @@ import { renderTemplate } from "../engine/template.js";
 import {
   makeSecurityJudgeProvider,
   DEFAULT_JUDGE_MODEL,
+  SECURITY_JUDGE_ALLOWED_TOOLS,
   type SecurityFinding,
   type SecurityVerdict,
 } from "./security-judge.js";
@@ -333,6 +334,79 @@ describe("security-judge — adjudication mode", () => {
     expect(calls.filter(isRound1)).toHaveLength(1);
     expect(calls.filter(isAdjudication)).toHaveLength(0);
     expect(verdict.findings).toEqual([]);
+  });
+});
+
+// --- workdir/allowedTools propagation to internal calls (the judge must actually
+// read the diff, not just the SAST JSON + plan summary) ------------------------
+
+describe("security-judge — workdir/allowedTools reach every internal call", () => {
+  it("round-1 AND round-2 calls carry the request's workdir + the read-only git allowlist", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "judge-workdir-"));
+    const calls: RecordedCall[] = [];
+    const { run } = makeJudge(
+      (c) => (isRound1(c) ? round1([finding({ confidence: 9 })]) : genuine),
+      calls,
+      workdir
+    );
+    await run(BASE_PROMPT);
+
+    const r1 = calls.find(isRound1)!;
+    const r2 = calls.find(isRound2)!;
+    for (const call of [r1, r2]) {
+      expect(call.request.workdir).toBe(workdir);
+      expect(call.request.allowedTools).toEqual(SECURITY_JUDGE_ALLOWED_TOOLS);
+    }
+  });
+
+  it("adjudication calls carry the same workdir + allowlist (the refuter needs to read code to refute with evidence)", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "judge-workdir-adj-"));
+    const calls: RecordedCall[] = [];
+    const { run } = makeJudge(
+      () => JSON.stringify({ decision: "adjudicado-libera", reasoning: "evidência procede" }),
+      calls,
+      workdir
+    );
+    const contestedPrompt = BASE_PROMPT.replace(
+      '<contestacao_refutacao baixa_confianca="true"></contestacao_refutacao>',
+      `<contestacao_refutacao baixa_confianca="true">${JSON.stringify([
+        { lens: "security", status: "contestado", evidencia: "e", finding: finding() },
+      ])}</contestacao_refutacao>`
+    );
+    await run(contestedPrompt);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].request.workdir).toBe(workdir);
+    expect(calls[0].request.allowedTools).toEqual(SECURITY_JUDGE_ALLOWED_TOOLS);
+  });
+
+  it("round-1 system prompt tells the judge to read the real diff/files via git when a workdir is granted (the actual bug: judging off the summary alone)", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "judge-workdir-sys-"));
+    const calls: RecordedCall[] = [];
+    const { run } = makeJudge(() => round1([]), calls, workdir);
+    await run(BASE_PROMPT);
+
+    const r1 = calls.find(isRound1)!;
+    expect(r1.request.system).toContain("git diff");
+    expect(r1.request.system).toContain("git log");
+    expect(r1.request.system).toMatch(/LEIA/);
+  });
+
+  it("no workdir on the original request => no regression: internal calls carry neither workdir/allowedTools nor the git-reading instruction", async () => {
+    const calls: RecordedCall[] = [];
+    const { run } = makeJudge(
+      (c) => (isRound1(c) ? round1([finding({ confidence: 9 })]) : genuine),
+      calls
+      // no workdir passed
+    );
+    await run(BASE_PROMPT);
+
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      expect(call.request.workdir).toBeUndefined();
+      expect(call.request.allowedTools).toBeUndefined();
+    }
+    expect(calls.find(isRound1)!.request.system).not.toContain("git diff");
   });
 });
 

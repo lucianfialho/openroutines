@@ -79,6 +79,16 @@ export const DEFAULT_JUDGE_MODEL = "claude-opus-4-8";
 /** Findings at or above this confidence block (and get a round-2 verification call). */
 export const BLOCKING_CONFIDENCE = 8;
 
+/**
+ * Read-only least-privilege allowlist for the judge's INTERNAL calls (round-1/
+ * round-2/adjudication) when the request carries a workdir. Without this the
+ * inner claude-cli call has no `--add-dir`/`--allowedTools` and judges purely
+ * off the SAST JSON + plan summary — never the real diff (bug: the judge
+ * never reads code). git log/show/diff let the model find the card's base
+ * commit itself (no baseSha value is threaded through the lens template).
+ */
+export const SECURITY_JUDGE_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)"];
+
 export interface SecurityJudgeConfig {
   /** Billed API creds — OPTIONAL (Bloco 2): absent means the CLI-first inner runs. */
   claudeApi?: { apiKey?: string; baseURL?: string };
@@ -116,11 +126,21 @@ const buildExclusionsBlock = (fpRaw: string): string =>
     "</security_fp_file>",
   ].join("\n");
 
-const round1System = (fpRaw: string): string =>
+/** hasWorkdir: only true when the internal calls actually got workdir + read tools (see SECURITY_JUDGE_ALLOWED_TOOLS) — a misleading "you have tools" line when none were granted would just invite hallucinated tool use. */
+const round1System = (fpRaw: string, hasWorkdir: boolean): string =>
   [
     "Você é um auditor de segurança revisando o diff de um card.",
     ANTI_BIAS_FRAMING,
     "",
+    ...(hasWorkdir
+      ? [
+          "O worktree do card está montado neste workdir: você tem Read/Grep/Glob e pode rodar " +
+            "`git log`, `git diff` e `git show` nele. ANTES de julgar, use `git log` para achar o " +
+            "commit-base do card e `git diff <base>..HEAD` para ver o diff real, e LEIA (Read) os " +
+            "arquivos do campo changedFiles do <verify> abaixo — nunca decida só pelo resumo do plano/verify.",
+          "",
+        ]
+      : []),
     `Categorias permitidas: ${CATEGORIES.join(", ")}.`,
     "Atribua confidence 1-10 a cada achado: 10 = exploit concreto e demonstrável; 8-9 = vulnerabilidade real com caminho de ataque claro; 5-7 = suspeita plausível sem caminho confirmado; 1-4 = especulativo.",
     "NÃO reporte achados cobertos pelas exclusões padrão nem pelos falsos-positivos já adjudicados do repo (abaixo).",
@@ -395,10 +415,15 @@ export const makeSecurityJudgeProvider = (config: SecurityJudgeConfig): Provider
         responses.push(resp);
         return resp;
       };
+      const hasWorkdir = request.workdir !== undefined;
       const baseRequest = {
         temperature: 0,
         maxTokens: 8192,
         ...(request.executionId !== undefined ? { executionId: request.executionId } : {}),
+        // Round-1/round-2/adjudication all spread ...baseRequest: without this
+        // every internal judge call ran with no workdir/tools (bug, see
+        // SECURITY_JUDGE_ALLOWED_TOOLS) and judged blind to the actual diff.
+        ...(request.workdir ? { workdir: request.workdir, allowedTools: SECURITY_JUDGE_ALLOWED_TOOLS } : {}),
       };
 
       const contested = parseContestedGaps(text);
@@ -453,7 +478,7 @@ export const makeSecurityJudgeProvider = (config: SecurityJudgeConfig): Provider
           text.replace(CONTESTACAO_RE, "").trim(),
           "</dados_revisao>",
         ].join("\n");
-        const round1Request = { ...baseRequest, system: round1System(fpRaw), prompt: dataBlock };
+        const round1Request = { ...baseRequest, system: round1System(fpRaw, hasWorkdir), prompt: dataBlock };
 
         const runJudge = (adapter: ProviderAdapter, judgeModel: string, idPrefix: string) =>
           Effect.gen(function* () {
