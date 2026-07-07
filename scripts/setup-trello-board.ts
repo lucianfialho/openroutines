@@ -12,6 +12,15 @@ import "dotenv/config";
 import { fileURLToPath } from "url";
 import { loadTaskSources } from "../src/task-source/loader.js";
 import type { TaskSourceEntry } from "../src/task-source/schema.js";
+import {
+  createBoardLabel,
+  createBoardList,
+  fetchBoardLabels,
+  fetchBoardLists,
+  type TrelloCreds,
+  type TrelloLabel,
+  type TrelloList,
+} from "../src/onboarding/trello-board.js";
 
 const TARGET_LISTS = ["OpenRoutines — Fila", "OpenRoutines — Working"];
 
@@ -36,11 +45,6 @@ export const planBoardSetup = (
 
 // --- Trello wiring (network side effects; not covered by the unit test) ---
 
-interface TrelloItem {
-  id: string;
-  name: string;
-}
-
 const fail = (message: string): never => {
   console.error(message);
   process.exit(1);
@@ -62,21 +66,7 @@ const resolveEntry = (entries: TaskSourceEntry[], requestedId: string | undefine
   return entries.find((e) => e.id === requestedId) ?? fail(`No trello entry with id "${requestedId}" found.`);
 };
 
-const trelloRequest = async <T>(
-  method: "GET" | "POST",
-  path: string,
-  params: Record<string, string>,
-  credentials: { key: string; token: string }
-): Promise<T> => {
-  const query = new URLSearchParams({ ...params, key: credentials.key, token: credentials.token });
-  const res = await fetch(`https://api.trello.com/1${path}?${query.toString()}`, { method });
-  if (!res.ok) {
-    throw new Error(`${method} ${path} failed with ${res.status}: ${await res.text()}`);
-  }
-  return res.json() as Promise<T>;
-};
-
-const printResolved = (label: string, targets: string[], items: TrelloItem[]) => {
+const printResolved = (label: string, targets: string[], items: (TrelloList | TrelloLabel)[]) => {
   console.log(`${label}:`);
   for (const name of targets) {
     console.log(`  ${name} -> ${items.find((i) => i.name === name)?.id ?? "?"}`);
@@ -102,23 +92,10 @@ const main = async () => {
         `${tokenEnv ?? "auth.token"} in your environment.`
     );
   }
-  // Non-null assertion: the guard above already fails fast on either being
-  // empty — TS's never-narrowing doesn't propagate through this object
-  // literal into trelloRequest's typed parameter, so assert what we just checked.
-  const credentials = { key: key!, token: token! };
+  const credentials: TrelloCreds = { key, token };
 
-  const existingLists = await trelloRequest<TrelloItem[]>(
-    "GET",
-    `/boards/${boardId}/lists`,
-    { filter: "open", fields: "id,name" },
-    credentials
-  );
-  const existingLabels = await trelloRequest<TrelloItem[]>(
-    "GET",
-    `/boards/${boardId}/labels`,
-    { filter: "open", fields: "id,name" },
-    credentials
-  );
+  const existingLists = await fetchBoardLists(boardId, credentials);
+  const existingLabels = await fetchBoardLabels(boardId, credentials);
 
   const { listsToCreate, labelsToCreate } = planBoardSetup(
     existingLists.map((l) => l.name),
@@ -126,22 +103,12 @@ const main = async () => {
   );
 
   for (const name of listsToCreate) {
-    const created = await trelloRequest<TrelloItem>(
-      "POST",
-      "/lists",
-      { name, idBoard: boardId, pos: "bottom" },
-      credentials
-    );
+    const created = await createBoardList(boardId, name, credentials);
     existingLists.push(created);
   }
 
   for (const name of labelsToCreate) {
-    const created = await trelloRequest<TrelloItem>(
-      "POST",
-      `/boards/${boardId}/labels`,
-      { name, color: LABEL_COLORS[name] },
-      credentials
-    );
+    const created = await createBoardLabel(boardId, name, LABEL_COLORS[name], credentials);
     existingLabels.push(created);
   }
 

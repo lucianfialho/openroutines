@@ -4,14 +4,28 @@
  * Called at boot: if config is incomplete AND a terminal is attached, an
  * interactive wizard collects Trello creds, the board, the column->state map,
  * and REPOS_BASE_DIR, writes task-sources.yaml / connector.yaml / .env, and the
- * boot continues wired. No terminal (systemd/cron) -> a clear error, never a
- * hang. Pure helpers (completeness check + file builders) are unit-tested; the
- * readline/fetch wizard is the thin interactive shell around them.
+ * boot continues wired.
+ *
+ * When the base config is already present, the boot still validates the Trello
+ * board columns: dedicated columns (queued/working) are created idempotently,
+ * and reused columns (backlog/blocked/review/done) whose mapped name does not
+ * exist on the board trigger a remap wizard (TTY) or a clear error (no TTY).
+ *
+ * No terminal (systemd/cron) -> a clear error, never a hang.
  */
 
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { createInterface } from "readline/promises";
 import { parse } from "yaml";
+import { parseTaskSourcesFile, parseConnectorManifest } from "../task-source/parser.js";
+import type { ConnectorManifest } from "../task-source/schema.js";
+import {
+  DEFAULT_LABEL_NAME,
+  type SharedColumnMismatch,
+  type TrelloCreds,
+  type TrelloList,
+  validateAndEnsureBoardColumns,
+} from "./trello-board.js";
 
 export const CANONICAL_STATES = ["backlog", "queued", "working", "blocked", "review", "done"] as const;
 export type CanonicalState = (typeof CANONICAL_STATES)[number];
@@ -74,6 +88,121 @@ export const needsOnboarding = (
   if (!trello.auth?.key || !env[trello.auth.key]) reasons.push("TRELLO_API_KEY ausente no ambiente");
   if (!trello.auth?.token || !env[trello.auth.token]) reasons.push("TRELLO_API_TOKEN ausente no ambiente");
   return { needed: reasons.length > 0, reasons };
+};
+
+// --- board column validation --------------------------------------------------
+
+export interface ValidateBoardColumnsDeps {
+  readFile?: (p: string) => string;
+  env?: NodeJS.ProcessEnv;
+  validate?: (
+    boardId: string,
+    stateMap: Record<CanonicalState, string>,
+    labelName: string,
+    creds: TrelloCreds
+  ) => Promise<{
+    ok: boolean;
+    createdLists: string[];
+    createdLabel?: string;
+    missingShared: SharedColumnMismatch[];
+    existingLists: TrelloList[];
+  }>;
+}
+
+export interface BoardValidation {
+  ok: boolean;
+  createdLists: string[];
+  createdLabel?: string;
+  missingShared: SharedColumnMismatch[];
+  existingLists: TrelloList[];
+}
+
+interface ParsedConfig {
+  boardId: string;
+  creds: TrelloCreds;
+  manifestPath: string;
+  manifest: ConnectorManifest;
+  manifestRaw: string;
+}
+
+const parseOnboardingConfig = (
+  paths: OnboardingPaths,
+  readFile: (p: string) => string,
+  env: NodeJS.ProcessEnv
+): ParsedConfig => {
+  const sources = parseTaskSourcesFile(readFile(paths.taskSources));
+  const entry = sources.sources.find((s) => s.type === "trello");
+  if (!entry) throw new Error("nenhuma fonte trello em task-sources.yaml");
+
+  const boardId = entry.containers.board;
+  if (!boardId) throw new Error("board do Trello não configurado");
+
+  const keyName = entry.auth.key;
+  const tokenName = entry.auth.token;
+  const key = keyName ? env[keyName] : undefined;
+  const token = tokenName ? env[tokenName] : undefined;
+  if (!key || !token) throw new Error("TRELLO_API_KEY/TRELLO_API_TOKEN ausente no ambiente");
+
+  const manifestPath = entry.manifest ?? paths.connector;
+  const manifestRaw = readFile(manifestPath);
+  const manifest = parseConnectorManifest(manifestRaw);
+
+  return { boardId, creds: { key, token }, manifestPath, manifest, manifestRaw };
+};
+
+export const validateBoardColumns = async (
+  paths: OnboardingPaths = defaultPaths(),
+  deps: ValidateBoardColumnsDeps = {}
+): Promise<BoardValidation> => {
+  const readFile = deps.readFile ?? ((p: string) => readFileSync(p, "utf-8"));
+  const env = deps.env ?? process.env;
+  const cfg = parseOnboardingConfig(paths, readFile, env);
+
+  const stateMap = cfg.manifest.state as Record<CanonicalState, string>;
+  const labelName = cfg.manifest.container?.flag?.kind === "label" ? cfg.manifest.container.flag.name : DEFAULT_LABEL_NAME;
+
+  const validate =
+    deps.validate ??
+    (async (boardId, map, lbl, creds) =>
+      validateAndEnsureBoardColumns(boardId, map, lbl, {
+        fetchLists: (id) =>
+          fetch(`https://api.trello.com/1/boards/${encodeURIComponent(id)}/lists?filter=open&fields=id,name&key=${encodeURIComponent(creds.key)}&token=${encodeURIComponent(creds.token)}`).then(
+            async (res) => {
+              if (!res.ok) throw new Error(`Trello API ${res.status} on GET /boards/${id}/lists`);
+              return res.json() as Promise<TrelloList[]>;
+            }
+          ),
+        createList: (id, name) =>
+          fetch(`https://api.trello.com/1/lists?key=${encodeURIComponent(creds.key)}&token=${encodeURIComponent(creds.token)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, idBoard: id, pos: "bottom" }),
+          }).then(async (res) => {
+            if (!res.ok) throw new Error(`Trello API ${res.status} on POST /lists`);
+            return res.json() as Promise<TrelloList>;
+          }),
+        fetchLabels: (id) =>
+          fetch(
+            `https://api.trello.com/1/boards/${encodeURIComponent(id)}/labels?filter=open&fields=id,name&key=${encodeURIComponent(creds.key)}&token=${encodeURIComponent(creds.token)}`
+          ).then(async (res) => {
+            if (!res.ok) throw new Error(`Trello API ${res.status} on GET /boards/${id}/labels`);
+            return res.json() as Promise<Array<{ id: string; name: string }>>;
+          }),
+        createLabel: (id, name, color) =>
+          fetch(
+            `https://api.trello.com/1/boards/${encodeURIComponent(id)}/labels?key=${encodeURIComponent(creds.key)}&token=${encodeURIComponent(creds.token)}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name, color }),
+            }
+          ).then(async (res) => {
+            if (!res.ok) throw new Error(`Trello API ${res.status} on POST /boards/${id}/labels`);
+            return res.json() as Promise<{ id: string; name: string }>;
+          }),
+      }));
+
+  return validate(cfg.boardId, stateMap, labelName, cfg.creds);
 };
 
 // --- file builders (pure) ----------------------------------------------------
@@ -174,15 +303,84 @@ export const runOnboarding = async (paths: OnboardingPaths = defaultPaths()): Pr
   }
 };
 
+const runRemapWizard = async (
+  paths: OnboardingPaths,
+  missingShared: SharedColumnMismatch[],
+  existingLists: TrelloList[]
+): Promise<void> => {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const ask = async (q: string): Promise<string> => (await rl.question(q)).trim();
+  try {
+    console.log("\n🧭 OpenRoutines — remapear colunas do Trello\n");
+    console.log("As seguintes colunas reaproveitadas não existem no board com o nome mapeado:\n");
+    for (const m of missingShared) {
+      console.log(`  - ${m.state}: "${m.mappedName}"${m.similar ? ` (similar: "${m.similar}")` : ""}`);
+    }
+
+    console.log("\nColunas disponíveis no board:");
+    existingLists.forEach((l, i) => console.log(`  ${i + 1}) ${l.name}`));
+
+    const stateMap: Partial<Record<CanonicalState, string>> = {};
+    for (const m of missingShared) {
+      const suggestion = m.similar ?? existingLists.find((l) => l.name === DEFAULT_COLUMNS[m.state])?.name ?? "";
+      const answer = await ask(`\nColuna para "${m.state}" [${suggestion || "escolha"}]: `);
+      const pick = answer || suggestion;
+      const chosen = existingLists.find((l) => l.name === pick || `${existingLists.indexOf(l) + 1}` === pick);
+      if (!chosen) throw new Error(`coluna inválida para "${m.state}"`);
+      stateMap[m.state] = chosen.name;
+    }
+
+    const cfg = parseOnboardingConfig(paths, (p) => readFileSync(p, "utf-8"), process.env);
+    writeFileSync(cfg.manifestPath, updateConnectorState(cfg.manifestRaw, stateMap as Record<string, string>));
+    console.log("\n✅ State map atualizado no connector.yaml. Iniciando o OpenRoutines...\n");
+  } finally {
+    rl.close();
+  }
+};
+
 export const maybeRunOnboarding = async (paths: OnboardingPaths = defaultPaths()): Promise<void> => {
   const check = needsOnboarding(paths);
-  if (!check.needed) return;
+  if (check.needed) {
+    if (!process.stdin.isTTY) {
+      console.error(
+        `[Onboarding] Config incompleta (${check.reasons.join("; ")}) e sem terminal interativo. ` +
+          "Configure task-sources.yaml + .env manualmente, ou rode uma vez em um terminal."
+      );
+      return;
+    }
+    await runOnboarding(paths);
+    return;
+  }
+
+  let validation: BoardValidation;
+  try {
+    validation = await validateBoardColumns(paths);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[Onboarding] Falha ao validar colunas do board do Trello: ${message}`);
+    return;
+  }
+
+  if (validation.createdLists.length) {
+    console.log(`[Onboarding] Colunas dedicadas criadas: ${validation.createdLists.join(", ")}`);
+  }
+  if (validation.createdLabel) {
+    console.log(`[Onboarding] Label criada: ${validation.createdLabel}`);
+  }
+
+  if (validation.ok) return;
+
+  const mismatchLines = validation.missingShared
+    .map((m) => `  - ${m.state}: mapeado para "${m.mappedName}"${m.similar ? ` (similar no board: "${m.similar}")` : ""}`)
+    .join("\n");
+
   if (!process.stdin.isTTY) {
     console.error(
-      `[Onboarding] Config incompleta (${check.reasons.join("; ")}) e sem terminal interativo. ` +
-        "Configure task-sources.yaml + .env manualmente, ou rode uma vez em um terminal."
+      `[Onboarding] State map do Trello não bate com as colunas do board:\n${mismatchLines}\n` +
+        "Ajuste .gates/connectors/trello/connector.yaml manualmente, ou rode em um terminal interativo."
     );
     return;
   }
-  await runOnboarding(paths);
+
+  await runRemapWizard(paths, validation.missingShared, validation.existingLists);
 };

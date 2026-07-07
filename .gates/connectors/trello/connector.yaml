@@ -42,12 +42,12 @@ fields:
 # "Colunas"). Backlog/Blocked/Review/Done are reused board columns; the two
 # OpenRoutines — * columns are dedicated to this system.
 state:
-  backlog: Backlog
+  backlog: BACKLOG
   queued: "OpenRoutines — Fila"
   working: "OpenRoutines — Working"
-  blocked: Blocked
-  review: Review
-  done: Done
+  blocked: BLOCKED
+  review: REVIEW
+  done: DONE
 
 # Tipos de card (.openroutines/02-FLUXO-TRELLO.md, "Tipos de card"):
 # implementation has no label (its absence IS the value); the other three do.
