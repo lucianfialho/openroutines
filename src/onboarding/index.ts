@@ -6,10 +6,11 @@
  * and REPOS_BASE_DIR, writes task-sources.yaml / connector.yaml / .env, and the
  * boot continues wired.
  *
- * When the base config is already present, the boot still validates the Trello
- * board columns: dedicated columns (queued/working) are created idempotently,
- * and reused columns (backlog/blocked/review/done) whose mapped name does not
- * exist on the board trigger a remap wizard (TTY) or a clear error (no TTY).
+ * Either way (fresh wizard or config already present), the board columns are
+ * then validated in this SAME run: dedicated columns (queued/working) and the
+ * classification labels are created idempotently, and reused columns
+ * (backlog/blocked/review/done) whose mapped name does not exist on the board
+ * trigger a remap wizard (TTY) or a clear error (no TTY).
  *
  * No terminal (systemd/cron) -> a clear error, never a hang.
  */
@@ -21,6 +22,9 @@ import { parseTaskSourcesFile, parseConnectorManifest } from "../task-source/par
 import type { ConnectorManifest } from "../task-source/schema.js";
 import {
   DEFAULT_LABEL_NAME,
+  normalizeListName,
+  resolveListPick,
+  type BoardColumnValidationResult,
   type SharedColumnMismatch,
   type TrelloCreds,
   type TrelloList,
@@ -92,6 +96,9 @@ export const needsOnboarding = (
 
 // --- board column validation --------------------------------------------------
 
+/** Same shape as trello-board.ts's BoardColumnValidationResult -- kept as its own name here since it's this module's public onboarding-facing result type. */
+export type BoardValidation = BoardColumnValidationResult;
+
 export interface ValidateBoardColumnsDeps {
   readFile?: (p: string) => string;
   env?: NodeJS.ProcessEnv;
@@ -100,21 +107,7 @@ export interface ValidateBoardColumnsDeps {
     stateMap: Record<CanonicalState, string>,
     labelName: string,
     creds: TrelloCreds
-  ) => Promise<{
-    ok: boolean;
-    createdLists: string[];
-    createdLabel?: string;
-    missingShared: SharedColumnMismatch[];
-    existingLists: TrelloList[];
-  }>;
-}
-
-export interface BoardValidation {
-  ok: boolean;
-  createdLists: string[];
-  createdLabel?: string;
-  missingShared: SharedColumnMismatch[];
-  existingLists: TrelloList[];
+  ) => Promise<BoardValidation>;
 }
 
 interface ParsedConfig {
@@ -280,8 +273,11 @@ export const runOnboarding = async (paths: OnboardingPaths = defaultPaths()): Pr
 
     const stateMap = {} as Record<CanonicalState, string>;
     for (const state of CANONICAL_STATES) {
-      const guess = lists.find((l) => l.name === DEFAULT_COLUMNS[state])?.name ?? DEFAULT_COLUMNS[state];
-      stateMap[state] = (await ask(`Coluna para "${state}" [${guess}]: `)) || guess;
+      const guess =
+        lists.find((l) => normalizeListName(l.name) === normalizeListName(DEFAULT_COLUMNS[state]))?.name ??
+        DEFAULT_COLUMNS[state];
+      const answer = (await ask(`Coluna para "${state}" [${guess}] (nome ou número): `)) || guess;
+      stateMap[state] = resolveListPick(answer, lists)?.name ?? answer;
     }
 
     const baseDir = (await ask("\nDiretório base dos repositórios (REPOS_BASE_DIR) [/Volumes/programacao]: ")) || "/Volumes/programacao";
@@ -322,10 +318,13 @@ const runRemapWizard = async (
 
     const stateMap: Partial<Record<CanonicalState, string>> = {};
     for (const m of missingShared) {
-      const suggestion = m.similar ?? existingLists.find((l) => l.name === DEFAULT_COLUMNS[m.state])?.name ?? "";
-      const answer = await ask(`\nColuna para "${m.state}" [${suggestion || "escolha"}]: `);
+      const suggestion =
+        m.similar ??
+        existingLists.find((l) => normalizeListName(l.name) === normalizeListName(DEFAULT_COLUMNS[m.state]))?.name ??
+        "";
+      const answer = await ask(`\nColuna para "${m.state}" [${suggestion || "escolha"}] (nome ou número): `);
       const pick = answer || suggestion;
-      const chosen = existingLists.find((l) => l.name === pick || `${existingLists.indexOf(l) + 1}` === pick);
+      const chosen = resolveListPick(pick, existingLists);
       if (!chosen) throw new Error(`coluna inválida para "${m.state}"`);
       stateMap[m.state] = chosen.name;
     }
@@ -338,23 +337,20 @@ const runRemapWizard = async (
   }
 };
 
-export const maybeRunOnboarding = async (paths: OnboardingPaths = defaultPaths()): Promise<void> => {
-  const check = needsOnboarding(paths);
-  if (check.needed) {
-    if (!process.stdin.isTTY) {
-      console.error(
-        `[Onboarding] Config incompleta (${check.reasons.join("; ")}) e sem terminal interativo. ` +
-          "Configure task-sources.yaml + .env manualmente, ou rode uma vez em um terminal."
-      );
-      return;
-    }
-    await runOnboarding(paths);
-    return;
-  }
-
+/**
+ * Validates (and idempotently provisions) the Trello board columns/labels,
+ * reporting the result the same way regardless of caller. Shared by the
+ * "config already complete" boot path and by the wizard path in
+ * maybeRunOnboarding, so a freshly-onboarded board gets its dedicated lists
+ * and labels in this SAME run -- not the next boot.
+ */
+const validateAndReportBoardColumns = async (
+  paths: OnboardingPaths,
+  deps: ValidateBoardColumnsDeps = {}
+): Promise<void> => {
   let validation: BoardValidation;
   try {
-    validation = await validateBoardColumns(paths);
+    validation = await validateBoardColumns(paths, deps);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[Onboarding] Falha ao validar colunas do board do Trello: ${message}`);
@@ -366,6 +362,9 @@ export const maybeRunOnboarding = async (paths: OnboardingPaths = defaultPaths()
   }
   if (validation.createdLabel) {
     console.log(`[Onboarding] Label criada: ${validation.createdLabel}`);
+  }
+  if (validation.createdLabels.length) {
+    console.log(`[Onboarding] Labels de classificação criadas: ${validation.createdLabels.join(", ")}`);
   }
 
   if (validation.ok) return;
@@ -383,4 +382,34 @@ export const maybeRunOnboarding = async (paths: OnboardingPaths = defaultPaths()
   }
 
   await runRemapWizard(paths, validation.missingShared, validation.existingLists);
+};
+
+export interface MaybeRunOnboardingDeps {
+  /** Overrides the interactive wizard -- for tests, so the same-run provisioning chain can be exercised without a real TTY/Trello session. */
+  runOnboarding?: (paths: OnboardingPaths) => Promise<void>;
+  /** Forwarded into validateBoardColumns; overrides its network calls in tests. */
+  validate?: ValidateBoardColumnsDeps;
+}
+
+export const maybeRunOnboarding = async (
+  paths: OnboardingPaths = defaultPaths(),
+  deps: MaybeRunOnboardingDeps = {}
+): Promise<void> => {
+  const check = needsOnboarding(paths);
+  if (check.needed) {
+    if (!process.stdin.isTTY) {
+      console.error(
+        `[Onboarding] Config incompleta (${check.reasons.join("; ")}) e sem terminal interativo. ` +
+          "Configure task-sources.yaml + .env manualmente, ou rode uma vez em um terminal."
+      );
+      return;
+    }
+    await (deps.runOnboarding ?? runOnboarding)(paths);
+    // Provision the board columns/labels right now -- same process, same run
+    // -- instead of waiting for the next boot to notice the fresh config.
+    await validateAndReportBoardColumns(paths, deps.validate);
+    return;
+  }
+
+  await validateAndReportBoardColumns(paths, deps.validate);
 };

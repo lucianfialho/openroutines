@@ -29,6 +29,20 @@ export const SHARED_STATES: CanonicalState[] = ["backlog", "blocked", "review", 
 export const DEFAULT_LABEL_NAME = "OpenRoutines";
 export const DEFAULT_LABEL_COLOR = "green";
 
+/**
+ * Classification labels (card type + "don't group" hint) created idempotently
+ * at boot in addition to the flag label above, and by
+ * scripts/setup-trello-board.ts — single source for both. Color choice is
+ * free (not a functional requirement) — one distinct color per label so the
+ * board reads clearly out of the box.
+ */
+export const CLASSIFICATION_LABEL_COLORS: Record<string, string> = {
+  "OpenRoutines: Pesquisa": "blue",
+  "OpenRoutines: Mapeamento": "yellow",
+  "OpenRoutines: Update": "orange",
+  "Não agrupar": "red",
+};
+
 export const TRELLO_API_BASE = "https://api.trello.com/1";
 
 /**
@@ -44,6 +58,21 @@ export const normalizeListName = (name: string): string =>
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
+
+/**
+ * Resolves a wizard answer to one of `lists`: either a 1-based index into the
+ * numbered list as displayed to the user, or a name matched via
+ * normalizeListName (case/accent-insensitive). Returns undefined when the
+ * answer matches neither; callers decide the fallback (treat as a literal
+ * new name, or reject). Shared by runOnboarding and runRemapWizard so both
+ * wizards accept the same input.
+ */
+export const resolveListPick = (answer: string, lists: TrelloList[]): TrelloList | undefined => {
+  const index = Number(answer);
+  if (Number.isInteger(index) && index >= 1 && index <= lists.length) return lists[index - 1];
+  const normalized = normalizeListName(answer);
+  return lists.find((l) => normalizeListName(l.name) === normalized);
+};
 
 const authQuery = (creds: TrelloCreds): string =>
   `key=${encodeURIComponent(creds.key)}&token=${encodeURIComponent(creds.token)}`;
@@ -113,6 +142,8 @@ export interface BoardColumnValidationResult {
   ok: boolean;
   createdLists: string[];
   createdLabel?: string;
+  /** Classification labels created this run (Pesquisa/Mapeamento/Update/Nao agrupar). */
+  createdLabels: string[];
   missingShared: SharedColumnMismatch[];
   existingLists: TrelloList[];
 }
@@ -125,8 +156,11 @@ export interface ValidateBoardColumnDeps {
 }
 
 /**
- * Ensures dedicated columns exist (creating them idempotently) and reports any
- * shared columns whose mapped name does not exist exactly on the board.
+ * Ensures dedicated columns and every label (flag + classification) exist
+ * (creating them idempotently, matched case/accent-insensitively so a column
+ * or label that already exists under a different case never gets a
+ * duplicate), and reports any shared columns whose mapped name does not
+ * exist exactly on the board.
  */
 export const validateAndEnsureBoardColumns = async (
   boardId: string,
@@ -141,7 +175,7 @@ export const validateAndEnsureBoardColumns = async (
   const createdLists: string[] = [];
   for (const state of DEDICATED_STATES) {
     const desiredName = stateMap[state];
-    if (!exactNames.has(desiredName)) {
+    if (!normalizedMap.has(normalizeListName(desiredName))) {
       const created = await deps.createList!(boardId, desiredName);
       existingLists.push(created);
       exactNames.add(created.name);
@@ -151,11 +185,23 @@ export const validateAndEnsureBoardColumns = async (
   }
 
   let createdLabel: string | undefined;
+  const createdLabels: string[] = [];
   try {
     const existingLabels = await deps.fetchLabels!(boardId);
-    if (!existingLabels.some((l) => l.name === labelName)) {
+    const normalizedLabels = new Map(existingLabels.map((l) => [normalizeListName(l.name), l.name]));
+
+    if (!normalizedLabels.has(normalizeListName(labelName))) {
       const created = await deps.createLabel!(boardId, labelName, DEFAULT_LABEL_COLOR);
       createdLabel = created.name;
+      normalizedLabels.set(normalizeListName(created.name), created.name);
+    }
+
+    for (const [name, color] of Object.entries(CLASSIFICATION_LABEL_COLORS)) {
+      if (!normalizedLabels.has(normalizeListName(name))) {
+        const created = await deps.createLabel!(boardId, name, color);
+        normalizedLabels.set(normalizeListName(created.name), created.name);
+        createdLabels.push(created.name);
+      }
     }
   } catch {
     // Label creation is not fatal to boot; the connector will fail later if it
@@ -175,6 +221,7 @@ export const validateAndEnsureBoardColumns = async (
     ok: missingShared.length === 0,
     createdLists,
     createdLabel,
+    createdLabels,
     missingShared,
     existingLists,
   };

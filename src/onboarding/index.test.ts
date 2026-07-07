@@ -1,9 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   needsOnboarding,
   buildTaskSourcesYaml,
   updateConnectorState,
   appendMissingEnv,
+  maybeRunOnboarding,
   type OnboardingPaths,
 } from "./index.js";
 
@@ -70,5 +71,65 @@ describe("appendMissingEnv", () => {
     const out = appendMissingEnv("", { A: "", B: "x" });
     expect(out).not.toContain("A=");
     expect(out).toContain("B=x");
+  });
+});
+
+describe("maybeRunOnboarding — same-run board provisioning", () => {
+  // Minimal fixtures just for parseOnboardingConfig to succeed; contents
+  // beyond that don't matter since deps.validate.validate is faked below.
+  const VALID_TASK_SOURCES_YAML = `
+sources:
+  - id: trello-main
+    type: trello
+    containers:
+      board: "board123"
+    auth:
+      key: TRELLO_API_KEY
+      token: TRELLO_API_TOKEN
+`;
+  const VALID_CONNECTOR_YAML = `
+name: trello
+transport: rest
+auth:
+  scheme: query
+  params: { key: key, token: token }
+state:
+  backlog: Backlog
+  queued: Fila
+  working: Working
+  blocked: Blocked
+  review: Review
+  done: Done
+`;
+
+  it("runs board validation right after the wizard, in the same call (bug: used to wait for the next boot)", async () => {
+    const wizard = vi.fn(async () => {});
+    const validateFn = vi.fn(async () => ({
+      ok: true,
+      createdLists: [],
+      createdLabel: undefined,
+      createdLabels: [],
+      missingShared: [],
+      existingLists: [],
+    }));
+
+    const originalIsTTY = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+    try {
+      await maybeRunOnboarding(paths, {
+        runOnboarding: wizard,
+        validate: {
+          readFile: (p) => (p === paths.taskSources ? VALID_TASK_SOURCES_YAML : VALID_CONNECTOR_YAML),
+          env: { TRELLO_API_KEY: "k", TRELLO_API_TOKEN: "t" },
+          validate: validateFn,
+        },
+      });
+    } finally {
+      Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+    }
+
+    expect(wizard).toHaveBeenCalledTimes(1);
+    expect(validateFn).toHaveBeenCalledTimes(1);
+    expect(validateFn).toHaveBeenCalledWith("board123", expect.any(Object), "OpenRoutines", { key: "k", token: "t" });
   });
 });

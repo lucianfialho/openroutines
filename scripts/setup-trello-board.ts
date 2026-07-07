@@ -13,6 +13,9 @@ import { fileURLToPath } from "url";
 import { loadTaskSources } from "../src/task-source/loader.js";
 import type { TaskSourceEntry } from "../src/task-source/schema.js";
 import {
+  CLASSIFICATION_LABEL_COLORS,
+  DEFAULT_LABEL_COLOR,
+  DEFAULT_LABEL_NAME,
   createBoardLabel,
   createBoardList,
   fetchBoardLabels,
@@ -24,14 +27,11 @@ import {
 
 const TARGET_LISTS = ["OpenRoutines — Fila", "OpenRoutines — Working"];
 
-// Color choice is free (not a functional requirement) — one distinct color
-// per label so the board reads clearly out of the box.
+// Single source of truth for label names/colors: src/onboarding/trello-board.ts
+// (the same constants back the idempotent creation at boot).
 const LABEL_COLORS: Record<string, string> = {
-  OpenRoutines: "green",
-  "OpenRoutines: Pesquisa": "blue",
-  "OpenRoutines: Mapeamento": "yellow",
-  "OpenRoutines: Update": "orange",
-  "Não agrupar": "red",
+  [DEFAULT_LABEL_NAME]: DEFAULT_LABEL_COLOR,
+  ...CLASSIFICATION_LABEL_COLORS,
 };
 const TARGET_LABELS = Object.keys(LABEL_COLORS);
 
