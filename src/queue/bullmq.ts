@@ -7,6 +7,16 @@
 import { Queue, Worker, type Job as BullJob } from "bullmq";
 import type { Job, JobQueue } from "./types.js";
 
+// A card-execution job's handler runs the whole card-to-pr state machine —
+// sequential provider calls up to 25min each (claude-cli.ts DEFAULT_TIMEOUT_MS)
+// inside one job that can take minutes to hours. BullMQ's default lockDuration
+// (30s) is far shorter than that: a busy event loop can miss one lock renewal
+// and the stalled-checker reassigns the job to another worker while the first
+// is still running, which stomps the shared worktree (prod incident 07/jul).
+// 2h comfortably outlasts any real single execution while still being well
+// inside the night window, so a worker that truly crashed still gets noticed.
+const LOCK_DURATION_MS = 2 * 60 * 60 * 1000;
+
 export interface BullMqConfig {
   redisUrl: string;
   queueName?: string;
@@ -44,6 +54,12 @@ export const makeBullMqQueue = (config: BullMqConfig): JobQueue & { close: () =>
     {
       connection: { url: config.redisUrl },
       concurrency: config.concurrency ?? 5,
+      lockDuration: LOCK_DURATION_MS,
+      // 0: a job flagged stalled is never retried by BullMQ, only failed —
+      // this handler isn't idempotent (rerunning it stomps the worktree the
+      // first run is still using), so crash recovery is boot reconciliation's
+      // job, not the queue's.
+      maxStalledCount: 0,
     }
   );
 

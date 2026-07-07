@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { Queue } from "bullmq";
+import { Queue, Worker } from "bullmq";
 import { makeBullMqQueue } from "./bullmq.js";
 import type { Job } from "./types.js";
 
@@ -77,6 +77,35 @@ describe("makeBullMqQueue", () => {
       defaultJobOptions: { attempts: number };
     };
     expect(opts.defaultJobOptions.attempts).toBe(1);
+  });
+
+  it("stalled-job fix (prod incident 07/jul): worker lockDuration outlasts a long card-execution run", async () => {
+    const handler = vi.fn();
+    makeBullMqQueue({
+      redisUrl: "redis://localhost:6379",
+      handler,
+    });
+
+    expect(Worker).toHaveBeenCalledTimes(1);
+    const opts = (Worker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2] as {
+      lockDuration: number;
+    };
+    // Must clear the longest single provider call (claude-cli.ts DEFAULT_TIMEOUT_MS = 25min)
+    // with room for a full state machine run, not just one call.
+    expect(opts.lockDuration).toBeGreaterThan(25 * 60 * 1000);
+  });
+
+  it("stalled-job fix (prod incident 07/jul): maxStalledCount 0 fails a stalled job instead of letting BullMQ re-run it", async () => {
+    const handler = vi.fn();
+    makeBullMqQueue({
+      redisUrl: "redis://localhost:6379",
+      handler,
+    });
+
+    const opts = (Worker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2] as {
+      maxStalledCount: number;
+    };
+    expect(opts.maxStalledCount).toBe(0);
   });
 
   it("should close worker and queue", async () => {
