@@ -1,13 +1,13 @@
 # Quick Start
 
-Complete walkthrough from zero to your first automated execution.
+Complete walkthrough from zero to your first automated execution, using the raw `/trigger` API directly — the generic path for any routine. For the real day-to-day workflow (a Trello board, cards in, PRs out), see [`../LOCAL.md`](../LOCAL.md) instead.
 
 ## Prerequisites
 
 - Node.js >= 20
 - Git
 - (Optional) Docker + Docker Compose
-- A [Kimi Code](https://www.kimi.com/code) subscription with an API key
+- A logged-in [Claude Code](https://claude.com/claude-code) CLI (`claude setup-token` for headless/subscription auth) — no API key required for the default CLI-first providers
 - A [GitHub Personal Access Token](https://github.com/settings/tokens)
 
 ## 1. Clone & Install
@@ -27,12 +27,16 @@ cp .env.example .env
 Edit `.env`:
 
 ```bash
-# Required: Kimi Code API key
-# Get it at: https://www.kimi.com/code/console → API Keys
-KIMI_API_KEY=sk-your-kimi-code-key
+# Providers run CLI-first: the pipeline drives the logged-in `claude`/`kimi`
+# CLIs headless — no API key required. Run `claude setup-token` once (or log
+# in interactively) and paste the printed token here for headless/subscription
+# auth:
+CLAUDE_CODE_OAUTH_TOKEN=your-claude-code-oauth-token
 
-# Optional: Override the model (default is kimi-coding/k2p5)
-# KIMI_MODEL=kimi-coding/k2p5
+# Optional opt-in upgrades: switch a provider to the billed API instead of the
+# subscription CLI (see .env.example for what each one changes)
+# KIMI_API_KEY=sk-your-kimi-code-key
+# ANTHROPIC_API_KEY=sk-ant-...
 
 # Required for GitHub tools
 GITHUB_TOKEN=ghp-your-github-token
@@ -41,7 +45,8 @@ GITHUB_REPO=your-org/your-repo
 # Optional: GitHub webhook secret (for receiving webhooks)
 # GITHUB_WEBHOOK_SECRET=your-webhook-secret
 
-# Optional: PostgreSQL (defaults to in-memory)
+# Optional: PostgreSQL (defaults to in-memory) — see ../LOCAL.md for the
+# Docker setup used by the real day-to-day (Trello) workflow
 # DATABASE_URL=postgresql://openroutines:openroutines@localhost:5432/openroutines
 
 # Optional: Redis (defaults to in-memory queue)
@@ -51,7 +56,7 @@ GITHUB_REPO=your-org/your-repo
 PORT=3000
 ```
 
-> **Note:** Kimi Code uses an Anthropic-compatible API at `https://api.kimi.com/coding`. The model ID is always `kimi-coding/k2p5`. This is different from the Kimi Platform (`api.moonshot.cn`).
+> **Note:** `KIMI_MODEL` defaults to `kimi-coding/k2p5` (Kimi Code's Anthropic-compatible API at `https://api.kimi.com/coding` — different from the Kimi Platform at `api.moonshot.cn`). Only relevant if you opt into `KIMI_API_KEY`.
 
 ## 3. Run Tests
 
@@ -59,7 +64,7 @@ PORT=3000
 npm test
 ```
 
-All 105 tests should pass.
+All tests should pass.
 
 ## 4. Start the Server
 
@@ -80,7 +85,7 @@ docker-compose up
 ```
 
 This starts:
-- OpenRoutines app on port 3001
+- OpenRoutines app on port 3003
 - PostgreSQL on port 5432
 - Redis on port 6379
 
@@ -95,7 +100,7 @@ Expected response:
 {
   "status": "ok",
   "routines": 2,
-  "provider": "kimi",
+  "provider": "kimi-cli",
   "persistence": "in-memory",
   "queue": "in-memory",
   "tools": 4,
@@ -195,8 +200,8 @@ curl -X POST http://localhost:3000/trigger/my-routine \
 
 ### "Provider completion failed"
 
-- Check `KIMI_API_KEY` is correct and not expired
-- Verify your Kimi Code subscription is active
+- Default CLI-first path: confirm `claude`/`kimi` are logged in on this machine (`claude setup-token`'s output goes in `CLAUDE_CODE_OAUTH_TOKEN`) and the subscription is active
+- If you opted into `KIMI_API_KEY` / `ANTHROPIC_API_KEY`: check the key is correct and not expired
 - Check logs for the specific error
 
 ### "Tool 'github_fetch_issue' executed. Output: error"
@@ -219,6 +224,7 @@ lsof -ti:3000 | xargs kill -9
 
 ## Next Steps
 
+- Read [`../LOCAL.md`](../LOCAL.md) for the real day-to-day workflow: a Trello board, the first-run wizard, and what happens when you move a card
 - Read [`ARCHITECTURE.md`](ARCHITECTURE.md) to understand the system
 - Read [`TEMPLATES.md`](TEMPLATES.md) for skill and routine templates
 - Check [`CONTRIBUTING.md`](../CONTRIBUTING.md) to contribute

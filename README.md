@@ -44,6 +44,18 @@ curl -X POST http://localhost:3000/trigger/daily-pr-review \
 
 See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for the full walkthrough.
 
+## How it works
+
+Day-to-day, OpenRoutines runs as an unattended developer working off a Trello board — cards in, PRs out, no dashboard to babysit.
+
+1. **Write a card**: title, description, and a project label (e.g. `Detect Water`, aliased in `repos.yaml`) — that's the minimum. No type label means "implementation"; `OpenRoutines: Pesquisa` / `Mapeamento` / `Update` route to the other pipelines.
+2. **Name the repo, optionally**: a `## Repositório` line in the description is optional and wins over the label when present.
+3. **Move the card to the queue** (`OpenRoutines — Fila`) — that move is the whole trigger. The two dedicated columns (queue/working) no longer require the `OpenRoutines` flag label; it's only needed to tell cards apart in the columns shared with the team (Backlog/Blocked/Review/Done).
+4. **Triage** picks it up on the next cron tick (every 30 min, daytime) and comments the repo, type, complexity, its interpretation, acceptance criteria, and any blocking questions right on the card. Ready cards wait for the night run; cards needing input move to `Blocked` with what's missing.
+5. **The night run** (01:00) turns every ready card into a pull request — implementation cards get code + tests, research cards get a written opinion, repo-mapping cards get a `REPO-PROFILE.md` PR. A card with no resolvable repo never sits silently: it gets a comment explaining why and moves to `Blocked`.
+
+See [`LOCAL.md`](LOCAL.md) — **Local setup & day-to-day usage** — for the step-by-step setup and the full Trello workflow.
+
 ## What's Working
 
 | Feature | Status |
