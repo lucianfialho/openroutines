@@ -39,6 +39,13 @@ const DEFAULT_TIMEOUT_MS = 1_500_000;
 
 interface ClaudeCliJson {
   result?: string;
+  /**
+   * Present when `--json-schema` was passed: the model's output already parsed
+   * and validated against the schema by the CLI. `result` is the model's raw
+   * text (may interleave prose or truncate the JSON), so it is not reliably
+   * parseable — prefer this when it exists.
+   */
+  structured_output?: unknown;
   total_cost_usd?: number;
   session_id?: string;
   is_error?: boolean;
@@ -206,7 +213,11 @@ const runClaudeCli = (config: ClaudeCliConfig, request: CompletionRequest): Prom
       }
 
       const response: CompletionResponse = {
-        content: parsed.result ?? "",
+        // With --json-schema the CLI exposes the validated object in
+        // structured_output; serialize THAT (extractOutput re-parses the
+        // content string) instead of parsed.result, which is the model's raw
+        // text and often fails schema validation ("got string").
+        content: parsed.structured_output != null ? JSON.stringify(parsed.structured_output) : parsed.result ?? "",
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         model: requestedModel,
         finishReason: parsed.is_error ? "error" : "stop",

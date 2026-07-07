@@ -186,6 +186,27 @@ describe("claude-cli provider — response parsing", () => {
     expect(response.finishReason).toBe("stop");
   });
 
+  it("prefers structured_output over result for content when --json-schema was used", async () => {
+    const obj = { summary: "greet util", files: ["src/greet.ts"] };
+    // result is the model's raw text (prose + broken JSON) — must be ignored.
+    state.spawnImpl = () =>
+      fakeChild({ stdout: successJson({ result: "Aqui vai o plano: { quebrado", structured_output: obj }) });
+    const provider = makeClaudeCliProvider({});
+
+    const response = await Effect.runPromise(provider.complete({ prompt: "x", jsonSchema: { type: "object" } } as any));
+
+    expect(JSON.parse(response.content)).toEqual(obj);
+  });
+
+  it("falls back to result for content when structured_output is absent", async () => {
+    state.spawnImpl = () => fakeChild({ stdout: successJson({ result: "plain text answer" }) });
+    const provider = makeClaudeCliProvider({});
+
+    const response = await Effect.runPromise(provider.complete({ prompt: "x" }));
+
+    expect(response.content).toBe("plain text answer");
+  });
+
   it("rejects with ClaudeCliError (stderr captured) on non-zero exit", async () => {
     state.spawnImpl = () => fakeChild({ stdout: "", stderr: "boom: bad config", exitCode: 1 });
     const provider = makeClaudeCliProvider({});
