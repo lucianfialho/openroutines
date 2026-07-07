@@ -32,7 +32,15 @@ async function main() {
 
   // Bloco 3: first-run wizard when config is incomplete and a TTY is attached
   // (writes task-sources.yaml / connector.yaml / .env, then the boot continues).
-  await maybeRunOnboarding();
+  //
+  // The wizard reads stdin, which `tsx watch` hijacks — it restarts the process
+  // on *any* stdin data, so every keypress would reset the wizard. So `npm run
+  // dev` runs onboarding in a plain (non-watch) process first (`--setup-then-exit`),
+  // then starts the watcher with it skipped (`--skip-onboarding`).
+  if (!process.argv.includes("--skip-onboarding")) {
+    await maybeRunOnboarding();
+  }
+  if (process.argv.includes("--setup-then-exit")) process.exit(0);
 
   const tzWarn = timezoneWarning(process.env.TZ);
   if (tzWarn) console.warn(`[Boot] WARNING: ${tzWarn}`);
