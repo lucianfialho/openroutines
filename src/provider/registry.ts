@@ -50,14 +50,49 @@ const judgeInnerFactory = (config: ProviderRegistryConfig) =>
       ? makeClaudeProvider({ apiKey: config.claudeApi.apiKey, baseURL: config.claudeApi.baseURL, model: c.model })
       : makeClaudeCliProvider({ ...config.claudeCli, model: c.model, fallbackModel: undefined });
 
+/**
+ * Fallback wrapper: run `primary`; on ANY failure (crash, quota/403, timeout,
+ * killed process → code=null, unparseable output), log and fall through to
+ * `fallback`. A provider being unavailable must never fail the whole pipeline
+ * when another provider can answer. Note: this catches *errors* only — a
+ * provider that returns a successful-but-useless response (e.g. Kimi's
+ * `--prompt` mode answering without editing files) is NOT caught here; that is
+ * a provider-capability bug, fixed at the provider, not by fallback.
+ */
+export const withFallback = (
+  label: string,
+  primary: ProviderAdapter,
+  fallback: ProviderAdapter
+): ProviderAdapter => ({
+  complete: (request) =>
+    primary.complete(request).pipe(
+      Effect.matchEffect({
+        onFailure: (err) => {
+          console.error(
+            `[Provider] ${label} falhou (${err instanceof Error ? err.message : String(err)}); usando fallback`
+          );
+          return fallback.complete(request);
+        },
+        onSuccess: (value) => Effect.succeed(value),
+      })
+    ),
+});
+
 const buildProvider = (
   name: ProviderName,
   model: string | undefined,
   config: ProviderRegistryConfig
 ): ProviderAdapter => {
   switch (name) {
-    case "kimi-cli":
-      return makeKimiCliProvider(withModel(config.kimiCli, model));
+    case "kimi-cli": {
+      // Kimi is the cheap tier, but flaky today (no quota; `--prompt` isn't
+      // agentic). Try it, and on any failure fall back to claude-cli/sonnet so
+      // a Kimi outage never blocks a card. Remove the fallback once Kimi is
+      // reliable (agentic `acp` mode + quota) if the extra safety isn't wanted.
+      const kimi = makeKimiCliProvider(withModel(config.kimiCli, model));
+      const rescue = makeClaudeCliProvider({ ...config.claudeCli, model: "claude-sonnet-5", fallbackModel: undefined });
+      return withFallback("kimi-cli", kimi, rescue);
+    }
     case "claude-cli":
       return makeClaudeCliProvider(withModel(config.claudeCli, model));
     case "claude-api": {

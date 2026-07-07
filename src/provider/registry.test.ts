@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { makeProviderRegistry } from "./registry.js";
+import { Effect } from "effect";
+import { makeProviderRegistry, withFallback, type ProviderAdapter } from "./registry.js";
+
+const resp = (content: string) => ({ content, usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, model: "m", finishReason: "stop" });
+const okProvider = (content: string, onCall?: () => void): ProviderAdapter => ({
+  complete: () => Effect.sync(() => { onCall?.(); return resp(content); }),
+});
+const failProvider = (msg: string): ProviderAdapter => ({ complete: () => Effect.fail(new Error(msg)) });
 
 describe("makeProviderRegistry", () => {
   it("caches instances per (name, model): same reference on repeat", () => {
@@ -38,5 +45,21 @@ describe("makeProviderRegistry", () => {
   it("throws on an unknown provider name", () => {
     const registry = makeProviderRegistry({});
     expect(() => registry.resolve("bogus" as never)).toThrowError(/Unknown provider/);
+  });
+});
+
+describe("withFallback", () => {
+  it("returns the primary result and never touches the fallback when the primary succeeds", async () => {
+    let fallbackCalled = false;
+    const p = withFallback("t", okProvider("primary"), okProvider("secondary", () => { fallbackCalled = true; }));
+    const res = await Effect.runPromise(p.complete({ prompt: "x" } as never));
+    expect(res.content).toBe("primary");
+    expect(fallbackCalled).toBe(false);
+  });
+
+  it("falls back to the secondary when the primary fails for any reason (e.g. quota/crash)", async () => {
+    const p = withFallback("kimi-cli", failProvider("403 no quota"), okProvider("rescued-by-claude"));
+    const res = await Effect.runPromise(p.complete({ prompt: "x" } as never));
+    expect(res.content).toBe("rescued-by-claude");
   });
 });
