@@ -86,6 +86,7 @@ import { runNightCycle, type RunNightCycleDeps } from "./night-coordinator/run.j
 import { runTriageCycle, type TriageDeps } from "./triage/run.js";
 import { runNightHardStop, isWithinWindow } from "./night-coordinator/hard-stop.js";
 import { runPrReviewPoll, type PrReviewPollDeps } from "./trigger/pr-review-poller.js";
+import { TaskSourcePoller } from "./trigger/task-source-poller.js";
 
 /**
  * Build a TaskSource from one loaded task-sources.yaml entry (F2 #144 left
@@ -890,6 +891,11 @@ export const createApp = async (config: AppConfig) => {
   let degradedModeUnblockDeps: DegradedModeUnblockDeps | undefined;
   // Daytime triage deps (F5 #170) — the card-triage cron classifies queued cards.
   let triageDeps: TriageDeps | undefined;
+  let triageCycleRunning = false;
+  // Real-time task-source poller (F2 #143, wired F5): watches card sources every
+  // 5min during the day and wakes a triage cycle on new cards. Held here so the
+  // shutdown path (main.ts) can stop its intervals.
+  let taskSourcePoller: TaskSourcePoller | undefined;
 
   // 6. Setup queue (connects to engine)
   const queueHandler = async (job: { id?: string; routineId?: string; trigger: { type: string; payload: unknown; executionId?: string } }) => {
@@ -959,8 +965,20 @@ export const createApp = async (config: AppConfig) => {
         console.warn("[Queue] card-triage cron fired but triage is not wired (need DATABASE_URL + repos.yaml + a card task source)");
         return;
       }
-      const summary = await runTriageCycle(triageDeps);
-      console.log(`[Queue] Triage cycle: ${JSON.stringify(summary)}`);
+      // The 30-min cron and the 5-min poller both enqueue this job and the
+      // worker runs with concurrency > 1 — two overlapping cycles would race
+      // the read-then-act fingerprint check and double-triage cards.
+      if (triageCycleRunning) {
+        console.log("[Queue] card-triage tick skipped — a cycle is already running");
+        return;
+      }
+      triageCycleRunning = true;
+      try {
+        const summary = await runTriageCycle(triageDeps);
+        console.log(`[Queue] Triage cycle: ${JSON.stringify(summary)}`);
+      } finally {
+        triageCycleRunning = false;
+      }
       return;
     }
 
@@ -1157,8 +1175,31 @@ export const createApp = async (config: AppConfig) => {
       registry: repoRegistry,
       excludeLabels: nightExcludeLabels,
       dayBudgetUsd: policy.day.budget_usd,
+      // The queue the same-day research dispatch enqueues card-execution jobs on
+      // (F5 #170, dispatchResearchIfEligible) — same queue the night claim loop uses.
+      queue,
     };
     console.log("[App] Daytime triage wired (cron */30 8-23 * * *)");
+
+    // Real-time poller (F2 #143): watch each card source every 5min in the same
+    // 08:00-23:00 window as the triage cron, and on any new card wake ONE triage
+    // cycle (deduped by fingerprint) so moving a card to the queue produces a
+    // brief in ~5min instead of up to 30. Its cursor/seen state persists in the
+    // task_source_* tables; the steering poll namespaces its own keys
+    // (`${sourceId}:steering`), so sharing the store here never collides.
+    taskSourcePoller = new TaskSourcePoller({
+      sources: [...cardTaskSources.keys()].map((sourceId) => ({
+        sourceId,
+        taskSource: cardTaskSources!.get(sourceId)!,
+        pollIntervalMinutes: 5,
+      })),
+      queue,
+      pollState: makePostgresPollStateRepository(pgPool),
+      taskRepo: tacticalTasks,
+      window: { start: "08:00", end: "23:00", tz: nightTz },
+    });
+    taskSourcePoller.start();
+    console.log("[App] Task-source poller started (every 5min, 08:00-23:00)");
   } else {
     console.log("[App] Daytime triage not wired (need DATABASE_URL + repos.yaml + a card task source)");
   }
@@ -1704,5 +1745,6 @@ export const createApp = async (config: AppConfig) => {
     toolRegistry,
     gateEngine,
     gateRepository,
+    taskSourcePoller,
   };
 };

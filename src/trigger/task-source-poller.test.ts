@@ -5,6 +5,7 @@ import { makeInMemoryPollStateRepository } from "../persistence/poll-state-in-me
 import { TaskSourceError } from "../task-source/types.js";
 import type { Task, TaskSource } from "../task-source/types.js";
 import type { Job, JobQueue } from "../queue/types.js";
+import type { TaskRepository } from "../persistence/types.js";
 
 // Capture setInterval/clearInterval registrations so ticks can be invoked
 // deterministically, mirroring how cron.test.ts mocks node-cron's `schedule`
@@ -75,6 +76,19 @@ const makeQueue = (): JobQueue & { jobs: Job[] } => {
   return { jobs, enqueue: vi.fn(async (job) => { jobs.push(job); }) };
 };
 
+const makeTaskRepo = (): TaskRepository & { saved: Task[] } => {
+  const saved: Task[] = [];
+  return {
+    saved,
+    save: vi.fn(async (task: Task) => { saved.push(task); }),
+    findByKey: async () => undefined,
+    findBySource: async () => [],
+  };
+};
+
+/** The single job a burst produces: one card-triage cycle, never one job per card. */
+const triageJob = (id: string): Job => ({ id, routineId: "card-triage", trigger: { type: "schedule", payload: {} } });
+
 describe("TaskSourcePoller", () => {
   beforeEach(() => {
     stubTimers();
@@ -128,29 +142,50 @@ describe("TaskSourcePoller", () => {
     expect(() => poller.start()).toThrow("already started");
   });
 
-  it("should enqueue exactly one job for a new task and advance the cursor", async () => {
+  it("should enqueue ONE card-triage cycle for a new task, mirror it, and advance the cursor", async () => {
     const task = makeTask({ id: "card-1" });
     const source = makeFakeTaskSource([{ tasks: [task], cursor: "cursor-1" }]);
     const queue = makeQueue();
     const pollState = makeInMemoryPollStateRepository();
+    const taskRepo = makeTaskRepo();
     const poller = new TaskSourcePoller({
       sources: [{ sourceId: "trello-main", taskSource: source, pollIntervalMinutes: 5 }],
       queue,
       pollState,
+      taskRepo,
       generateId: () => "job-1",
     });
 
     poller.start();
     await capturedIntervals[0].fn();
 
-    expect(queue.jobs).toEqual([
-      { id: "job-1", trigger: { type: "task_source", payload: { sourceId: "trello-main", task } } },
-    ]);
+    expect(queue.jobs).toEqual([triageJob("job-1")]);
+    expect(taskRepo.saved).toEqual([task]);
     expect(await pollState.getCursor("trello-main")).toBe("cursor-1");
     expect(source.watchNewCalls).toEqual([null]); // first call: no cursor persisted yet
   });
 
-  it("should NOT re-enqueue a task the source resends (dedupe via claimUnseen)", async () => {
+  it("should enqueue ONE triage job for a MULTI-task burst (not one per card)", async () => {
+    const tasks = [makeTask({ id: "card-1" }), makeTask({ id: "card-2" }), makeTask({ id: "card-3" })];
+    const source = makeFakeTaskSource([{ tasks, cursor: "cursor-1" }]);
+    const queue = makeQueue();
+    const taskRepo = makeTaskRepo();
+    const poller = new TaskSourcePoller({
+      sources: [{ sourceId: "trello-main", taskSource: source, pollIntervalMinutes: 5 }],
+      queue,
+      pollState: makeInMemoryPollStateRepository(),
+      taskRepo,
+      generateId: () => "job-1",
+    });
+
+    poller.start();
+    await capturedIntervals[0].fn();
+
+    expect(queue.jobs).toEqual([triageJob("job-1")]); // ONE job for the whole burst
+    expect(taskRepo.saved.map((t) => t.id)).toEqual(["card-1", "card-2", "card-3"]); // every card mirrored
+  });
+
+  it("should NOT enqueue a triage tick when nothing new was seen (dedupe via claimUnseen)", async () => {
     const task = makeTask({ id: "card-1" });
     const source = makeFakeTaskSource([
       { tasks: [task], cursor: "cursor-1" },
@@ -164,8 +199,8 @@ describe("TaskSourcePoller", () => {
     });
 
     poller.start();
-    await capturedIntervals[0].fn();
-    await capturedIntervals[0].fn();
+    await capturedIntervals[0].fn(); // discovers card-1 -> 1 triage job
+    await capturedIntervals[0].fn(); // nothing new -> no job
 
     expect(queue.jobs).toHaveLength(1);
   });
@@ -191,7 +226,7 @@ describe("TaskSourcePoller", () => {
     await capturedIntervals[0].fn();
     expect(await pollState.getCursor("trello-main")).toBe("cursor-1");
 
-    // tick 2 fails: must not throw, and must not advance the cursor.
+    // tick 2 fails: must not throw, must not advance the cursor, and enqueues nothing.
     await expect(capturedIntervals[0].fn()).resolves.not.toThrow();
     expect(await pollState.getCursor("trello-main")).toBe("cursor-1");
 
@@ -199,10 +234,12 @@ describe("TaskSourcePoller", () => {
     await capturedIntervals[0].fn();
     expect(source.watchNewCalls).toEqual([null, "cursor-1", "cursor-1"]);
     expect(await pollState.getCursor("trello-main")).toBe("cursor-2");
-    expect(queue.jobs.map((j) => (j.trigger.payload as { task: Task }).task.id)).toEqual(["card-1", "card-2"]);
+    // Two successful bursts (tick 1 and tick 3) -> two triage cycles; the failed
+    // tick added none.
+    expect(queue.jobs).toEqual([triageJob(queue.jobs[0].id), triageJob(queue.jobs[1].id)]);
   });
 
-  it("should track cursor and seen state independently per source", async () => {
+  it("should track cursor and seen state independently per source, one triage job per source burst", async () => {
     const taskA = makeTask({ sourceId: "trello-main", id: "card-1" });
     const taskB = makeTask({ sourceId: "github-main", id: "issue-1" });
     const sourceA = makeFakeTaskSource([{ tasks: [taskA], cursor: "cursor-a" }]);
@@ -222,12 +259,13 @@ describe("TaskSourcePoller", () => {
     await capturedIntervals[0].fn();
     await capturedIntervals[1].fn();
 
-    expect(queue.jobs).toHaveLength(2);
+    expect(queue.jobs).toHaveLength(2); // one per source burst
+    expect(queue.jobs.every((j) => j.routineId === "card-triage")).toBe(true);
     expect(await pollState.getCursor("trello-main")).toBe("cursor-a");
     expect(await pollState.getCursor("github-main")).toBe("cursor-b");
   });
 
-  it("should use injected generateId", async () => {
+  it("should use injected generateId for the triage job id", async () => {
     const source = makeFakeTaskSource([{ tasks: [makeTask()], cursor: "cursor-1" }]);
     const queue = makeQueue();
     const poller = new TaskSourcePoller({
@@ -247,7 +285,7 @@ describe("TaskSourcePoller", () => {
     let watchNewCalls = 0;
     const source: TaskSource & { watchNewCalls: number } = {
       ...makeFakeTaskSource([{ tasks: [makeTask()], cursor: "cursor-1" }]),
-      watchNew: (cursor) => {
+      watchNew: () => {
         watchNewCalls++;
         return Effect.succeed({ tasks: [makeTask()], cursor: "cursor-1" });
       },
@@ -266,5 +304,44 @@ describe("TaskSourcePoller", () => {
 
     expect(watchNewCalls).toBe(1);
     expect(queue.jobs).toHaveLength(1);
+  });
+
+  it("should skip a tick outside the daytime window: no watchNew, no enqueue, cursor untouched", async () => {
+    const source = makeFakeTaskSource([{ tasks: [makeTask()], cursor: "cursor-1" }]);
+    const queue = makeQueue();
+    const pollState = makeInMemoryPollStateRepository();
+    const poller = new TaskSourcePoller({
+      sources: [{ sourceId: "trello-main", taskSource: source, pollIntervalMinutes: 5 }],
+      queue,
+      pollState,
+      window: { start: "08:00", end: "23:00", tz: "America/Sao_Paulo" },
+      now: () => new Date("2026-07-04T04:00:00-03:00"), // 04:00 BRT — before the window
+    });
+
+    poller.start();
+    await capturedIntervals[0].fn();
+
+    expect(source.watchNewCalls).toEqual([]); // never polled
+    expect(queue.jobs).toHaveLength(0);
+    expect(await pollState.getCursor("trello-main")).toBeUndefined();
+  });
+
+  it("should run a tick inside the daytime window", async () => {
+    const source = makeFakeTaskSource([{ tasks: [makeTask()], cursor: "cursor-1" }]);
+    const queue = makeQueue();
+    const poller = new TaskSourcePoller({
+      sources: [{ sourceId: "trello-main", taskSource: source, pollIntervalMinutes: 5 }],
+      queue,
+      pollState: makeInMemoryPollStateRepository(),
+      window: { start: "08:00", end: "23:00", tz: "America/Sao_Paulo" },
+      now: () => new Date("2026-07-04T10:00:00-03:00"), // 10:00 BRT — inside the window
+      generateId: () => "job-1",
+    });
+
+    poller.start();
+    await capturedIntervals[0].fn();
+
+    expect(source.watchNewCalls).toEqual([null]);
+    expect(queue.jobs).toEqual([triageJob("job-1")]);
   });
 });

@@ -95,13 +95,14 @@ const makeFakeSource = (tasks: Task[], events: string[], opts: { failComment?: b
   return { source, comment, moveTo, setClassification };
 };
 
-const makeMockPool = (events: string[], opts: { budgetUsed?: number; seed?: Record<string, string> } = {}) => {
+const makeMockPool = (events: string[], opts: { budgetUsed?: number; seed?: Record<string, string>; claimQueued?: boolean } = {}) => {
   const stored: Record<string, string> = { ...(opts.seed ?? {}) };
   const executionInserts: unknown[][] = [];
   const executionSettles: unknown[][] = [];
   const stateBlocks: unknown[][] = [];
   const stamps: unknown[][] = [];
   const budgetInserts: unknown[][] = [];
+  const workingClaims: unknown[][] = [];
 
   const run = async (sql: string, params: unknown[] = []) => {
     const text = sql.replace(/\s+/g, " ").trim();
@@ -121,6 +122,12 @@ const makeMockPool = (events: string[], opts: { budgetUsed?: number; seed?: Reco
       events.push("db:state-blocked");
       stateBlocks.push(params);
       return { rows: [] };
+    }
+    // Day-research atomic claim: RETURNING a row iff the card was still 'queued'.
+    if (text.startsWith("UPDATE tasks SET state = 'working'")) {
+      events.push("db:state-working");
+      workingClaims.push(params);
+      return { rows: opts.claimQueued === false ? [] : [{ task_id: (params as string[])[1] }] };
     }
     if (text.startsWith("UPDATE tasks SET triaged_at")) {
       events.push("db:stamp");
@@ -146,7 +153,14 @@ const makeMockPool = (events: string[], opts: { budgetUsed?: number; seed?: Reco
     stateBlocks,
     stamps,
     budgetInserts,
+    workingClaims,
   };
+};
+
+/** Capturing job queue for the same-day research dispatch. */
+const makeQueue = () => {
+  const jobs: Array<{ id: string; routineId?: string; trigger: { type: string; payload: unknown; executionId?: string } }> = [];
+  return { queue: { enqueue: vi.fn(async (job) => { jobs.push(job); }) } as unknown as TriageDeps["queue"], jobs };
 };
 
 const baseDeps = (pool: TriageDeps["pool"], source: TaskSource, makeCliProvider: TriageDeps["makeCliProvider"], over: Partial<TriageDeps> = {}): TriageDeps => ({
@@ -157,6 +171,7 @@ const baseDeps = (pool: TriageDeps["pool"], source: TaskSource, makeCliProvider:
   registry,
   excludeLabels: ["OpenRoutines"],
   dayBudgetUsd: 10,
+  queue: { enqueue: vi.fn(async () => {}) } as unknown as TriageDeps["queue"],
   makeCliProvider,
   sendAlert: vi.fn(async () => {}),
   generateId: () => randomUUID(),
@@ -173,11 +188,12 @@ describe("runTriageCycle", () => {
     const events: string[] = [];
     const mock = makeMockPool(events);
     // priority PRE-SET (medium) -> triage must NOT overwrite it; complexity blank
-    // -> filled; type is the implementation default and the LLM disagrees (research)
-    // -> filled.
+    // -> filled; type is the implementation default and the LLM disagrees (mapping)
+    // -> filled. mapping (not research) keeps this a pure classification test —
+    // same-day dispatch fires only for research cards.
     const task = makeTask({ priority: "medium", complexity: undefined, type: "implementation" });
     const { source, comment, moveTo, setClassification } = makeFakeSource([task], events);
-    const prov = makeFakeProvider({ ...readyVerdict, tipo: "research" });
+    const prov = makeFakeProvider({ ...readyVerdict, tipo: "mapping" });
     const deps = baseDeps(mock.pool, source, prov.make);
 
     const summary = await runTriageCycle(deps);
@@ -186,11 +202,11 @@ describe("runTriageCycle", () => {
     expect(prov.requests[0].allowedTools).toBeUndefined(); // clone not on disk -> no tools/workdir
     expect(prov.requests[0].workdir).toBeUndefined();
     expect(setClassification).toHaveBeenCalledTimes(1);
-    expect(setClassification.mock.calls[0][1]).toEqual({ complexity: "low", type: "research" }); // priority skipped
+    expect(setClassification.mock.calls[0][1]).toEqual({ complexity: "low", type: "mapping" }); // priority skipped
     expect(comment).toHaveBeenCalledTimes(1);
     expect(comment.mock.calls[0][1]).toContain("✅ Pronto para execução noturna");
     expect(comment.mock.calls[0][1]).toContain("**Repositório:** acme-widgets");
-    expect(moveTo).not.toHaveBeenCalled(); // ready -> stays queued
+    expect(moveTo).not.toHaveBeenCalled(); // ready mapping -> stays queued, not dispatched
     expect(mock.stateBlocks).toHaveLength(0);
     expect(mock.stamps).toHaveLength(1);
     expect(mock.executionInserts).toHaveLength(1);
@@ -384,5 +400,103 @@ describe("runTriageCycle", () => {
     await runTriageCycle(deps);
 
     expect(setClassification).not.toHaveBeenCalled(); // nothing blank -> no call
+  });
+
+  describe("same-day research dispatch (#170, step i)", () => {
+    it("dispatches a ready research card <= Medium: reserves budget, claims 'working', enqueues card-research (no night_id)", async () => {
+      const events: string[] = [];
+      const mock = makeMockPool(events); // budgetUsed 0 -> both the triage and research reservations grant
+      const { queue, jobs } = makeQueue();
+      const task = makeTask({ type: "research", complexity: undefined }); // human typed research; complexity blank
+      const { source, moveTo } = makeFakeSource([task], events);
+      const prov = makeFakeProvider({ ...readyVerdict, tipo: "research", complexidade: "low" });
+      let n = 0;
+      const deps = baseDeps(mock.pool, source, prov.make, { queue, generateId: () => `exec-${++n}` });
+
+      const summary = await runTriageCycle(deps);
+
+      expect(summary.researchDispatched).toBe(1);
+      expect(summary.readyCount).toBe(1);
+      // Claimed out of 'queued' AND moved off the board queue (so a later sync
+      // can't clobber the claim and the night can't re-claim it).
+      expect(mock.workingClaims).toHaveLength(1);
+      expect(moveTo).toHaveBeenCalledWith("card1", "working");
+      // Exactly one card-research job, mirroring the night payload minus night_id/tier.
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0].trigger.type).toBe("card-execution");
+      const payload = jobs[0].trigger.payload as Record<string, unknown>;
+      expect(payload).toMatchObject({
+        skill: "card-research",
+        complexity: "low",
+        source_id: "trello-main",
+        task_id: "card1",
+        repo: "acme-widgets",
+      });
+      expect(payload.night_id).toBeUndefined();
+      expect(payload.tier).toBeUndefined();
+      // Two executions rows (triage + the research run) and two day reservations (1 + 4 units).
+      expect(mock.executionInserts).toHaveLength(2);
+      expect(mock.budgetInserts).toHaveLength(2);
+    });
+
+    it("does NOT dispatch a ready research card > Medium — it waits for the night", async () => {
+      const events: string[] = [];
+      const mock = makeMockPool(events);
+      const { queue, jobs } = makeQueue();
+      const task = makeTask({ type: "research", complexity: "high" });
+      const { source, moveTo } = makeFakeSource([task], events);
+      const prov = makeFakeProvider({ ...readyVerdict, tipo: "research", complexidade: "high" });
+      const deps = baseDeps(mock.pool, source, prov.make, { queue });
+
+      const summary = await runTriageCycle(deps);
+
+      expect(summary.researchDispatched).toBe(0);
+      expect(summary.readyCount).toBe(1);
+      expect(jobs).toHaveLength(0);
+      expect(moveTo).not.toHaveBeenCalled();
+      expect(mock.workingClaims).toHaveLength(0);
+      expect(mock.budgetInserts).toHaveLength(1); // only the triage classification reserved
+    });
+
+    it("leaves a research card queued when the day budget denies the research reservation (triage still completes)", async () => {
+      const events: string[] = [];
+      // 7 used: the triage reserve (7+1<=10) grants, the research reserve (7+4>10) is denied.
+      const mock = makeMockPool(events, { budgetUsed: 7 });
+      const { queue, jobs } = makeQueue();
+      const task = makeTask({ type: "research", complexity: "low" });
+      const { source, moveTo } = makeFakeSource([task], events);
+      const prov = makeFakeProvider({ ...readyVerdict, tipo: "research", complexidade: "low" });
+      const deps = baseDeps(mock.pool, source, prov.make, { queue });
+
+      const summary = await runTriageCycle(deps);
+
+      expect(summary.triaged).toBe(1);
+      expect(summary.researchDispatched).toBe(0);
+      expect(jobs).toHaveLength(0);
+      expect(moveTo).not.toHaveBeenCalled(); // no claim — the card stays queued for the night
+      expect(mock.workingClaims).toHaveLength(0);
+      expect(mock.stamps).toHaveLength(1); // the card WAS triaged
+      expect(mock.budgetInserts).toHaveLength(1); // research reservation rolled back
+      expect(mock.executionSettles[0][1]).toBe("completed"); // a dispatch denial is not a triage failure
+    });
+
+    it("a non-ready research card is Blocked, never dispatched", async () => {
+      const events: string[] = [];
+      const mock = makeMockPool(events);
+      const { queue, jobs } = makeQueue();
+      const task = makeTask({ type: "research", complexity: "low" });
+      const { source, moveTo } = makeFakeSource([task], events);
+      const prov = makeFakeProvider({ ...readyVerdict, tipo: "research", complexidade: "low", pronto: false, motivoNaoPronto: "Falta escopo." });
+      const deps = baseDeps(mock.pool, source, prov.make, { queue });
+
+      const summary = await runTriageCycle(deps);
+
+      expect(summary.blockedNotReady).toBe(1);
+      expect(summary.researchDispatched).toBe(0);
+      expect(moveTo).toHaveBeenCalledWith("card1", "blocked");
+      expect(moveTo).not.toHaveBeenCalledWith("card1", "working");
+      expect(jobs).toHaveLength(0);
+      expect(mock.budgetInserts).toHaveLength(1); // triage only — dispatch never runs for a !ready card
+    });
   });
 });

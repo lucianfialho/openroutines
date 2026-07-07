@@ -327,6 +327,25 @@ describe("runCardExecutionJob", () => {
       expect(fakeRun).toHaveBeenCalledTimes(1);
     });
 
+    it("a same-day research dispatch (night_id NULL everywhere, skill card-research) runs mid-day, unblocked by the night window guard (#170)", async () => {
+      const { deps, fakeRun } = makeDeps({
+        now: () => new Date("2026-01-01T12:00:00Z"), // midday — far outside the 01:00-06:30 night window
+        skills: { "card-research": { config: {} as StateMachineConfig, skill: {} as SkillStateMachine } },
+      });
+      await seedExecution(deps.persistence, "exec-1"); // day-research row carries no nightId
+      const job = {
+        trigger: {
+          type: "card-execution",
+          executionId: "exec-1",
+          payload: { source_id: "trello-main", task_id: "card1", skill: "card-research", complexity: "low" }, // no night_id
+        },
+      };
+
+      await runCardExecutionJob(deps, job, undefined);
+
+      expect(fakeRun).toHaveBeenCalledTimes(1); // the guard only drops when a night_id is present
+    });
+
     // H7 bypass fix: boot-reconciliation (and the human-gate/`/resume` paths)
     // ALWAYS re-enqueue an orphaned execution with `payload: {}` — night_id
     // only lives on the persisted execution record. Before the fix, `nightId`

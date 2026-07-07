@@ -45,7 +45,7 @@ async function main() {
   const tzWarn = timezoneWarning(process.env.TZ);
   if (tzWarn) console.warn(`[Boot] WARNING: ${tzWarn}`);
 
-  const { app, cronScheduler, queue } = await createApp(config);
+  const { app, cronScheduler, queue, taskSourcePoller } = await createApp(config);
 
   // Bind to loopback by default: the Tailscale auth path is only safe when the
   // Express port is not directly reachable off-host (behind `tailscale serve`).
@@ -64,6 +64,7 @@ async function main() {
     console.log("\nShutting down...");
     server.close();
     cronScheduler.stop();
+    taskSourcePoller?.stop();
     if ("close" in queue && typeof (queue as { close?: unknown }).close === "function") {
       await (queue as { close: () => Promise<void> }).close();
     }

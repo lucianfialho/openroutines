@@ -30,12 +30,14 @@ import type { Pool } from "pg";
 import { extractOutput } from "../engine/output.js";
 import { validate, type JsonSchema } from "../engine/schema-validate.js";
 import { resolveRepoForClaim } from "../night-coordinator/run.js";
-import { reserveDayBudget } from "../night-coordinator/day-budget.js";
+import { reserveDayBudget, dispatchResearchIfEligible, type DayDispatchDeps } from "../night-coordinator/day-budget.js";
+import { BUDGET_UNIT_WEIGHTS } from "../night-coordinator/budget.js";
 import { makeClaudeCliProvider } from "../provider/claude-cli.js";
 import { sendTelegramAlert } from "../notify/telegram.js";
 import type { RepoRegistry } from "../repo-registry/schema.js";
 import type { RepoResolution } from "../repo-registry/match.js";
 import type { TaskRepository } from "../persistence/types.js";
+import type { JobQueue } from "../queue/types.js";
 import type { CompletionRequest, CompletionResponse } from "../provider/types.js";
 import type { Task, TaskClassification, TaskComplexity, TaskSource, TaskType } from "../task-source/types.js";
 
@@ -62,6 +64,8 @@ export interface TriageDeps {
   excludeLabels?: string[];
   /** Daytime effort-unit ceiling (policy.day.budget_usd) — passed to reserveDayBudget. */
   dayBudgetUsd: number;
+  /** Queue the same-day research dispatch enqueues card-execution jobs on (F5 #170). */
+  queue: JobQueue;
   /** CLI provider seam; defaults to the real claude-cli (Sonnet). */
   makeCliProvider?: (cfg: { model: string }) => TriageProvider;
   /** Telegram alert seam (best-effort); defaults to the real sender. */
@@ -303,11 +307,90 @@ export const runTriageCycle = async (deps: TriageDeps): Promise<TriageSummary> =
     if (ready) summary.readyCount++;
     else summary.blockedNotReady++;
 
-    // i. Same-day research dispatch (dispatchResearchIfEligible) is intentionally
-    // NOT wired here: its DayDispatchDeps needs a `dispatchPesquisa` seam that runs
-    // the card-research state machine same-cycle, which the triage deps (and app.ts)
-    // do not provide yet — no runtime dispatcher routes a research card into
-    // card-research. researchDispatched stays 0 until that seam lands (open decision).
+    // i. Same-day research dispatch (F5 #170) — a READY research card <= Medium
+    // runs TODAY instead of waiting for the night. dispatchResearchIfEligible owns
+    // the type/complexity gate; here we only supply the day-budget reserve and the
+    // card-research enqueue. Best-effort: the card is already fully triaged
+    // (classified/commented/stamped) above, so a dispatch failure just leaves it
+    // for the night and never fails this card's triage.
+    if (ready && resolution.ok) {
+      // Effective classification = the human's value when set, else the LLM's —
+      // exactly what was written back to the mirror, so a day dispatch and a night
+      // claim route the same card identically.
+      const effectiveType = classification.type ?? task.type;
+      const effectiveComplexity = classification.complexity ?? task.complexity;
+      const repo = resolution.repo;
+
+      // The research run is charged against the TRIAGE execution row (its FK
+      // already exists) — card-research always judges on Opus (research/index.ts),
+      // so the whole run is estimated at the Opus effort weight against the day cap.
+      const reserve: DayDispatchDeps["reserve"] = (card) =>
+        reserveDayBudget(deps.pool, {
+          executionId: card.executionId,
+          phase: "day-research",
+          tier: "claude-opus-4.8",
+          estimatedUnits: BUDGET_UNIT_WEIGHTS["claude-opus-4.8"],
+          dayBudgetUsd: deps.dayBudgetUsd,
+        });
+
+      const dispatchPesquisa: DayDispatchDeps["dispatchPesquisa"] = async () => {
+        // Atomic day-claim, the daytime twin of the night claim (run.ts): a day
+        // dispatch has no night_id, and claimed_by_night_id is a FK to night_runs,
+        // so the card is claimed by moving it OUT of 'queued'. This refuses a
+        // double dispatch AND stops the night claim loop (WHERE state='queued')
+        // from re-claiming it. Only the winner (RETURNING a row) proceeds.
+        const claim = await deps.pool.query(
+          `UPDATE tasks SET state = 'working' WHERE source_id = $1 AND task_id = $2 AND state = 'queued' RETURNING task_id`,
+          [task.sourceId, task.id]
+        );
+        if (claim.rows.length === 0) return; // already claimed/moved this cycle
+        // Move the board card off the queue too: taskRepo.save (triage/night sync)
+        // rewrites tasks.state from the live board, so a card left in 'Fila' gets
+        // clobbered back to 'queued' next tick and re-claimed at night. delivery
+        // later advances it to 'review'.
+        await Effect.runPromise(ts.moveTo(task.id, "working"));
+        const researchExecutionId = generateId();
+        // Fresh executions row for the run (night_id NULL, so runCardExecutionJob's
+        // H7 window guard never drops it) — mirrors the night insertPendingExecution
+        // minus night_id.
+        await deps.pool.query(
+          `INSERT INTO executions (id, routine_id, trigger_type, skill_name, status, started_at, source_id, task_id, repo)
+           VALUES ($1, 'day-research', 'card-execution', 'card-research', 'pending', NOW(), $2, $3, $4)`,
+          [researchExecutionId, task.sourceId, task.id, repo]
+        );
+        // Same payload shape as the night claim-loop enqueue, minus night_id/tier.
+        await deps.queue.enqueue({
+          id: researchExecutionId,
+          trigger: {
+            type: "card-execution",
+            executionId: researchExecutionId,
+            payload: {
+              source_id: task.sourceId,
+              task_id: task.id,
+              repo,
+              title: task.title,
+              description: task.body,
+              skill: "card-research",
+              executionId: researchExecutionId,
+              ...(effectiveComplexity ? { complexity: effectiveComplexity } : {}),
+            },
+          },
+        });
+      };
+
+      try {
+        const outcome = await dispatchResearchIfEligible(
+          { executionId, type: effectiveType, complexity: effectiveComplexity },
+          { reserve, dispatchPesquisa }
+        );
+        if (outcome === "dispatched") summary.researchDispatched++;
+      } catch (err) {
+        console.error(
+          `[Triage] research dispatch failed for card ${task.sourceId}:${task.id}:`,
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
   };
 
   for (const sourceId of deps.sources) {
