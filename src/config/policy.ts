@@ -41,6 +41,7 @@ const PolicySchema = z
     day: z
       .object({
         max_auto_proposed_cards_per_week: z.number(),
+        budget_usd: z.number(),
       })
       .strict(),
     backpressure: z
@@ -66,6 +67,10 @@ export const BOUNDS: Record<string, { min: number; max: number }> = {
   // minimally useful night and 2.5x default caps a runaway calibration proposal.
   "night.budget_usd": { min: 10, max: 75 },
   "day.max_auto_proposed_cards_per_week": { min: 1, max: 10 },
+  // Daytime triage/research effort-unit ceiling per calendar day (sonnet=1,
+  // see day-budget.ts). Floor 1 keeps a minimally useful day; 30 caps a
+  // runaway calibration proposal (same judgment-call shape as night.budget_usd).
+  "day.budget_usd": { min: 1, max: 30 },
   "backpressure.max_open_prs_per_repo": { min: 1, max: 6 },
 };
 
@@ -76,6 +81,7 @@ const flatten = (policy: Policy): Record<string, number> => ({
   "night.max_opus_calls_per_night": policy.night.max_opus_calls_per_night,
   "night.budget_usd": policy.night.budget_usd,
   "day.max_auto_proposed_cards_per_week": policy.day.max_auto_proposed_cards_per_week,
+  "day.budget_usd": policy.day.budget_usd,
   "backpressure.max_open_prs_per_repo": policy.backpressure.max_open_prs_per_repo,
 });
 

@@ -13,6 +13,7 @@ night:
   budget_usd: 30
 day:
   max_auto_proposed_cards_per_week: 3
+  budget_usd: 10
 backpressure:
   max_open_prs_per_repo: 3
 `;
@@ -23,7 +24,7 @@ describe("parsePolicy", () => {
     expect(policy).toEqual({
       version: 1,
       night: { max_prs_per_night: 5, circuit_breaker_failure_rate: 0.6, max_opus_calls_per_night: 12, budget_usd: 30 },
-      day: { max_auto_proposed_cards_per_week: 3 },
+      day: { max_auto_proposed_cards_per_week: 3, budget_usd: 10 },
       backpressure: { max_open_prs_per_repo: 3 },
     });
   });
@@ -107,6 +108,7 @@ describe("validateProposedChange (D27 calibration loop integration)", () => {
       "night.max_opus_calls_per_night",
       "night.budget_usd",
       "day.max_auto_proposed_cards_per_week",
+      "day.budget_usd",
       "backpressure.max_open_prs_per_repo",
     ]) {
       expect(BOUNDS[path]).toBeDefined();

@@ -83,6 +83,7 @@ import type { SkillStateMachine } from "./skill/schema.js";
 import type { TriggerEvent } from "./routine/matcher.js";
 import { reserveBudget, BUDGET_UNIT_WEIGHTS, normalizeBudgetTier } from "./night-coordinator/budget.js";
 import { runNightCycle, type RunNightCycleDeps } from "./night-coordinator/run.js";
+import { runTriageCycle, type TriageDeps } from "./triage/run.js";
 import { runNightHardStop, isWithinWindow } from "./night-coordinator/hard-stop.js";
 import { runPrReviewPoll, type PrReviewPollDeps } from "./trigger/pr-review-poller.js";
 
@@ -842,6 +843,8 @@ export const createApp = async (config: AppConfig) => {
   let steeringPollDeps: SteeringPollDeps | undefined;
   // Degraded-mode unblock poller deps (F5 #163) — same daytime tick, Trello-only.
   let degradedModeUnblockDeps: DegradedModeUnblockDeps | undefined;
+  // Daytime triage deps (F5 #170) — the card-triage cron classifies queued cards.
+  let triageDeps: TriageDeps | undefined;
 
   // 6. Setup queue (connects to engine)
   const queueHandler = async (job: { id?: string; routineId?: string; trigger: { type: string; payload: unknown; executionId?: string } }) => {
@@ -885,15 +888,34 @@ export const createApp = async (config: AppConfig) => {
       return;
     }
 
-    // Daytime triage tick (F5 #170): the routine's schedule is live, but its
-    // `card-triage` skill is an F2 deliverable that does not exist yet, and no
-    // runtime dispatcher routes a research card into card-research. Intercept
-    // it here (same pattern as night-run) so the cron is a harmless no-op
-    // instead of failing to load a missing skill every 30 minutes. Swap this
-    // for the real classify -> checkProfileAndBlock (#163) / dispatchResearch-
-    // IfEligible (#170) call once the triage classifier lands.
+    // Daytime triage tick (F5 #170): classify each queued card, write back the
+    // blank classification fields, comment, and Block the unready ones. Same
+    // interception pattern as night-run — a card-execution/schedule trigger for
+    // `card-triage` matches no generic Routine skill. A resumed orphan triage
+    // execution (boot reconciliation) re-enters HERE (this branch precedes the
+    // resume logic below) and is closed without re-running a cycle.
     if (job.routineId === "card-triage" && job.trigger.type === "schedule") {
-      console.log("[Queue] card-triage tick: dispatch deferred (F2 triage skill not yet implemented)");
+      // executionId is only ever set on a boot-reconciliation re-enqueue of an
+      // orphaned per-card triage row (the cron scheduler never sets it). Close
+      // the orphan and skip the cycle: the next cron tick covers it within
+      // 30min, and running N accumulated orphans at boot would burn the whole
+      // day budget on startup.
+      if (job.trigger.executionId) {
+        if (pgPool) {
+          await pgPool.query(
+            `UPDATE executions SET status = 'failed', finished_at = NOW() WHERE id = $1 AND status = 'running'`,
+            [job.trigger.executionId]
+          );
+        }
+        console.log(`[Queue] card-triage orphan execution ${job.trigger.executionId} closed (no cycle re-run)`);
+        return;
+      }
+      if (!triageDeps) {
+        console.warn("[Queue] card-triage cron fired but triage is not wired (need DATABASE_URL + repos.yaml + a card task source)");
+        return;
+      }
+      const summary = await runTriageCycle(triageDeps);
+      console.log(`[Queue] Triage cycle: ${JSON.stringify(summary)}`);
       return;
     }
 
@@ -1076,6 +1098,25 @@ export const createApp = async (config: AppConfig) => {
     }
   } else {
     console.log("[App] Night coordinator not wired (need DATABASE_URL + GITHUB_TOKEN + repos.yaml)");
+  }
+
+  // Daytime triage wiring (F5 #170): gated independently of the night coordinator
+  // — it never opens a PR, so it needs no GitHub token, only a DB, a repo registry
+  // (for repo resolution), and at least one card task source to scan. Sources /
+  // taskSourceFor / excludeLabels are the SAME hoisted vars the night-run uses.
+  if (pgPool && repoRegistry && cardTaskSources && cardTaskSources.size > 0) {
+    triageDeps = {
+      pool: pgPool,
+      sources: [...cardTaskSources.keys()],
+      taskSourceFor: (id) => cardTaskSources?.get(id),
+      taskRepo: tacticalTasks,
+      registry: repoRegistry,
+      excludeLabels: nightExcludeLabels,
+      dayBudgetUsd: policy.day.budget_usd,
+    };
+    console.log("[App] Daytime triage wired (cron */30 8-23 * * *)");
+  } else {
+    console.log("[App] Daytime triage not wired (need DATABASE_URL + repos.yaml + a card task source)");
   }
 
   // 6b. Boot reconciliation (F3 #149): recover executions left `running` by a

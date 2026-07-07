@@ -26,5 +26,10 @@ night:
   budget_usd: 30
 day:
   max_auto_proposed_cards_per_week: 3
+  # Effort-unit ceiling for the whole day (same "_usd" convention as
+  # night.budget_usd — under subscription login these are effort units, not
+  # dollars; sonnet=1). Caps daytime triage LLM calls + same-day research so a
+  # busy queue can't drain the weekly rate-limit window before night.
+  budget_usd: 10
 backpressure:
   max_open_prs_per_repo: 3
