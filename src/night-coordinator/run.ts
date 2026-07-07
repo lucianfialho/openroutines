@@ -19,7 +19,8 @@ import { randomUUID } from "crypto";
 import { Effect } from "effect";
 import type { Pool } from "pg";
 import { acquireNightLock } from "./lock.js";
-import { claimReadyCards, type ClaimCandidate } from "./claim.js";
+import { claimReadyCards, type ClaimCandidate, type UnresolvedCard } from "./claim.js";
+import { matchRepoByLabels, suggestRepoSlug, type RepoResolution } from "../repo-registry/match.js";
 import { canOpenPr } from "./pr-cap.js";
 import { isWithinWindow, enforceHardStop } from "./hard-stop.js";
 import { makeGitHubConnector } from "../connector/github.js";
@@ -45,11 +46,20 @@ export interface NightSummary {
   reworkAdmitted?: number;
   /** Blocked cards resumed by human steering this night (F5 #169, D25). */
   blockedResumed?: number;
+  /** Cards moved to Blocked this night because their repo could not be resolved. */
+  cardsBlockedUnresolvable?: number;
 }
 
 export interface RunNightCycleDeps {
   pool: Pool;
   registry: RepoRegistry;
+  /**
+   * Flag-label names to ignore during label-based repo routing — the
+   * "OpenRoutines" flag EVERY card carries name-collides with the same-named
+   * repo and would otherwise hijack routing to it. app.ts fills this from the
+   * configured trello sources' container.flag.name.
+   */
+  excludeLabels?: string[];
   queue: JobQueue;
   executionRepo: ExecutionRepository;
   executionProcessRepo: ExecutionProcessRepository;
@@ -109,24 +119,31 @@ const extractRepoField = (body: string): string | undefined => {
 };
 
 /**
- * Resolve a claimed task's repo registry slug. The card's "Repositório" field is
- * the canonical target and WINS over labels: the system flag label
- * ("OpenRoutines", carried by EVERY card) collides with a repo of the same name
- * and would otherwise hijack routing to it. Labels are only a fallback for cards
- * that omit the field (a project label that happens to name a registered repo).
- * A field that is present but unresolvable returns undefined → the card routes
- * to Blocked elsewhere, rather than silently falling back to a name-colliding
- * label. Returns undefined (unresolvable) rather than guessing.
+ * Resolve a claimed task's repo registry slug into a RepoResolution.
+ *
+ * The card's "Repositório" field is the canonical target and takes precedence
+ * over labels: a field that is PRESENT never falls back to a label (a present-
+ * but-unknown field returns `field_unmatched` with a typo suggestion, so the
+ * card routes to Blocked with feedback instead of silently matching something
+ * else). Labels are the fallback only when the field is absent — and the flag-
+ * label collision (the "OpenRoutines" flag every card carries name-colliding
+ * with the same-named repo) is now resolved by `excludeLabels`, not merely by
+ * the field-wins rule: matchRepoByLabels skips the excluded flag and also
+ * honors repo aliases (RepoConfig.labels). No repo at all → `unresolved`.
  */
-export const resolveRepoForClaim = (registry: RepoRegistry) => (task: ClaimCandidate): string | undefined => {
-  const field = extractRepoField(task.body);
-  if (field) return matchRegistryKey(registry, field);
-  for (const label of task.labels) {
-    const key = matchRegistryKey(registry, label);
-    if (key) return key;
-  }
-  return undefined;
-};
+export const resolveRepoForClaim =
+  (registry: RepoRegistry, opts?: { excludeLabels?: string[] }) =>
+  (task: ClaimCandidate): RepoResolution => {
+    const field = extractRepoField(task.body);
+    if (field) {
+      const key = matchRegistryKey(registry, field);
+      if (key) return { ok: true, repo: key };
+      return { ok: false, reason: "field_unmatched", field, suggestion: suggestRepoSlug(registry, field) };
+    }
+    const repo = matchRepoByLabels(registry, task.labels, opts?.excludeLabels ?? []);
+    if (repo) return { ok: true, repo };
+    return { ok: false, reason: "unresolved" };
+  };
 
 const getBusyRepos = async (pool: Pool, nightId: string): Promise<Set<string>> => {
   // Any NON-TERMINAL execution occupies its repo (same-repo-in-series). A card
@@ -200,10 +217,18 @@ const syncQueuedCards = async (deps: RunNightCycleDeps): Promise<number> => {
         synced++;
       }
     } catch (err) {
-      console.error(
-        `[NightCoordinator] queue sync failed for source '${sourceId}':`,
-        err instanceof Error ? err.message : err
-      );
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[NightCoordinator] queue sync failed for source '${sourceId}':`, msg);
+      // A source that stops syncing (e.g. a renamed queue column) is otherwise
+      // invisible until the 07:30 report — alert best-effort, never let the
+      // alert itself abort the sync of the remaining sources.
+      try {
+        await (deps.sendAlert ?? sendTelegramAlert)(
+          `⚠️ [OpenRoutines] sincronização da fonte '${sourceId}' falhou: ${msg}`
+        );
+      } catch (alertErr) {
+        console.error(`[NightCoordinator] sync-fail alert also failed:`, alertErr instanceof Error ? alertErr.message : alertErr);
+      }
     }
   }
   return synced;
@@ -230,6 +255,70 @@ const blockExhaustedRework = async (deps: RunNightCycleDeps, link: PrLink): Prom
     { sourceId: link.sourceId, taskId: link.taskId, branch: link.branch },
     { reviewState: "rework-exhausted" }
   );
+};
+
+/** Alphabetical known-repo keys for the feedback comment, capped at 15 with an ellipsis. */
+const knownReposLine = (registry: RepoRegistry): string => {
+  const keys = Object.keys(registry.repos).sort();
+  const shown = keys.slice(0, 15).join(", ");
+  return keys.length > 15 ? `${shown}…` : shown;
+};
+
+/** pt-BR feedback posted on the card explaining WHY it couldn't be routed and HOW to unblock it. */
+const unresolvableComment = (registry: RepoRegistry, resolution: UnresolvedCard["resolution"]): string => {
+  const footer =
+    `\n\nRepositórios conhecidos: ${knownReposLine(registry)}.\n\n` +
+    `Para destravar: adicione à descrição uma linha "## Repositório" seguida do slug ` +
+    `(ou aplique a label do projeto) e mova o card de volta para a fila — ou responda aqui ` +
+    `com um comentário 🧭 com instruções que eu retomo na próxima noite.`;
+  if (resolution.reason === "field_unmatched") {
+    const suggestion = resolution.suggestion ? ` Você quis dizer "${resolution.suggestion}"?` : "";
+    return (
+      `🤖 [OpenRoutines] Não consegui rotear este card: o campo Repositório diz ` +
+      `"${resolution.field}", que não corresponde a nenhum repositório conhecido.${suggestion}${footer}`
+    );
+  }
+  return (
+    `🤖 [OpenRoutines] Não consegui identificar o repositório deste card: não há campo ` +
+    `"## Repositório" na descrição e nenhuma label corresponde a um repositório conhecido.${footer}`
+  );
+};
+
+/**
+ * Give an unroutable card feedback and move it to Blocked (F-block). `seen`
+ * dedups within the night — the drain's for(;;) re-surfaces the same unresolved
+ * card each pass until it leaves 'queued', and we must not re-comment it.
+ * Order: comment (best-effort) → moveTo → only if BOTH Trello calls succeed,
+ * flip the DB row to 'blocked' and release the claim stamp. Any Trello failure
+ * logs and leaves the card 'queued' for a clean retry next night — never crashes
+ * the night. Returns true the first time a card is handled (for the counter).
+ */
+const blockUnresolvableCard = async (
+  deps: RunNightCycleDeps,
+  item: UnresolvedCard,
+  seen: Set<string>
+): Promise<boolean> => {
+  const key = `${item.sourceId}:${item.taskId}`;
+  if (seen.has(key)) return false;
+  seen.add(key); // mark handled up front — covers success AND every failure branch below
+
+  const ts = deps.taskSourceFor?.(item.sourceId);
+  if (!ts) {
+    console.error(`[NightCoordinator] card ${key} unresolvable (${item.resolution.reason}) but no task source to notify`);
+    return true;
+  }
+  try {
+    await Effect.runPromise(ts.comment(item.taskId, unresolvableComment(deps.registry, item.resolution)));
+    await Effect.runPromise(ts.moveTo(item.taskId, "blocked"));
+    // moveTo succeeded → persist Blocked + release the (never-set here) claim stamp.
+    await deps.pool.query(
+      `UPDATE tasks SET state = 'blocked', claimed_by_night_id = NULL WHERE source_id = $1 AND task_id = $2 AND state = 'queued'`,
+      [item.sourceId, item.taskId]
+    );
+  } catch (err) {
+    console.error(`[NightCoordinator] failed to block unresolvable card ${key}:`, err instanceof Error ? err.message : err);
+  }
+  return true;
 };
 
 /**
@@ -341,8 +430,14 @@ const admitSteeredBlockedCards = async (
     if (rows.length === 0) continue;
     const body = String(rows[0].body ?? "");
     const labels = ((rows[0].labels as string[]) ?? []) as string[];
-    const repo = resolveRepoForClaim(deps.registry)({ sourceId: steering.sourceId, taskId: steering.taskId, body, labels });
-    if (!repo) continue; // unresolvable — leave unapplied, retry once the card names a repo
+    const resolution = resolveRepoForClaim(deps.registry, { excludeLabels: deps.excludeLabels })({
+      sourceId: steering.sourceId,
+      taskId: steering.taskId,
+      body,
+      labels,
+    });
+    if (!resolution.ok) continue; // unresolvable — leave unapplied, retry once the card names a repo
+    const repo = resolution.repo;
     if (busyRepos.has(repo)) continue; // same-repo-in-series
     // Atomic per-night claim (same as rework): the card keeps its ORIGINAL
     // night's claimed_by_night_id, so "not this night" means claimable.
@@ -456,12 +551,19 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
 
     let cardsClaimed = 0;
     let cardsEnqueued = 0;
+    let cardsBlockedUnresolvable = 0;
     let windowEnded = false;
     // Repos denied by per-repo backpressure this cycle. Excluded from further
     // claims so an unclaimed-on-denial card can't be re-claimed → denied → loop
     // forever (a livelock): once a repo is blocked, its cards stay unclaimed and
     // the drain terminates when nothing claimable remains.
     const blockedRepos = new Set<string>();
+    // Unresolvable cards already given feedback THIS night. The for(;;) below
+    // calls claimReadyCards repeatedly and an unroutable card keeps surfacing in
+    // `unresolved` until it leaves 'queued' (or Trello fails and it doesn't at
+    // all) — this dedups the comment/move to once per card per night.
+    const unresolvableFeedbackDone = new Set<string>();
+    const resolveRepo = resolveRepoForClaim(deps.registry, { excludeLabels: deps.excludeLabels });
 
     // 5. Drain the currently-claimable backlog. Bounded and fast by design (see
     // module docstring) — NOT a poll across the whole window.
@@ -476,10 +578,16 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
 
       const busyRepos = await getBusyRepos(deps.pool, nightId);
       for (const r of blockedRepos) busyRepos.add(r);
-      const claimed = await claimReadyCards(deps.pool, nightId, deps.nightParallelism, {
-        resolveRepo: resolveRepoForClaim(deps.registry),
+      const { claimed, unresolved } = await claimReadyCards(deps.pool, nightId, deps.nightParallelism, {
+        resolveRepo,
         busyRepos,
       });
+      // Feedback for unroutable cards runs BEFORE the drain-empty break — a
+      // backlog of ONLY unresolvable cards claims nothing yet must still be
+      // routed to Blocked with a comment.
+      for (const item of unresolved) {
+        if (await blockUnresolvableCard(deps, item, unresolvableFeedbackDone)) cardsBlockedUnresolvable++;
+      }
       if (claimed.length === 0) break; // nothing left to claim right now
       cardsClaimed += claimed.length;
 
@@ -593,7 +701,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
       });
     }
 
-    return { started: true, nightId, cardsSynced, cardsClaimed, cardsEnqueued, reworkAdmitted, blockedResumed };
+    return { started: true, nightId, cardsSynced, cardsClaimed, cardsEnqueued, cardsBlockedUnresolvable, reworkAdmitted, blockedResumed };
   } catch (err) {
     console.error(`[NightCoordinator] night cycle ${date} failed:`, err);
     await sendAlert(`🔥 night-run ${date} falhou: ${err instanceof Error ? err.message : String(err)}`);

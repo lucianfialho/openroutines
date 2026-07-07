@@ -12,7 +12,6 @@ repos:
       lint: npm run lint
       test: npm test -- --run
     compose: null
-    labels: [OpenRoutines]
   detectwater:
     clonePath: /home/openroutines/repos/detectwater.com.br
     # TODO(bootstrap): preencher owner real do repo landing
@@ -25,4 +24,4 @@ repos:
       lint: npm run lint
       test: echo "sem testes"
     compose: null
-    labels: [OpenRoutines]
+    labels: ["Detect Water"]

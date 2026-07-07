@@ -111,6 +111,38 @@ describe("makeTrelloTaskSource — listQueue", () => {
     expect(cards).toHaveLength(1);
     expect(cards[0].id).toBe("card-ours");
   });
+
+  it("does NOT filter cards without the OpenRoutines flag in a dedicated state (queued)", async () => {
+    // Moving a card into "OpenRoutines — Fila" is itself the opt-in — no
+    // flag label required, unlike the shared columns above.
+    const flagged = { ...rawCard, id: "card-ours", labels: [{ name: "OpenRoutines" }] };
+    const noFlag = { ...rawCard, id: "card-noflag", labels: [] };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, [{ id: "list-fila", name: "OpenRoutines — Fila" }]))
+      .mockResolvedValueOnce(jsonResponse(200, [flagged, noFlag]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const source = makeTrelloTaskSource(config);
+    const cards = await Effect.runPromise(source.listQueue("queued"));
+
+    expect(cards.map((c) => c.id)).toEqual(["card-ours", "card-noflag"]);
+  });
+
+  it("does NOT filter cards without the OpenRoutines flag in a dedicated state (working)", async () => {
+    const flagged = { ...rawCard, id: "card-ours", labels: [{ name: "OpenRoutines" }] };
+    const noFlag = { ...rawCard, id: "card-noflag", labels: [] };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, [{ id: "list-working", name: "OpenRoutines \u2014 Working" }]))
+      .mockResolvedValueOnce(jsonResponse(200, [flagged, noFlag]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const source = makeTrelloTaskSource(config);
+    const cards = await Effect.runPromise(source.listQueue("working"));
+
+    expect(cards.map((c) => c.id)).toEqual(["card-ours", "card-noflag"]);
+  });
 });
 
 describe("makeTrelloTaskSource — getTask", () => {
@@ -383,6 +415,48 @@ describe("makeTrelloTaskSource — watchNew", () => {
     expect(callUrl(fetchMock, 1).searchParams.get("filter")).toBe("createCard,updateCard:idList");
     expect(callUrl(fetchMock, 1).searchParams.get("since")).toBe("cursor-old");
     expect(callUrl(fetchMock, 1).searchParams.get("limit")).toBe("1000");
+  });
+
+  it("does NOT filter a card without the OpenRoutines flag that lands in the dedicated queued list", async () => {
+    // A card moved to "OpenRoutines — Fila" by hand, without ever adding the
+    // flag label — the dedicated state alone should surface it.
+    const actionsResponse = [{ id: "action-1", data: { card: { id: "card-noflag" }, listAfter: { id: "list-fila" } } }];
+    const cardNoFlagFixture = {
+      id: "card-noflag",
+      name: "Moved by hand",
+      desc: "",
+      shortUrl: "https://trello.com/c/noflag",
+      labels: [],
+      idMembers: [],
+      idList: "list-fila",
+      dateLastActivity: "2026-06-20T00:00:00.000Z",
+      customFieldItems: [],
+    };
+    const customFieldsResponse = [
+      { id: "cf-complexity", name: "Complexidade" },
+      { id: "cf-priority", name: "Prioridade" },
+    ];
+    const fullListsResponse = [
+      { id: "list-backlog", name: "Backlog" },
+      { id: "list-fila", name: "OpenRoutines — Fila" },
+      { id: "list-working", name: "OpenRoutines — Working" },
+      { id: "list-blocked", name: "Blocked" },
+      { id: "list-review", name: "Review" },
+      { id: "list-done", name: "Done" },
+    ];
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, fullListsResponse)) // resolve queued idList
+      .mockResolvedValueOnce(jsonResponse(200, actionsResponse))
+      .mockResolvedValueOnce(jsonResponse(200, cardNoFlagFixture)) // getTask(card-noflag)
+      .mockResolvedValueOnce(jsonResponse(200, customFieldsResponse));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const source = makeTrelloTaskSource(config);
+    const result = await Effect.runPromise(source.watchNew("cursor-old"));
+
+    expect(result.tasks.map((t) => t.id)).toEqual(["card-noflag"]);
   });
 
   it("watchNew(cursor) with no new actions returns the received cursor unchanged", async () => {

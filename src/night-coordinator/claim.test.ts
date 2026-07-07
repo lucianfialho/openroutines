@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
 import { claimReadyCards, type ClaimCandidate } from "./claim.js";
+import type { RepoResolution } from "../repo-registry/match.js";
 import { acquireNightLock } from "./lock.js";
 import { hasTestDb, makeTestPool, ensureSchema, uniqueDate, cleanupNight } from "../persistence/db.test-helpers.js";
 import type { Pool } from "pg";
@@ -19,10 +20,11 @@ const insertQueuedTask = async (
 };
 
 // Repo lives in the taskId prefix for the test (real coordinator derives it from the card's "Repositório" field).
-const repoByPrefix = (t: ClaimCandidate): string | undefined => {
+const repoByPrefix = (t: ClaimCandidate): RepoResolution => {
   const m = t.taskId.match(/^([a-z]+)-/);
-  return m ? m[1] : undefined;
+  return m ? { ok: true, repo: m[1] } : { ok: false, reason: "unresolved" };
 };
+const asRepo = (repo: string): RepoResolution => ({ ok: true, repo });
 
 describe.skipIf(!hasTestDb())("claimReadyCards (real DB, atomic)", () => {
   const pool = makeTestPool();
@@ -62,7 +64,7 @@ describe.skipIf(!hasTestDb())("claimReadyCards (real DB, atomic)", () => {
     await insertQueuedTask(pool, src, "repob-2");
     const nightId = await newNight();
 
-    const claimed = await claimReadyCards(pool, nightId, 2, { resolveRepo: repoByPrefix });
+    const { claimed } = await claimReadyCards(pool, nightId, 2, { resolveRepo: repoByPrefix });
 
     expect(claimed.length).toBeLessThanOrEqual(2);
     const repos = claimed.map((c) => c.repo);
@@ -78,7 +80,7 @@ describe.skipIf(!hasTestDb())("claimReadyCards (real DB, atomic)", () => {
     await insertQueuedTask(pool, src, "solo-3");
     const nightId = await newNight();
 
-    const claimed = await claimReadyCards(pool, nightId, 3, { resolveRepo: repoByPrefix });
+    const { claimed } = await claimReadyCards(pool, nightId, 3, { resolveRepo: repoByPrefix });
     expect(claimed).toHaveLength(1);
   });
 
@@ -89,21 +91,24 @@ describe.skipIf(!hasTestDb())("claimReadyCards (real DB, atomic)", () => {
     await insertQueuedTask(pool, src, "freeb-1");
     const nightId = await newNight();
 
-    const claimed = await claimReadyCards(pool, nightId, 2, {
+    const { claimed } = await claimReadyCards(pool, nightId, 2, {
       resolveRepo: repoByPrefix,
       busyRepos: new Set(["busya"]),
     });
     expect(claimed.map((c) => c.repo)).toEqual(["freeb"]);
   });
 
-  it("skips cards whose repo cannot be resolved", async () => {
+  it("skips cards whose repo cannot be resolved, surfacing them as `unresolved` (no claim)", async () => {
     const src = `s-${crypto.randomUUID()}`;
     sources.push(src);
-    await insertQueuedTask(pool, src, "norepocard"); // no prefix → resolveRepo undefined
+    await insertQueuedTask(pool, src, "norepocard"); // no prefix → resolveRepo not ok
     const nightId = await newNight();
 
-    const claimed = await claimReadyCards(pool, nightId, 2, { resolveRepo: repoByPrefix });
+    const { claimed, unresolved } = await claimReadyCards(pool, nightId, 2, { resolveRepo: repoByPrefix });
     expect(claimed).toHaveLength(0);
+    expect(unresolved).toEqual([
+      { sourceId: src, taskId: "norepocard", resolution: { ok: false, reason: "unresolved" } },
+    ]);
   });
 
   it("two concurrent coordinators racing for the same card produce exactly one winner", async () => {
@@ -117,7 +122,7 @@ describe.skipIf(!hasTestDb())("claimReadyCards (real DB, atomic)", () => {
       claimReadyCards(pool, nightA, 1, { resolveRepo: repoByPrefix }),
       claimReadyCards(pool, nightB, 1, { resolveRepo: repoByPrefix }),
     ]);
-    expect(a.length + b.length).toBe(1); // the card is claimed once, by one night only
+    expect(a.claimed.length + b.claimed.length).toBe(1); // the card is claimed once, by one night only
   });
 
   it("orders by priority then complexity", async () => {
@@ -128,8 +133,8 @@ describe.skipIf(!hasTestDb())("claimReadyCards (real DB, atomic)", () => {
     const nightId = await newNight();
 
     // Two different repos so both are claimable; the high-priority one comes first.
-    const claimed = await claimReadyCards(pool, nightId, 1, {
-      resolveRepo: (t) => t.taskId, // each card its own repo
+    const { claimed } = await claimReadyCards(pool, nightId, 1, {
+      resolveRepo: (t) => asRepo(t.taskId), // each card its own repo
     });
     expect(claimed[0].taskId).toBe("ord-high");
   });
@@ -142,10 +147,33 @@ describe.skipIf(!hasTestDb())("claimReadyCards (real DB, atomic)", () => {
     await insertQueuedTask(pool, src, "cx-bogus", { complexity: "not-a-real-value" });
     const nightId = await newNight();
 
-    const claimed = await claimReadyCards(pool, nightId, 3, { resolveRepo: (t) => t.taskId });
+    const { claimed } = await claimReadyCards(pool, nightId, 3, { resolveRepo: (t) => asRepo(t.taskId) });
     const byId = Object.fromEntries(claimed.map((c) => [c.taskId, c.complexity]));
     expect(byId["cx-lowest"]).toBe("lowest");
     expect(byId["cx-none"]).toBeUndefined();
     expect(byId["cx-bogus"]).toBeUndefined();
+  });
+});
+
+// Mock-pool cases that run WITHOUT a test DB — they exercise only the pure
+// claimed/unresolved split, not the atomic UPDATE (covered by the real-DB block).
+describe("claimReadyCards — unresolved surfacing (mock pool)", () => {
+  const row = (taskId: string) => ({ source_id: "s", task_id: taskId, body: "", labels: [], priority: null, complexity: null });
+  const fakePool = (rows: Array<Record<string, unknown>>): Pool =>
+    ({ query: async (sql: string) => (/^\s*SELECT/i.test(sql) ? { rows } : { rows: [{}] }) } as unknown as Pool);
+
+  it("returns unresolvable candidates in `unresolved` with their RepoResolution, never claiming them", async () => {
+    const resolution: RepoResolution = { ok: false, reason: "field_unmatched", field: "nope", suggestion: "beta-app" };
+    const { claimed, unresolved } = await claimReadyCards(fakePool([row("c1")]), "n1", 2, { resolveRepo: () => resolution });
+    expect(claimed).toHaveLength(0);
+    expect(unresolved).toEqual([{ sourceId: "s", taskId: "c1", resolution }]);
+  });
+
+  it("claims the resolvable ones and surfaces the unresolvable ones side by side", async () => {
+    const { claimed, unresolved } = await claimReadyCards(fakePool([row("good"), row("bad")]), "n1", 5, {
+      resolveRepo: (t) => (t.taskId === "good" ? { ok: true, repo: "widgets" } : { ok: false, reason: "unresolved" }),
+    });
+    expect(claimed.map((c) => c.taskId)).toEqual(["good"]);
+    expect(unresolved.map((u) => u.taskId)).toEqual(["bad"]);
   });
 });

@@ -14,6 +14,7 @@
  */
 import type { Pool } from "pg";
 import { TASK_COMPLEXITIES, type TaskComplexity } from "../task-source/types.js";
+import type { RepoResolution } from "../repo-registry/match.js";
 
 export interface ClaimedCard {
   sourceId: string;
@@ -34,15 +35,22 @@ export interface ClaimCandidate {
 const PRIORITY_RANK: Record<string, number> = { highest: 0, high: 1, medium: 2, low: 3, lowest: 4 };
 const COMPLEXITY_RANK: Record<string, number> = { lowest: 0, low: 1, medium: 2, high: 3, highest: 4, not_sure: 5 };
 
+/** A candidate whose repo could not be resolved — the caller routes it to Blocked (no DB claim happened). */
+export interface UnresolvedCard {
+  sourceId: string;
+  taskId: string;
+  resolution: Exclude<RepoResolution, { ok: true }>;
+}
+
 export const claimReadyCards = async (
   pool: Pool,
   nightId: string,
   limit: number,
   opts: {
-    resolveRepo: (task: ClaimCandidate) => string | undefined;
+    resolveRepo: (task: ClaimCandidate) => RepoResolution;
     busyRepos?: Set<string>;
   }
-): Promise<ClaimedCard[]> => {
+): Promise<{ claimed: ClaimedCard[]; unresolved: UnresolvedCard[] }> => {
   const { rows } = await pool.query(
     `SELECT source_id, task_id, body, labels, priority, complexity
      FROM tasks
@@ -72,19 +80,26 @@ export const claimReadyCards = async (
     );
 
   const claimed: ClaimedCard[] = [];
+  const unresolved: UnresolvedCard[] = [];
   // Seed with busy repos so a repo already running is skipped, and add each
   // picked repo so no two cards of the same repo land in one parallel batch.
   const pickedRepos = new Set<string>(opts.busyRepos ?? []);
 
   for (const c of candidates) {
     if (claimed.length >= limit) break;
-    const repo = opts.resolveRepo({
+    const resolution = opts.resolveRepo({
       sourceId: c.sourceId,
       taskId: c.taskId,
       body: c.body,
       labels: c.labels,
     });
-    if (!repo) continue; // unresolvable repo — coordinator routes these to Blocked separately
+    if (!resolution.ok) {
+      // Unresolvable repo — surface it (no DB claim); the coordinator posts
+      // feedback and moves it to Blocked, deduped across the drain's retries.
+      unresolved.push({ sourceId: c.sourceId, taskId: c.taskId, resolution });
+      continue;
+    }
+    const repo = resolution.repo;
     if (pickedRepos.has(repo)) continue; // busy or already picked this batch (same repo in series)
 
     const upd = await pool.query(
@@ -99,5 +114,5 @@ export const claimReadyCards = async (
     claimed.push({ sourceId: c.sourceId, taskId: c.taskId, repo, complexity: c.complexity });
   }
 
-  return claimed;
+  return { claimed, unresolved };
 };

@@ -6,6 +6,12 @@
  * night's verify baseline. Worktree setup is idempotent: a retry only reuses
  * what's on disk when git itself confirms it's still a live worktree on the
  * card's branch, otherwise it force-recreates from scratch.
+ * Reuse preserves any local commits already on the worktree (crash-resume, or
+ * a card back from Blocked/steering re-entering with commits from a previous
+ * attempt) — baseSha is the merge-base with the integration branch (rework.ts's
+ * pattern), never raw HEAD, so those commits stay INSIDE the boundary
+ * verify/SAST/review diff against instead of silently becoming "base". For a
+ * freshly created worktree this is equal to HEAD (no behavior change there).
  * The main branch is protected by CONSTRUCTION, not by
  * a GitHub-side preflight: schema.ts forbids baseBranch being main/master and
  * pr.ts refuses to open a PR against main/master — so the pipeline never targets
@@ -102,8 +108,14 @@ export const makePreparation = (deps: CardToPrDeps): ScriptHandler => async (ctx
   // no-op once already merged in.
   ensureIgnoreScripts({ worktree: worktreePath });
 
-  const { stdout } = await runGit(["rev-parse", "HEAD"], worktreePath);
-  const baseSha = stdout.trim();
+  // Diff base for verify/SAST/review: merge-base with the integration branch
+  // (same as rework.ts), not raw HEAD — a REUSED worktree can carry local
+  // commits from a previous attempt, and merge-base keeps those inside the
+  // reviewed diff instead of letting them become invisible "base". For a
+  // freshly created worktree this equals HEAD (its tip is an ancestor of
+  // origin/<baseBranch>), so no behavior change on that path.
+  const { stdout: baseOut } = await runGit(["merge-base", "HEAD", `origin/${repoConfig.baseBranch}`], worktreePath);
+  const baseSha = baseOut.trim();
 
   let baselineResults: VerifyResults | null = null;
   if (nightId && deps.pool) {

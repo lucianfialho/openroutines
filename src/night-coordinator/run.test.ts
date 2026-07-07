@@ -32,29 +32,67 @@ const registry: RepoRegistry = {
 
 const cardBody = (repo: string) => `# Conceito\nAlgo a fazer\n\n## Repositório\n${repo}\n\n## Objetivo\nFazer\n`;
 
-describe("resolveRepoForClaim — o campo Repositório vence a label de flag", () => {
+describe("resolveRepoForClaim — campo vence a label; excludeLabels resolve a colisão da flag", () => {
+  const cfg = (over: Record<string, unknown> = {}) => ({
+    clonePath: "/tmp/x",
+    githubRepo: "org/x",
+    baseBranch: "development",
+    verify: { build: "true", test: "true" },
+    ...over,
+  });
   // "openroutines" colide de propósito com a label de flag do sistema.
   const reg: RepoRegistry = {
     repos: {
-      openroutines: { clonePath: "/tmp/openroutines", githubRepo: "org/openroutines", baseBranch: "development", verify: { build: "true", test: "true" } },
-      "openroutines-sandbox": { clonePath: "/tmp/sandbox", githubRepo: "org/sandbox", baseBranch: "development", verify: { build: "true", test: "true" } },
-      "beta-app": { clonePath: "/tmp/beta-app", githubRepo: "org/beta", baseBranch: "development", verify: { build: "true", test: "true" } },
+      openroutines: cfg(),
+      "openroutines-sandbox": cfg(),
+      "beta-app": cfg(),
+      detectwater: cfg({ labels: ["Detect Water"] }),
     },
-  };
+  } as unknown as RepoRegistry;
   const resolve = resolveRepoForClaim(reg);
+  const resolveNoFlag = resolveRepoForClaim(reg, { excludeLabels: ["OpenRoutines"] });
+  const task = (body: string, labels: string[]) => ({ sourceId: "s", taskId: "t", body, labels });
 
   it("usa o campo, não a label de flag que colide com um repo de mesmo nome", () => {
-    expect(resolve({ sourceId: "s", taskId: "t", body: cardBody("openroutines-sandbox"), labels: ["OpenRoutines"] })).toBe(
-      "openroutines-sandbox"
-    );
+    expect(resolve(task(cardBody("openroutines-sandbox"), ["OpenRoutines"]))).toEqual({ ok: true, repo: "openroutines-sandbox" });
   });
 
   it("cai na label de projeto quando o card não declara o campo Repositório", () => {
-    expect(resolve({ sourceId: "s", taskId: "t", body: "# Conceito\nsem campo\n", labels: ["beta-app"] })).toBe("beta-app");
+    expect(resolve(task("# Conceito\nsem campo\n", ["beta-app"]))).toEqual({ ok: true, repo: "beta-app" });
   });
 
-  it("campo presente mas não registrado → undefined (Blocked), sem cair na label colidente", () => {
-    expect(resolve({ sourceId: "s", taskId: "t", body: cardBody("repo-inexistente"), labels: ["OpenRoutines"] })).toBeUndefined();
+  it("resolve via alias de repo (RepoConfig.labels), retornando a CHAVE", () => {
+    expect(resolve(task("sem campo", ["Detect Water"]))).toEqual({ ok: true, repo: "detectwater" });
+  });
+
+  it("SEM excludeLabels a label de flag sequestra o roteamento para o repo homônimo (o bug)", () => {
+    expect(resolve(task("sem campo", ["OpenRoutines"]))).toEqual({ ok: true, repo: "openroutines" });
+  });
+
+  it("COM excludeLabels a flag é ignorada → unresolved", () => {
+    expect(resolveNoFlag(task("sem campo", ["OpenRoutines"]))).toEqual({ ok: false, reason: "unresolved" });
+  });
+
+  it("campo presente mas não registrado → field_unmatched (Blocked), sem cair na label colidente", () => {
+    expect(resolve(task(cardBody("repo-inexistente"), ["OpenRoutines"]))).toMatchObject({
+      ok: false,
+      reason: "field_unmatched",
+      field: "repo-inexistente",
+    });
+  });
+
+  it("typo no campo gera suggestion", () => {
+    expect(resolve(task(cardBody("openroutine"), []))).toEqual({
+      ok: false,
+      reason: "field_unmatched",
+      field: "openroutine",
+      suggestion: "openroutines",
+    });
+  });
+
+  it("label ambígua entre 2 repos não resolve (unresolved)", () => {
+    const ambig = { repos: { one: cfg({ labels: ["shared"] }), two: cfg({ labels: ["shared"] }) } } as unknown as RepoRegistry;
+    expect(resolveRepoForClaim(ambig)(task("sem campo", ["shared"]))).toEqual({ ok: false, reason: "unresolved" });
   });
 });
 
@@ -213,6 +251,39 @@ describe("runNightCycle", () => {
       skill: "card-to-pr",
     });
     expect(pool.insertedExecutions).toHaveLength(1);
+  });
+
+  it("passa deps.excludeLabels ao roteamento do claim: a flag \u00e9 ignorada e a label de projeto vence", async () => {
+    // Registry with the deliberate flag/repo name collision.
+    const collisionRegistry: RepoRegistry = {
+      repos: {
+        ...registry.repos,
+        openroutines: {
+          clonePath: "/tmp/openroutines",
+          githubRepo: "acme/openroutines",
+          baseBranch: "development",
+          verify: { build: "true", test: "true" },
+        },
+      },
+    };
+    const pool = makeMockPool({
+      lockGranted: true,
+      // No "## Reposit\u00f3rio" field: routing falls back to labels, where the
+      // flag comes FIRST and would hijack to the same-named repo unless
+      // deps.excludeLabels reaches the claim loop's resolver.
+      queuedTasks: [
+        { source_id: "trello-main", task_id: "card1", body: "# Conceito\nsem campo\n", labels: ["OpenRoutines", "beta-app"] },
+      ],
+      taskContent: { "trello-main:card1": { title: "Card", body: "# Conceito\nsem campo\n" } },
+    });
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue, registry: collisionRegistry, excludeLabels: ["OpenRoutines"] });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.cardsClaimed).toBe(1);
+    expect(queue.jobs).toHaveLength(1);
+    expect(queue.jobs[0].trigger.payload).toMatchObject({ repo: "beta-app" });
   });
 
   it("F4 #185: carries the card's complexity and an 'altaImpl' label through to the enqueued payload", async () => {
@@ -729,5 +800,101 @@ describe("runNightCycle — D22/F4 #186 Telegram alert on night-run crash", () =
     expect(sendAlert.mock.calls[0][0]).toContain("night-run");
     expect(sendAlert.mock.calls[0][0]).toContain("falhou");
     expect(sendAlert.mock.calls[0][0]).toContain("claim query exploded");
+  });
+});
+
+describe("runNightCycle — F-block: feedback + Blocked para card com repo não resolvível", () => {
+  const makeTs = (moveTo = vi.fn(() => Effect.succeed(undefined))) => {
+    const comment = vi.fn(() => Effect.succeed(undefined));
+    return { ts: { moveTo, comment } as unknown as ReturnType<NonNullable<RunNightCycleDeps["taskSourceFor"]>>, moveTo, comment };
+  };
+
+  it("posta o comentário 1x e move para Blocked, sem repetir na mesma noite (o for(;;) chama claimReadyCards várias vezes)", async () => {
+    // "a-unresolvable" ordena antes de "b-widgets" (localeCompare do taskId);
+    // com nightParallelism=1 o drain roda 2 iterações e o card irresolvível
+    // reaparece na 2ª — o Set deve suprimir o 2º comentário.
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [
+        { source_id: "trello-main", task_id: "a-unresolvable", body: "sem campo de repo aqui", labels: [] },
+        { source_id: "trello-main", task_id: "b-widgets", body: cardBody("acme-widgets"), labels: [] },
+      ],
+      taskContent: { "trello-main:b-widgets": { title: "t", body: cardBody("acme-widgets") } },
+    });
+    const { ts, moveTo, comment } = makeTs();
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue, nightParallelism: 1, taskSourceFor: () => ts });
+
+    const summary = await runNightCycle(deps);
+
+    expect(comment).toHaveBeenCalledTimes(1);
+    expect(comment.mock.calls[0][0]).toBe("a-unresolvable");
+    expect(comment.mock.calls[0][1]).toContain("Não consegui identificar o repositório");
+    expect(comment.mock.calls[0][1]).toContain("Repositórios conhecidos:");
+    expect(moveTo).toHaveBeenCalledTimes(1);
+    expect(moveTo).toHaveBeenCalledWith("a-unresolvable", "blocked");
+    expect(summary.cardsBlockedUnresolvable).toBe(1);
+    expect(summary.cardsEnqueued).toBe(1); // o card resolvível seguiu normalmente
+  });
+
+  it("comentário de field_unmatched cita o campo e a sugestão de typo", async () => {
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [{ source_id: "trello-main", task_id: "c1", body: cardBody("acme-widget"), labels: [] }], // typo de acme-widgets
+    });
+    const { ts, comment } = makeTs();
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue, taskSourceFor: () => ts });
+
+    const summary = await runNightCycle(deps);
+
+    expect(comment).toHaveBeenCalledTimes(1);
+    const text = comment.mock.calls[0][1] as string;
+    expect(text).toContain('o campo Repositório diz "acme-widget"');
+    expect(text).toContain('Você quis dizer "acme-widgets"?');
+    expect(summary.cardsBlockedUnresolvable).toBe(1);
+  });
+
+  it("moveTo falhando deixa o card na fila: tasks.state NÃO muda (nenhum UPDATE state='blocked')", async () => {
+    const pool = makeMockPool({
+      lockGranted: true,
+      queuedTasks: [{ source_id: "trello-main", task_id: "a-unresolvable", body: "sem repo", labels: [] }],
+    });
+    const { ts, comment, moveTo } = makeTs(vi.fn(() => Effect.fail(new Error("trello down"))));
+    const queue = makeFakeQueue();
+    const deps = baseDeps(pool, { queue, taskSourceFor: () => ts });
+
+    const summary = await runNightCycle(deps);
+
+    expect(comment).toHaveBeenCalledTimes(1);
+    expect(moveTo).toHaveBeenCalledTimes(1); // tentado...
+    // ...mas falhou, então o UPDATE que muda o state para 'blocked' nunca roda.
+    const blockedUpdate = pool.query.mock.calls.find((call) => String(call[0]).includes("state = 'blocked'"));
+    expect(blockedUpdate).toBeUndefined();
+    expect(summary.started).toBe(true); // a noite não quebrou
+  });
+});
+
+describe("runNightCycle — F(E)-block: alerta best-effort quando a sincronização da fonte falha", () => {
+  it("uma fonte que falha ao listar a fila dispara sendAlert e a noite segue", async () => {
+    const pool = makeMockPool({ lockGranted: true });
+    const sendAlert = vi.fn(async () => {});
+    const taskSource = {
+      listQueue: () => Effect.fail(new Error("coluna 'Fila' não existe")),
+    } as unknown as ReturnType<NonNullable<RunNightCycleDeps["taskSourceFor"]>>;
+    const taskRepo = {
+      save: async () => {},
+      findByKey: async () => undefined,
+      findBySource: async () => [],
+    } as unknown as RunNightCycleDeps["taskRepo"];
+    const deps = baseDeps(pool, { sources: ["trello-main"], taskSourceFor: () => taskSource, taskRepo, sendAlert });
+
+    const summary = await runNightCycle(deps);
+
+    expect(summary.started).toBe(true); // sync best-effort não aborta a noite
+    expect(summary.cardsSynced).toBe(0);
+    expect(sendAlert).toHaveBeenCalledTimes(1);
+    expect(sendAlert.mock.calls[0][0]).toContain("trello-main");
+    expect(sendAlert.mock.calls[0][0]).toContain("coluna 'Fila' não existe");
   });
 });

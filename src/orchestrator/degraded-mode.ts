@@ -119,9 +119,15 @@ const toRepoLookup = (task: Pick<Task, "sourceId" | "id" | "body" | "labels">) =
   labels: task.labels,
 });
 
-/** Same labels-first-then-Repositório-field resolution night-coordinator/run.ts uses to claim a card — reused, not re-derived. */
-export const resolveTaskRepoSlug = (registry: RepoRegistry, task: Task): string | undefined =>
-  resolveRepoForClaim(registry)(toRepoLookup(task));
+/** Same field-then-labels resolution night-coordinator/run.ts uses to claim a card — reused, not re-derived. */
+export const resolveTaskRepoSlug = (
+  registry: RepoRegistry,
+  task: Task,
+  opts?: { excludeLabels?: string[] }
+): string | undefined => {
+  const resolution = resolveRepoForClaim(registry, opts)(toRepoLookup(task));
+  return resolution.ok ? resolution.repo : undefined;
+};
 
 // ---- Find-or-create the repo's Mapping card ---------------------------------
 

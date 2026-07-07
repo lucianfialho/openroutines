@@ -76,6 +76,12 @@ interface CustomFieldDef {
   options?: Array<{ id: string; value: { text: string } }>;
 }
 
+// .gates/connectors/trello/connector.yaml: "the two OpenRoutines — * columns
+// are dedicated to this system" (unlike Backlog/Blocked/Review/Done, shared
+// with the human team). Moving a card into one of these two lists IS the
+// opt-in, so the flag filter below only applies to the shared states.
+const DEDICATED_STATES = new Set<TaskState>(["queued", "working"]);
+
 export const makeTrelloTaskSource = (config: TrelloConfig): TaskSource => {
   const baseUrl = config.manifest.baseUrl ?? "https://api.trello.com/1";
   const nameCache = createNameCache();
@@ -87,6 +93,9 @@ export const makeTrelloTaskSource = (config: TrelloConfig): TaskSource => {
   const flagName =
     config.manifest.container?.flag?.kind === "label" ? config.manifest.container.flag.name : undefined;
   const carriesFlag = (labelNames: string[]): boolean => !flagName || labelNames.includes(flagName);
+  // Dedicated states skip the flag check entirely (DEDICATED_STATES above).
+  const passesFlagFilter = (state: TaskState, labelNames: string[]): boolean =>
+    DEDICATED_STATES.has(state) || carriesFlag(labelNames);
 
   const authQuery = (): Params => ({ key: config.apiKey, token: config.apiToken });
 
@@ -262,7 +271,7 @@ export const makeTrelloTaskSource = (config: TrelloConfig): TaskSource => {
         fields: "id,name,desc,shortUrl,labels,idMembers,dateLastActivity",
       })) as TrelloCard[];
       return raw
-        .filter((card) => carriesFlag(card.labels.map((l) => l.name)))
+        .filter((card) => passesFlagFilter(state, card.labels.map((l) => l.name)))
         .map((card) => ({ ...baseFields(card), state }));
     });
 
@@ -416,9 +425,12 @@ export const makeTrelloTaskSource = (config: TrelloConfig): TaskSource => {
       const tasks: Task[] = [];
       for (const cardId of cardIds) {
         const task = yield* getTask(cardId);
-        // A card may have entered the queued list without the system flag
-        // (e.g. a team card moved by hand) — only surface flagged ones.
-        if (carriesFlag(task.labels)) tasks.push(task);
+        // task.state reflects the card's CURRENT list (stateForList inside
+        // getTask), not necessarily the queued list from the action above —
+        // the card may have moved again before this poll ran. Dedicated
+        // states (queued/working) skip the flag check, same as listQueue; a
+        // card that moved on to a shared column still needs it.
+        if (passesFlagFilter(task.state, task.labels)) tasks.push(task);
       }
 
       // Trello returns board actions newest-first by default.

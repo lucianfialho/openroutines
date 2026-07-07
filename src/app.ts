@@ -596,6 +596,10 @@ export const createApp = async (config: AppConfig) => {
   // (outside the `if (config.githubToken)` block where resolvedSources lives)
   // needs board + key + token + sourceId to read comments and seed cards.
   let trelloSteeringConfig: { boardId: string; apiKey: string; apiToken: string; sourceId: string } | undefined;
+  // Hoisted flag-label names: the container.flag.name of every configured
+  // trello source, excluded from label-based repo routing so the "OpenRoutines"
+  // flag every card carries never hijacks routing to the same-named repo.
+  let nightExcludeLabels: string[] = [];
 
   if (config.githubToken) {
     // git_commit is commit-only (no push — D13, the orchestrator owns the
@@ -649,6 +653,17 @@ export const createApp = async (config: AppConfig) => {
           sourceId: trelloEntry.entry.id,
         };
       }
+
+      // Flag-label names (container.flag.name) across ALL trello sources — the
+      // night coordinator excludes these from label-based repo routing.
+      nightExcludeLabels = [
+        ...new Set(
+          resolvedSources
+            .filter((s) => s.entry.type === "trello" && s.manifest.container?.flag?.kind === "label")
+            .map((s) => s.manifest.container?.flag?.name)
+            .filter((n): n is string => !!n)
+        ),
+      ];
 
       // One action ledger shared by every pipeline that fires idempotent
       // external effects (card-to-pr PR/push/handoff, card-research delivery,
@@ -985,6 +1000,7 @@ export const createApp = async (config: AppConfig) => {
     nightCoordinatorDeps = {
       pool: pgPool,
       registry: repoRegistry,
+      excludeLabels: nightExcludeLabels,
       queue,
       executionRepo: persistence,
       // Guaranteed defined: executionProcessRepository is built from this same

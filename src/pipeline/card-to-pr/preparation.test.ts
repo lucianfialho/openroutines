@@ -52,7 +52,9 @@ describe("makePreparation", () => {
     const worktreePath = "/tmp/or-preparation-test-worktrees/card-t1";
     rmSync(worktreePath, { recursive: true, force: true });
 
-    const runGit = vi.fn(async (args: string[]) => (args[0] === "rev-parse" ? { stdout: "abc123\n", stderr: "" } : { stdout: "", stderr: "" }));
+    const runGit = vi.fn(async (args: string[]) =>
+      args[0] === "rev-parse" || args[0] === "merge-base" ? { stdout: "abc123\n", stderr: "" } : { stdout: "", stderr: "" }
+    );
     const handler = makePreparation(baseDeps({ runGit }));
 
     try {
@@ -80,6 +82,7 @@ describe("makePreparation", () => {
       calls.push({ args, cwd });
       if (args[0] === "rev-parse" && args.includes("--abbrev-ref")) throw new Error("fatal: not a git repository");
       if (args[0] === "rev-parse") return { stdout: "abc123\n", stderr: "" };
+      if (args[0] === "merge-base") return { stdout: "abc123\n", stderr: "" };
       return { stdout: "", stderr: "" };
     });
     const handler = makePreparation(baseDeps({ runGit }));
@@ -97,21 +100,29 @@ describe("makePreparation", () => {
         args: ["worktree", "add", "-b", "openroutines/card-t1", worktreePath, "development"],
         cwd: clonePath,
       });
+      // New worktree (no reuse): baseSha comes from the SAME merge-base(HEAD, origin/<baseBranch>)
+      // call the reuse path makes — mathematically equal to HEAD here since the freshly created
+      // branch's tip is an ancestor of origin/<baseBranch> (no behavior change from before this fix).
+      expect(calls).toContainEqual({ args: ["merge-base", "HEAD", "origin/development"], cwd: worktreePath });
+      const addIdx = calls.findIndex((c) => c.args[0] === "worktree" && c.args[1] === "add");
+      const mergeBaseIdx = calls.findIndex((c) => c.args[0] === "merge-base");
+      expect(mergeBaseIdx).toBeGreaterThan(addIdx); // the worktree must exist before merge-base can run in it
     } finally {
       rmSync(worktreePath, { recursive: true, force: true });
     }
   });
 
-  it("idempotent retry: reuses the worktree untouched (no remove/add/branch -D) when it's already checked out on the card's branch", async () => {
+  it("idempotent retry: reuses the worktree untouched (no remove/add/branch -D) when it's already checked out on the card's branch, and baseSha is the merge-base with origin/<baseBranch> — not raw HEAD — so local commits from a previous attempt (e.g. a card back from Blocked) stay inside the review boundary", async () => {
     const worktreePath = "/tmp/or-preparation-test-worktrees/card-t1";
     rmSync(worktreePath, { recursive: true, force: true });
-    mkdirSync(worktreePath, { recursive: true }); // simulates a crash-resume: worktree already live on `branch`
+    mkdirSync(worktreePath, { recursive: true }); // simulates reuse: worktree already live on `branch`, with local commits ahead of origin from a prior attempt
 
     const calls: Array<{ args: string[]; cwd: string }> = [];
     const runGit = vi.fn(async (args: string[], cwd: string) => {
       calls.push({ args, cwd });
       if (args[0] === "rev-parse" && args.includes("--abbrev-ref")) return { stdout: "openroutines/card-t1\n", stderr: "" };
-      if (args[0] === "rev-parse") return { stdout: "abc123\n", stderr: "" };
+      if (args[0] === "rev-parse") return { stdout: "rawhead-with-local-commits\n", stderr: "" }; // must NOT be used as baseSha
+      if (args[0] === "merge-base") return { stdout: "mergebasesha777\n", stderr: "" };
       return { stdout: "", stderr: "" };
     });
     const handler = makePreparation(baseDeps({ runGit }));
@@ -123,6 +134,8 @@ describe("makePreparation", () => {
       expect(calls.some((c) => c.args[0] === "worktree" && c.args[1] === "remove")).toBe(false);
       expect(calls.some((c) => c.args[0] === "worktree" && c.args[1] === "add")).toBe(false);
       expect(calls.some((c) => c.args[0] === "branch" && c.args[1] === "-D")).toBe(false);
+      expect(r.baseSha).toBe("mergebasesha777");
+      expect(calls).toContainEqual({ args: ["merge-base", "HEAD", "origin/development"], cwd: worktreePath });
     } finally {
       rmSync(worktreePath, { recursive: true, force: true });
     }
