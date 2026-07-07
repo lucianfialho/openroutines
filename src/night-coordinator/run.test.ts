@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { Effect } from "effect";
-import { runNightCycle, type RunNightCycleDeps } from "./run.js";
+import { runNightCycle, resolveRepoForClaim, type RunNightCycleDeps } from "./run.js";
 import { makeInMemoryPrLinkRepository } from "../persistence/pr-links-in-memory.js";
 import { makeInMemoryCardSteeringRepository } from "../persistence/card-steering-in-memory.js";
 import type { RepoRegistry } from "../repo-registry/schema.js";
@@ -31,6 +31,32 @@ const registry: RepoRegistry = {
 };
 
 const cardBody = (repo: string) => `# Conceito\nAlgo a fazer\n\n## Repositório\n${repo}\n\n## Objetivo\nFazer\n`;
+
+describe("resolveRepoForClaim — o campo Repositório vence a label de flag", () => {
+  // "openroutines" colide de propósito com a label de flag do sistema.
+  const reg: RepoRegistry = {
+    repos: {
+      openroutines: { clonePath: "/tmp/openroutines", githubRepo: "org/openroutines", baseBranch: "development", verify: { build: "true", test: "true" } },
+      "openroutines-sandbox": { clonePath: "/tmp/sandbox", githubRepo: "org/sandbox", baseBranch: "development", verify: { build: "true", test: "true" } },
+      "beta-app": { clonePath: "/tmp/beta-app", githubRepo: "org/beta", baseBranch: "development", verify: { build: "true", test: "true" } },
+    },
+  };
+  const resolve = resolveRepoForClaim(reg);
+
+  it("usa o campo, não a label de flag que colide com um repo de mesmo nome", () => {
+    expect(resolve({ sourceId: "s", taskId: "t", body: cardBody("openroutines-sandbox"), labels: ["OpenRoutines"] })).toBe(
+      "openroutines-sandbox"
+    );
+  });
+
+  it("cai na label de projeto quando o card não declara o campo Repositório", () => {
+    expect(resolve({ sourceId: "s", taskId: "t", body: "# Conceito\nsem campo\n", labels: ["beta-app"] })).toBe("beta-app");
+  });
+
+  it("campo presente mas não registrado → undefined (Blocked), sem cair na label colidente", () => {
+    expect(resolve({ sourceId: "s", taskId: "t", body: cardBody("repo-inexistente"), labels: ["OpenRoutines"] })).toBeUndefined();
+  });
+});
 
 interface MockTask {
   source_id: string;

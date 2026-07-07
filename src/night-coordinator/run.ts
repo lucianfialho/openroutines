@@ -109,18 +109,23 @@ const extractRepoField = (body: string): string | undefined => {
 };
 
 /**
- * Resolve a claimed task's repo registry slug: labels first (a project label
- * that happens to name a registered repo), then the card's Repositório field.
- * Returns undefined (unresolvable — the card routes to Blocked elsewhere, not
- * this wave's concern) rather than guessing.
+ * Resolve a claimed task's repo registry slug. The card's "Repositório" field is
+ * the canonical target and WINS over labels: the system flag label
+ * ("OpenRoutines", carried by EVERY card) collides with a repo of the same name
+ * and would otherwise hijack routing to it. Labels are only a fallback for cards
+ * that omit the field (a project label that happens to name a registered repo).
+ * A field that is present but unresolvable returns undefined → the card routes
+ * to Blocked elsewhere, rather than silently falling back to a name-colliding
+ * label. Returns undefined (unresolvable) rather than guessing.
  */
 export const resolveRepoForClaim = (registry: RepoRegistry) => (task: ClaimCandidate): string | undefined => {
+  const field = extractRepoField(task.body);
+  if (field) return matchRegistryKey(registry, field);
   for (const label of task.labels) {
     const key = matchRegistryKey(registry, label);
     if (key) return key;
   }
-  const field = extractRepoField(task.body);
-  return field ? matchRegistryKey(registry, field) : undefined;
+  return undefined;
 };
 
 const getBusyRepos = async (pool: Pool, nightId: string): Promise<Set<string>> => {
