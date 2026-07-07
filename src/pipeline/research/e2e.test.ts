@@ -1,7 +1,7 @@
 /**
  * card-research E2E (F5 #161): drives the REAL skill.yaml through
  * runStateMachine with the 4 script handlers registered and every external
- * effect (git worktree, claude-cli survey, claude.ts judgment, GitHub, Trello)
+ * effect (git worktree, claude-cli survey, claude-cli judgment, GitHub, Trello)
  * mocked/injected — mirrors card-to-pr/e2e.test.ts's harness.
  *
  * preparation -> survey_proposal -> architecture_judgment -> delivery ->
@@ -13,7 +13,7 @@ import { Effect } from "effect";
 import { runStateMachine, type StateMachineContext } from "../../engine/state-machine.js";
 import { makeScriptRegistry } from "../../script/registry.js";
 import { parseSkillStateMachine } from "../../skill/parser.js";
-import { registerResearchHandlers, SONNET_MODEL } from "./index.js";
+import { registerResearchHandlers, OPUS_MODEL } from "./index.js";
 import type { ResearchDeps } from "./index.js";
 import type { CompletionRequest, CompletionResponse } from "../../provider/types.js";
 import type { Routine } from "../../routine/types.js";
@@ -82,17 +82,15 @@ interface TsRec {
 const makeDeps = (over: {
   gh: GhRec;
   ts: TsRec;
-  cli: (req: CompletionRequest) => CompletionResponse;
-  api: (model: string) => CompletionResponse;
+  /** Survey (SONNET_MODEL) and judgment (OPUS_MODEL) both call through here now — branch on model. */
+  cli: (model: string, req: CompletionRequest) => CompletionResponse;
   worktreeBase: string;
 }): ResearchDeps => ({
   registry,
   githubToken: "gh",
   worktreeBase: over.worktreeBase,
-  claudeApiKey: "sk",
   runGit: async () => ({ stdout: "", stderr: "" }),
-  makeCliProvider: () => ({ complete: (req: CompletionRequest) => Effect.succeed(over.cli(req)) }),
-  makeApiProvider: (cfg) => ({ complete: () => Effect.succeed(over.api(cfg.model)) }),
+  makeCliProvider: (cfg) => ({ complete: (req: CompletionRequest) => Effect.succeed(over.cli(cfg.model, req)) }),
   makeGithub: (() => ({
     createMilestone: (title: string) => {
       over.gh.milestones.push({ title });
@@ -138,8 +136,7 @@ describe("card-research E2E (#161)", () => {
     const deps = makeDeps({
       gh,
       ts,
-      cli: () => resp(survey(4), SONNET_MODEL),
-      api: (model) => resp(aprovado, model),
+      cli: (model) => (model === OPUS_MODEL ? resp(aprovado, model) : resp(survey(4), model)),
       worktreeBase: `/tmp/or-pesquisa-e2e-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     });
 
@@ -183,18 +180,18 @@ describe("card-research E2E (#161)", () => {
     const deps = makeDeps({
       gh,
       ts,
-      cli: (req) => {
+      cli: (model, req) => {
+        if (model === OPUS_MODEL) {
+          judgeCalls++;
+          // 1st judgment refutado (with a correction), 2nd aprovado.
+          const body =
+            judgeCalls === 1
+              ? JSON.stringify({ verdict: "refutado", corrections: ["use índice único"], securityOpinion: { exposesNewSurface: false, notes: "" } })
+              : aprovado;
+          return resp(body, model);
+        }
         surveyPrompts.push(req.messages![0].content);
-        return resp(survey(2), SONNET_MODEL);
-      },
-      api: (model) => {
-        judgeCalls++;
-        // 1st judgment refutado (with a correction), 2nd aprovado.
-        const body =
-          judgeCalls === 1
-            ? JSON.stringify({ verdict: "refutado", corrections: ["use índice único"], securityOpinion: { exposesNewSurface: false, notes: "" } })
-            : aprovado;
-        return resp(body, model);
+        return resp(survey(2), model);
       },
       worktreeBase: `/tmp/or-pesquisa-e2e-ref-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     });

@@ -19,13 +19,12 @@ const escalate = {
   escalateReason: "decisão de arquitetura sem precedente",
 };
 
-const baseDeps = (makeApiProvider: ResearchDeps["makeApiProvider"]): ResearchDeps => ({
+const baseDeps = (makeCliProvider: ResearchDeps["makeCliProvider"]): ResearchDeps => ({
   registry: { repos: {} },
   githubToken: "gh",
   worktreeBase: "/tmp",
   taskSourceFor: () => undefined,
-  claudeApiKey: "sk",
-  makeApiProvider,
+  makeCliProvider,
 });
 
 describe("card-research judgment (composite judge)", () => {

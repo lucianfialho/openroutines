@@ -1,14 +1,17 @@
 /**
  * card-research / architecture_judgment (F5 #161)
  *
- * Opus 4.8 (src/provider/claude.ts) is the architecture owner and the apex: it
- * judges the survey against raizes-architecture-principles + an explicit
- * security lens and emits {verdict, corrections[], securityOpinion{...},
- * escalateReason?}. Opus's verdict is FINAL — "escalate" stays only as an
- * ambiguity signal (there is no stronger judge to hand off to).
+ * Opus 4.8 via claude-cli (D3: subscription/OAuth auth, no API billing) is the
+ * architecture owner and the apex: it judges the survey against
+ * raizes-architecture-principles + an explicit security lens and emits
+ * {verdict, corrections[], securityOpinion{...}, escalateReason?}. Opus's
+ * verdict is FINAL — "escalate" stays only as an ambiguity signal (there is no
+ * stronger judge to hand off to). CLI-first, same seam as survey.ts — no
+ * claude-api fallback (none of this pipeline's phases has one).
  *
  * Anti-bypass: the response's reported model must be the requested one (or a
- * versioned alias, M1) — a silently downgraded model never governs the gate.
+ * versioned alias, M1) — via claude-cli this is a plumbing check (the CLI
+ * echoing what it ran), not an independent server verification.
  */
 import { readFileSync } from "fs";
 import { Effect } from "effect";
@@ -17,7 +20,7 @@ import type { CompletionResponse } from "../../provider/types.js";
 import { renderTemplate } from "../../engine/template.js";
 import { extractOutput } from "../../engine/output.js";
 import { validate, type JsonSchema } from "../../engine/schema-validate.js";
-import { resolveApiProvider, OPUS_MODEL, type ResearchDeps } from "./index.js";
+import { resolveCliProvider, OPUS_MODEL, type ResearchDeps } from "./index.js";
 
 const PROMPT_PATH = ".gates/skills/card-research/prompts/judgment.md";
 const SCHEMA_PATH = ".gates/skills/card-research/schemas/judgment.schema.json";
@@ -56,7 +59,7 @@ const parseVerdict = (content: string): JudgmentVerdict => {
  * direct testing independent of the state machine.
  */
 export const runPesquisaJudgment = async (deps: ResearchDeps, basePrompt: string): Promise<JudgmentVerdict> => {
-  const opus = resolveApiProvider(deps, OPUS_MODEL);
+  const opus = resolveCliProvider(deps, OPUS_MODEL);
   const opusResp = await Effect.runPromise(
     opus.complete({ messages: [{ role: "user", content: basePrompt }], temperature: 0.2, maxTokens: 4096 })
   );

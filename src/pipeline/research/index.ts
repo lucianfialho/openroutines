@@ -23,7 +23,6 @@ import type { ActionLedgerRepository } from "../../persistence/types.js";
 import type { CompletionRequest, CompletionResponse } from "../../provider/types.js";
 import { makeGitHubConnector } from "../../connector/github.js";
 import { makeClaudeCliProvider } from "../../provider/claude-cli.js";
-import { makeClaudeProvider } from "../../provider/claude.js";
 import { makePreparation } from "./preparation.js";
 import { makeSurvey } from "./survey.js";
 import { makeJudgment } from "./judgment.js";
@@ -36,9 +35,9 @@ export const SONNET_MODEL = "claude-sonnet-5";
 export const OPUS_MODEL = "claude-opus-4-8";
 
 /**
- * Minimal provider seam: only `complete` is used. Both real factories
- * (claude-cli, claude) satisfy it (their ClaudeCliError/ClaudeError error
- * channels widen to `unknown`), and a test fake is just `{ complete }`.
+ * Minimal provider seam: only `complete` is used. The real factory
+ * (claude-cli) satisfies it (its ClaudeCliError channel widens to `unknown`),
+ * and a test fake is just `{ complete }`.
  */
 export interface ResearchProvider {
   complete: (req: CompletionRequest) => Effect.Effect<CompletionResponse, unknown>;
@@ -49,8 +48,12 @@ export interface ResearchDeps {
   githubToken: string;
   worktreeBase: string; // env WORKTREE_BASE, e.g. /tmp/or-worktrees
   taskSourceFor: (sourceId: string) => TaskSource | undefined;
-  /** Anthropic API key for the billed judge provider (claude.ts / Opus). */
-  claudeApiKey: string;
+  /**
+   * Anthropic API key — UNUSED today: card-research is CLI-first for every
+   * phase (D3, no API billing), survey and judgment alike. Optional; app.ts
+   * still wires it from ANTHROPIC_API_KEY, harmless to keep passing.
+   */
+  claudeApiKey?: string;
   /**
    * Action ledger (F5 #162 hardening): when present, delivery wraps its GitHub
    * issue/milestone creation and card handoff so a crash mid-delivery + resume
@@ -60,10 +63,8 @@ export interface ResearchDeps {
   ledger?: ActionLedgerRepository;
   // Injectable seams for tests (default to the real impls):
   makeGithub?: (cfg: { token: string; repo: string }) => ReturnType<typeof makeGitHubConnector>;
-  /** CLI provider for the read-only survey (claude-cli / Sonnet). */
+  /** CLI provider for survey (Sonnet) and judgment (Opus) — both CLI-first, D3. */
   makeCliProvider?: (cfg: { model: string }) => ResearchProvider;
-  /** Billed API provider for the architecture judgment (claude.ts / Opus). */
-  makeApiProvider?: (cfg: { apiKey: string; model: string }) => ResearchProvider;
   /** Read-only worktree git ops (fetch/worktree add/rev-parse). */
   runGit?: (args: string[], cwd: string) => Promise<{ stdout: string; stderr: string }>;
 }
@@ -78,12 +79,6 @@ export const resolveGithub = (deps: ResearchDeps, repo: string): ReturnType<type
 
 export const resolveCliProvider = (deps: ResearchDeps, model: string): ResearchProvider =>
   (deps.makeCliProvider ?? ((cfg) => makeClaudeCliProvider({ model: cfg.model })))({ model });
-
-export const resolveApiProvider = (deps: ResearchDeps, model: string): ResearchProvider =>
-  (deps.makeApiProvider ?? ((cfg) => makeClaudeProvider({ apiKey: cfg.apiKey, model: cfg.model })))({
-    apiKey: deps.claudeApiKey,
-    model,
-  });
 
 export const registerResearchHandlers = (reg: ScriptRegistry, deps: ResearchDeps): void => {
   reg.register("card-research-preparation", makePreparation(deps));
