@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { Effect } from "effect";
-import { runNightCycle, resolveRepoForClaim, type RunNightCycleDeps } from "./run.js";
+import { runNightCycle, resolveRepoForClaim, skillForTaskType, type RunNightCycleDeps } from "./run.js";
 import { makeInMemoryPrLinkRepository } from "../persistence/pr-links-in-memory.js";
 import { makeInMemoryCardSteeringRepository } from "../persistence/card-steering-in-memory.js";
 import type { RepoRegistry } from "../repo-registry/schema.js";
@@ -108,7 +108,7 @@ const makeMockPool = (opts: {
   lockGranted?: boolean;
   queuedTasks?: MockTask[];
   busyRepos?: string[];
-  taskContent?: Record<string, { title: string; body: string; labels?: string[] }>;
+  taskContent?: Record<string, { title: string; body: string; labels?: string[]; complexity?: string; type?: string }>;
   /** D22/F4 #186: simulate a mid-cycle crash — claimReadyCards' own SELECT throws. */
   claimThrows?: Error;
   /** F4 #159: canned tier_circuit_state rows, keyed by tier. */
@@ -138,7 +138,7 @@ const makeMockPool = (opts: {
     if (text.startsWith("SELECT DISTINCT repo FROM executions")) {
       return { rows: (opts.busyRepos ?? []).map((r) => ({ repo: r })) };
     }
-    if (text.startsWith("SELECT title, body, labels, complexity FROM tasks")) {
+    if (text.startsWith("SELECT title, body, labels, complexity, type FROM tasks")) {
       const [sourceId, taskId] = params as [string, string];
       const content = opts.taskContent?.[`${sourceId}:${taskId}`];
       return { rows: content ? [content] : [{ title: "", body: "", labels: [] }] };
@@ -897,4 +897,43 @@ describe("runNightCycle — F(E)-block: alerta best-effort quando a sincronizaç
     expect(sendAlert.mock.calls[0][0]).toContain("trello-main");
     expect(sendAlert.mock.calls[0][0]).toContain("coluna 'Fila' não existe");
   });
+});
+
+describe("skillForTaskType — routes a card to its pipeline skill by type (F5 #163)", () => {
+  it("research -> card-research, mapping -> card-mapping", () => {
+    expect(skillForTaskType("research")).toBe("card-research");
+    expect(skillForTaskType("mapping")).toBe("card-mapping");
+  });
+
+  it("implementation, update, and an absent type all fall back to card-to-pr", () => {
+    expect(skillForTaskType("implementation")).toBe("card-to-pr");
+    expect(skillForTaskType("update")).toBe("card-to-pr");
+    expect(skillForTaskType(undefined)).toBe("card-to-pr");
+  });
+});
+
+describe("runNightCycle — enqueues the skill matching the card's type (F5 #163)", () => {
+  const routes = [
+    { type: "research", skill: "card-research" },
+    { type: "mapping", skill: "card-mapping" },
+    { type: "implementation", skill: "card-to-pr" },
+  ] as const;
+
+  for (const { type, skill } of routes) {
+    it(`a '${type}' card enqueues skill '${skill}' and stamps executions.skill_name to match`, async () => {
+      const pool = makeMockPool({
+        lockGranted: true,
+        queuedTasks: [{ source_id: "trello-main", task_id: "card1", body: cardBody("acme-widgets"), labels: [] }],
+        taskContent: { "trello-main:card1": { title: "Do it", body: cardBody("acme-widgets"), type } },
+      });
+      const queue = makeFakeQueue();
+
+      await runNightCycle(baseDeps(pool, { queue }));
+
+      expect(queue.jobs).toHaveLength(1);
+      expect(queue.jobs[0].trigger.payload).toMatchObject({ skill });
+      // insertPendingExecution params: [id, sourceId, taskId, nightId, repo, skillName]
+      expect(pool.insertedExecutions[0][5]).toBe(skill);
+    });
+  }
 });

@@ -163,8 +163,14 @@ export const resolveCardToPrDynamicProvider = (
 };
 
 export interface CardExecutionJobDeps {
-  cardToPrStateMachineConfig: StateMachineConfig | undefined;
-  cardToPrSkill: SkillStateMachine | undefined;
+  /**
+   * By-name skill registry for card-execution routing (F5 #163). The night
+   * coordinator picks a skill per card type (card-to-pr / card-research /
+   * card-mapping) and rides it on payload.skill; this maps that name to the
+   * loaded state machine + its runner config. `undefined` means the card-to-pr
+   * infra never wired at all (no GITHUB_TOKEN) — the whole dispatch is a no-op.
+   */
+  skills: Record<string, { config: StateMachineConfig; skill: SkillStateMachine }> | undefined;
   persistence: ExecutionRepository;
   prLinks: PrLinkRepository;
   pgPool: import("pg").Pool | undefined;
@@ -189,8 +195,8 @@ export const runCardExecutionJob = async (
   job: { trigger: { type: string; payload: unknown; executionId?: string } },
   stateMachineContextIn: StateMachineContext | undefined
 ): Promise<void> => {
-  if (!deps.cardToPrStateMachineConfig || !deps.cardToPrSkill) {
-    console.error("[Queue] card-execution job received but card-to-pr is not registered (need GITHUB_TOKEN + repos.yaml)");
+  if (!deps.skills) {
+    console.error("[Queue] card-execution job received but no skills are registered (need GITHUB_TOKEN + repos.yaml)");
     return;
   }
   const executionId = job.trigger.executionId;
@@ -205,11 +211,34 @@ export const runCardExecutionJob = async (
     night_id?: string;
     tier?: Tier;
     rework?: boolean;
+    skill?: string;
   } | null;
 
-  // The execution is loaded once, up front, and reused below both for the H7
-  // guard's fallback and the "mark running" step — one lookup, not two.
+  // The execution is loaded once, up front, and reused below for the H7 guard's
+  // fallback, the unknown-skill failure path, and the "mark running" step — one
+  // lookup, not three.
   const executionRecord = await deps.persistence.findById(executionId);
+
+  // Route by the coordinator's per-card-type choice (F5 #163). An ABSENT
+  // payload.skill is an old job enqueued before typed routing — default it to
+  // card-to-pr for backward-compat. An unknown/unloadable skill name can never
+  // run, so fail the execution loudly (never crash the worker) instead of
+  // silently dropping it.
+  const skillName = payload?.skill ?? "card-to-pr";
+  const selected = deps.skills[skillName];
+  if (!selected) {
+    console.error(`[Queue] card-execution ${executionId} names unregistered skill '${skillName}' — marking failed`);
+    if (executionRecord) {
+      await deps.persistence.save({
+        ...executionRecord,
+        status: "failed",
+        finishedAt: new Date(),
+        error: executionRecord.error ?? `unregistered skill '${skillName}'`,
+        metadata: { ...(executionRecord.metadata ?? {}), blockReason: "unknown-skill" },
+      });
+    }
+    return;
+  }
 
   // H7: a job can survive in Redis past its night's window — the 06:30
   // hard-stop only kills executions already `running` (enforceHardStop's
@@ -272,18 +301,20 @@ export const runCardExecutionJob = async (
   // column lists omit them on purpose), so they survive untouched here.
   if (executionRecord) await deps.persistence.save({ ...executionRecord, status: "running" });
   const event: TriggerEvent = { type: "card-execution", payload: job.trigger.payload, executionId };
-  const syntheticRoutine: Routine = { id: "night-run", triggers: [{ type: "schedule", cron: "0 1 * * *" }], pipeline: { skill: "card-to-pr" } };
+  const syntheticRoutine: Routine = { id: "night-run", triggers: [{ type: "schedule", cron: "0 1 * * *" }], pipeline: { skill: skillName } };
   const run = deps.runStateMachine ?? runStateMachine;
   const result = await Effect.runPromise(
-    run(deps.cardToPrStateMachineConfig)(deps.cardToPrSkill, syntheticRoutine, event, executionId, stateMachineContext)
+    run(selected.config)(selected.skill, syntheticRoutine, event, executionId, stateMachineContext)
   );
   console.log(`[Queue] card-execution job completed: success=${result.success}`);
 
   // F4 #159 circuit breaker: record this card's tier outcome for the night.
   // The outcome is only observable HERE (runNightCycle enqueues and returns
   // long before the job actually runs) — `tier` and `night_id` ride along on
-  // the payload run.ts already built.
-  if (deps.pgPool && payload?.night_id && payload?.tier && payload?.source_id && payload?.task_id) {
+  // the payload run.ts already built. card-to-pr ONLY (F5 #163): "shipped"
+  // below is a pr_links signal, and card-research/card-mapping never create
+  // one — their success would otherwise always be charged as a tier failure.
+  if (skillName === "card-to-pr" && deps.pgPool && payload?.night_id && payload?.tier && payload?.source_id && payload?.task_id) {
     try {
       // H9b: a pre-LLM script block (this card never reached its tier's LLM
       // call at all) must not charge that tier a failure it never had a
@@ -584,12 +615,11 @@ export const createApp = async (config: AppConfig) => {
   // of the card-to-pr pilot skill. Gated on a GitHub token (the pilot can't
   // push/open a PR without one); repos.yaml/task-sources.yaml are optional in
   // dev, so a missing/invalid one is logged and skipped rather than crashing boot.
-  // repoRegistry/cardToPrSkill/cardToPrStateMachineConfig are hoisted (not
-  // block-scoped) because the night-coordinator wiring and the card-execution
-  // queue dispatch below both need them.
+  // repoRegistry/cardExecutionSkills are hoisted (not block-scoped) because the
+  // night-coordinator wiring and the card-execution queue dispatch below both
+  // need them.
   let repoRegistry: import("./repo-registry/schema.js").RepoRegistry | undefined;
-  let cardToPrSkill: SkillStateMachine | undefined;
-  let cardToPrStateMachineConfig: StateMachineConfig | undefined;
+  let cardExecutionSkills: Record<string, { config: StateMachineConfig; skill: SkillStateMachine }> | undefined;
   // Hoisted so the night-coordinator (which syncs these sources' queues into
   // `tasks`) can reuse the same live TaskSource instances built below.
   let cardTaskSources: Map<string, TaskSource> | undefined;
@@ -730,50 +760,65 @@ export const createApp = async (config: AppConfig) => {
       // runStateMachine directly (queueHandler §6) rather than engine.execute():
       // a card-execution trigger matches no routine (night-run.yaml's own
       // trigger is `schedule`), so the generic routine resolution would fail.
-      // Build the skill + runner config once here, reused per card-execution job.
-      try {
-        const loaded = loadSkill(config.skillsDir, "card-to-pr");
-        if (loaded.format === "state-machine") {
-          cardToPrSkill = loaded.stateMachine;
-          cardToPrStateMachineConfig = {
-            provider: provider as Parameters<typeof makeEngine>[0]["provider"],
-            providerRegistry,
-            scriptRegistry,
-            repository: persistence,
-            runStateRepository,
-            fileMetadataRepository,
-            gateEngine,
-            toolRegistry,
-            budgetGate,
-            // budgetSettle intentionally omitted — see the effort-unit note above.
-            // Named `type: fanout` aggregators (F4 #153) — card-to-pr's `review`
-            // state declares `aggregate: aggregateReview`; without this the
-            // runner fails that state (fanoutAggregators lookup miss). Cast:
-            // aggregateReview's return type is the named ReviewOutput (no
-            // index signature) rather than FanoutAggregator's generic
-            // Record<string, unknown> — same values at runtime, TS just wants
-            // an index signature on the nominal type; not modifying
-            // src/review/aggregate.ts's own return type for this.
-            fanoutAggregators: cardToPrFanoutAggregators as unknown as StateMachineConfig["fanoutAggregators"],
-            // F4 #185 (D9): routes implementation's provider/model by the
-            // card's complexity/altaImpl (falls back to the YAML's static
-            // claude-cli/claude-sonnet-5 for every other state, unchanged).
-            resolveDynamicProvider: resolveCardToPrDynamicProvider,
-            repoLearnings,
-            similarCards: makeSimilarCards({
-              executions: persistence,
-              prLinks,
-              tasks: tacticalTasks,
-              runStates: runStateRepository,
-            }),
-          };
+      // Build the runner config ONCE (it's skill-agnostic — the runner takes
+      // the skill separately, and the card-to-pr-specific resolveDynamicProvider
+      // / fanoutAggregators fire only for card-to-pr's own agent/fanout states,
+      // inert for card-research/card-mapping's pure script states), then load
+      // each typed skill's state machine into a by-name map the queue dispatch
+      // routes on (payload.skill). card-research/card-mapping load EXACTLY like
+      // card-to-pr — same loader, each with its own initial_state.
+      const cardExecutionConfig: StateMachineConfig = {
+        provider: provider as Parameters<typeof makeEngine>[0]["provider"],
+        providerRegistry,
+        scriptRegistry,
+        repository: persistence,
+        runStateRepository,
+        fileMetadataRepository,
+        gateEngine,
+        toolRegistry,
+        budgetGate,
+        // budgetSettle intentionally omitted — see the effort-unit note above.
+        // Named `type: fanout` aggregators (F4 #153) — card-to-pr's `review`
+        // state declares `aggregate: aggregateReview`; without this the
+        // runner fails that state (fanoutAggregators lookup miss). Cast:
+        // aggregateReview's return type is the named ReviewOutput (no
+        // index signature) rather than FanoutAggregator's generic
+        // Record<string, unknown> — same values at runtime, TS just wants
+        // an index signature on the nominal type; not modifying
+        // src/review/aggregate.ts's own return type for this.
+        fanoutAggregators: cardToPrFanoutAggregators as unknown as StateMachineConfig["fanoutAggregators"],
+        // F4 #185 (D9): routes implementation's provider/model by the
+        // card's complexity/altaImpl (falls back to the YAML's static
+        // claude-cli/claude-sonnet-5 for every other state, unchanged).
+        resolveDynamicProvider: resolveCardToPrDynamicProvider,
+        repoLearnings,
+        similarCards: makeSimilarCards({
+          executions: persistence,
+          prLinks,
+          tasks: tacticalTasks,
+          runStates: runStateRepository,
+        }),
+      };
+      cardExecutionSkills = {};
+      for (const skillName of ["card-to-pr", "card-research", "card-mapping"] as const) {
+        try {
+          const loaded = loadSkill(config.skillsDir, skillName);
+          if (loaded.format === "state-machine") {
+            cardExecutionSkills[skillName] = { config: cardExecutionConfig, skill: loaded.stateMachine };
+          } else {
+            console.warn(`[App] skill '${skillName}' is not a state-machine skill — card-execution dispatch for it disabled`);
+          }
+        } catch (err) {
+          console.warn(
+            `[App] ${skillName} skill.yaml not loaded, its card-execution dispatch disabled:`,
+            err instanceof Error ? err.message : err
+          );
         }
-      } catch (err) {
-        console.warn(
-          "[App] card-to-pr skill.yaml not loaded, night-run card dispatch disabled:",
-          err instanceof Error ? err.message : err
-        );
       }
+      // Nothing loaded at all → treat as "infra not wired" so the dispatch
+      // logs+returns (its historical behavior) instead of failing every card
+      // as an unknown skill.
+      if (Object.keys(cardExecutionSkills).length === 0) cardExecutionSkills = undefined;
 
       // 4c. Morning-report script handlers (F4 #159, 07:30 digest) — reuses
       // this same pgPool/cardTaskSources/repoRegistry. Dispatches as a NORMAL
@@ -956,8 +1001,7 @@ export const createApp = async (config: AppConfig) => {
     if (job.trigger.type === "card-execution") {
       await runCardExecutionJob(
         {
-          cardToPrStateMachineConfig,
-          cardToPrSkill,
+          skills: cardExecutionSkills,
           persistence,
           prLinks,
           pgPool,

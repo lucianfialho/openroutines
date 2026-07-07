@@ -13,7 +13,8 @@ import {
 } from "./app.js";
 import { makeInMemoryRepository } from "./persistence/in-memory.js";
 import { makeInMemoryPrLinkRepository } from "./persistence/pr-links-in-memory.js";
-import type { DynamicProviderContext } from "./engine/state-machine.js";
+import type { DynamicProviderContext, StateMachineConfig } from "./engine/state-machine.js";
+import type { SkillStateMachine } from "./skill/schema.js";
 
 // ── #187: auth middleware ────────────────────────────────────────────────────
 
@@ -233,8 +234,7 @@ describe("runCardExecutionJob", () => {
   ): { deps: CardExecutionJobDeps; fakeRun: ReturnType<typeof vi.fn> } => {
     const fakeRun = vi.fn(() => () => Effect.succeed(okResult));
     const deps: CardExecutionJobDeps = {
-      cardToPrStateMachineConfig: {} as CardExecutionJobDeps["cardToPrStateMachineConfig"],
-      cardToPrSkill: {} as CardExecutionJobDeps["cardToPrSkill"],
+      skills: { "card-to-pr": { config: {} as StateMachineConfig, skill: {} as SkillStateMachine } },
       persistence: makeInMemoryRepository(),
       prLinks: makeInMemoryPrLinkRepository(),
       pgPool: makeFakePool() as unknown as CardExecutionJobDeps["pgPool"],
@@ -466,6 +466,102 @@ describe("runCardExecutionJob", () => {
 
       const pool = deps.pgPool as unknown as FakePool;
       expect(pool.queries.some((q) => q.sql.includes("tier_circuit_state"))).toBe(true);
+    });
+  });
+
+  describe("H9d: recordTierOutcome only fires for card-to-pr (F5 #163)", () => {
+    it("a card-research execution with result.success:true never calls recordTierOutcome (it never creates pr_links, so it would otherwise always be charged as a tier failure)", async () => {
+      const { deps } = makeDeps({
+        skills: {
+          "card-to-pr": { config: {} as StateMachineConfig, skill: { id: "card-to-pr" } as unknown as SkillStateMachine },
+          "card-research": { config: {} as StateMachineConfig, skill: { id: "card-research" } as unknown as SkillStateMachine },
+        },
+      });
+      await seedExecution(deps.persistence, "exec-1");
+      const job = {
+        trigger: {
+          type: "card-execution",
+          executionId: "exec-1",
+          payload: { source_id: "trello-main", task_id: "card1", night_id: "night-1", tier: "sonnet", skill: "card-research" },
+        },
+      };
+
+      await runCardExecutionJob(deps, job, undefined);
+
+      const pool = deps.pgPool as unknown as FakePool;
+      expect(pool.queries.some((q) => q.sql.includes("tier_circuit_state"))).toBe(false);
+    });
+  });
+
+  describe("F5 #163: skill routing by payload.skill", () => {
+    it("routes the job to the state machine named by payload.skill", async () => {
+      const researchConfig = { marker: "research" } as unknown as StateMachineConfig;
+      const researchSkill = { id: "card-research" } as unknown as SkillStateMachine;
+      let ranConfig: unknown;
+      let ranSkill: unknown;
+      const fakeRun = vi.fn((config: unknown) => (skill: unknown) => {
+        ranConfig = config;
+        ranSkill = skill;
+        return Effect.succeed(okResult);
+      });
+      const { deps } = makeDeps({
+        skills: {
+          "card-to-pr": { config: {} as StateMachineConfig, skill: { id: "card-to-pr" } as unknown as SkillStateMachine },
+          "card-research": { config: researchConfig, skill: researchSkill },
+        },
+        runStateMachine: fakeRun as unknown as CardExecutionJobDeps["runStateMachine"],
+      });
+      await seedExecution(deps.persistence, "exec-1");
+      const job = { trigger: { type: "card-execution", executionId: "exec-1", payload: { night_id: "night-1", skill: "card-research" } } };
+
+      await runCardExecutionJob(deps, job, undefined);
+
+      expect(ranConfig).toBe(researchConfig);
+      expect(ranSkill).toBe(researchSkill);
+    });
+
+    it("an absent payload.skill defaults to card-to-pr (back-compat with pre-routing jobs)", async () => {
+      const cardToPrSkill = { id: "card-to-pr" } as unknown as SkillStateMachine;
+      let ranSkill: unknown;
+      const fakeRun = vi.fn((_config: unknown) => (skill: unknown) => {
+        ranSkill = skill;
+        return Effect.succeed(okResult);
+      });
+      const { deps } = makeDeps({
+        skills: { "card-to-pr": { config: {} as StateMachineConfig, skill: cardToPrSkill } },
+        runStateMachine: fakeRun as unknown as CardExecutionJobDeps["runStateMachine"],
+      });
+      await seedExecution(deps.persistence, "exec-1");
+      const job = { trigger: { type: "card-execution", executionId: "exec-1", payload: { night_id: "night-1" } } };
+
+      await runCardExecutionJob(deps, job, undefined);
+
+      expect(ranSkill).toBe(cardToPrSkill);
+    });
+
+    it("an unknown payload.skill marks the execution failed (blockReason unknown-skill) and never runs", async () => {
+      const { deps, fakeRun } = makeDeps();
+      await seedExecution(deps.persistence, "exec-1");
+      const job = { trigger: { type: "card-execution", executionId: "exec-1", payload: { night_id: "night-1", skill: "card-nope" } } };
+
+      await runCardExecutionJob(deps, job, undefined);
+
+      const saved = await deps.persistence.findById("exec-1");
+      expect(saved?.status).toBe("failed");
+      expect(saved?.metadata?.blockReason).toBe("unknown-skill");
+      expect(fakeRun).not.toHaveBeenCalled();
+    });
+
+    it("with no skills registered at all, logs and returns WITHOUT failing the execution", async () => {
+      const { deps, fakeRun } = makeDeps({ skills: undefined });
+      await seedExecution(deps.persistence, "exec-1");
+      const job = { trigger: { type: "card-execution", executionId: "exec-1", payload: { skill: "card-to-pr" } } };
+
+      await runCardExecutionJob(deps, job, undefined);
+
+      const saved = await deps.persistence.findById("exec-1");
+      expect(saved?.status).toBe("pending"); // untouched — global misconfig, not a per-card failure
+      expect(fakeRun).not.toHaveBeenCalled();
     });
   });
 });

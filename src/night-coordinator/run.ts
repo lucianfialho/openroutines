@@ -32,7 +32,7 @@ import { nextTier } from "../engine/retry-classifier.js";
 import { steeringPromptBlock, RESUME_BLOCKED_EFFECT } from "../orchestrator/steering.js";
 import type { RepoRegistry } from "../repo-registry/schema.js";
 import type { CardSteeringRepository, ExecutionRepository, ExecutionProcessRepository, PrLink, PrLinkRepository, TaskRepository } from "../persistence/types.js";
-import type { TaskSource, TaskComplexity } from "../task-source/types.js";
+import type { TaskSource, TaskComplexity, TaskType } from "../task-source/types.js";
 import type { JobQueue } from "../queue/types.js";
 
 export interface NightSummary {
@@ -159,9 +159,28 @@ const getBusyRepos = async (pool: Pool, nightId: string): Promise<Set<string>> =
 };
 
 /**
+ * Route a card to its pipeline skill by task type (F5 #163). `research` and
+ * `mapping` have their own complete pipelines (card-research/card-mapping);
+ * `implementation`, `update`, and an absent/unknown type all run the default
+ * card-to-pr flow. The chosen name is written BOTH to executions.skill_name and
+ * the queue payload so the two never diverge.
+ */
+export const skillForTaskType = (type: TaskType | undefined): string => {
+  switch (type) {
+    case "research":
+      return "card-research";
+    case "mapping":
+      return "card-mapping";
+    default:
+      return "card-to-pr"; // implementation, update, or absent
+  }
+};
+
+/**
  * ClaimedCard (Wave A) intentionally carries only identity + repo — enough
  * for the atomic claim and same-repo dedup. The card-to-pr skill also needs
  * title/description, so this hydrates them from `tasks` with the same pool.
+ * `type` drives skill routing (skillForTaskType).
  *
  * `altaImpl` (D9 "regra ALTA", F4 #185) has no upstream writer yet — no
  * triage routine sets it and Task/TaskClassification (F2) carry no such
@@ -172,9 +191,9 @@ const getTaskContent = async (
   pool: Pool,
   sourceId: string,
   taskId: string
-): Promise<{ title: string; description: string; altaImpl: boolean; complexity?: TaskComplexity }> => {
+): Promise<{ title: string; description: string; altaImpl: boolean; complexity?: TaskComplexity; type?: TaskType }> => {
   const { rows } = await pool.query(
-    `SELECT title, body, labels, complexity FROM tasks WHERE source_id = $1 AND task_id = $2`,
+    `SELECT title, body, labels, complexity, type FROM tasks WHERE source_id = $1 AND task_id = $2`,
     [sourceId, taskId]
   );
   const labels = ((rows[0]?.labels as string[]) ?? []) as string[];
@@ -183,18 +202,19 @@ const getTaskContent = async (
     description: String(rows[0]?.body ?? ""),
     altaImpl: labels.includes("altaImpl"),
     complexity: (rows[0]?.complexity as TaskComplexity | null) ?? undefined,
+    type: (rows[0]?.type as TaskType | null) ?? undefined,
   };
 };
 
 const insertPendingExecution = async (
   pool: Pool,
-  args: { executionId: string; nightId: string; repo: string; sourceId: string; taskId: string }
+  args: { executionId: string; nightId: string; repo: string; sourceId: string; taskId: string; skillName: string }
 ): Promise<void> => {
   await pool.query(
     `INSERT INTO executions (
       id, routine_id, trigger_type, skill_name, status, started_at, source_id, task_id, night_id, repo
-    ) VALUES ($1, 'night-run', 'card-execution', 'card-to-pr', 'pending', NOW(), $2, $3, $4, $5)`,
-    [args.executionId, args.sourceId, args.taskId, args.nightId, args.repo]
+    ) VALUES ($1, 'night-run', 'card-execution', $6, 'pending', NOW(), $2, $3, $4, $5)`,
+    [args.executionId, args.sourceId, args.taskId, args.nightId, args.repo, args.skillName]
   );
 };
 
@@ -364,12 +384,15 @@ const admitReworkCards = async (deps: RunNightCycleDeps, nightId: string, genera
 
     const { title, description, altaImpl, complexity } = await getTaskContent(deps.pool, link.sourceId, link.taskId);
     const executionId = generateId();
+    // Rework is inherently card-to-pr's PR-review loop; pr_links carries no
+    // skill column, so the skill is fixed here rather than derived from type.
     await insertPendingExecution(deps.pool, {
       executionId,
       nightId,
       repo: link.repo,
       sourceId: link.sourceId,
       taskId: link.taskId,
+      skillName: "card-to-pr",
     });
     await deps.queue.enqueue({
       id: executionId,
@@ -424,7 +447,7 @@ const admitSteeredBlockedCards = async (
   for (const steering of pending) {
     if ((await deps.prLinks.countOpenForNight(nightId)) >= deps.nightPrCap) break; // global cap — retry next night
     const { rows } = await deps.pool.query(
-      `SELECT title, body, labels, complexity FROM tasks WHERE source_id = $1 AND task_id = $2`,
+      `SELECT title, body, labels, complexity, type FROM tasks WHERE source_id = $1 AND task_id = $2`,
       [steering.sourceId, steering.taskId]
     );
     if (rows.length === 0) continue;
@@ -451,6 +474,7 @@ const admitSteeredBlockedCards = async (
     busyRepos.add(repo);
 
     const complexity = (rows[0].complexity as TaskComplexity | null) ?? undefined;
+    const skillName = skillForTaskType((rows[0].type as TaskType | null) ?? undefined);
     const executionId = generateId();
     await insertPendingExecution(deps.pool, {
       executionId,
@@ -458,6 +482,7 @@ const admitSteeredBlockedCards = async (
       repo,
       sourceId: steering.sourceId,
       taskId: steering.taskId,
+      skillName,
     });
     await deps.queue.enqueue({
       id: executionId,
@@ -474,7 +499,7 @@ const admitSteeredBlockedCards = async (
           description: `${body}\n\n${steeringPromptBlock(steering.text)}`,
           night_id: nightId,
           executionId,
-          skill: "card-to-pr",
+          skill: skillName,
           tier: tierForComplexity(complexity),
           ...(complexity ? { complexity } : {}),
           ...(labels.includes("altaImpl") ? { altaImpl: true } : {}),
@@ -653,7 +678,8 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
           tier = escalated;
         }
 
-        const { title, description, altaImpl } = await getTaskContent(deps.pool, card.sourceId, card.taskId);
+        const { title, description, altaImpl, type } = await getTaskContent(deps.pool, card.sourceId, card.taskId);
+        const skillName = skillForTaskType(type);
         const executionId = generateId();
         await insertPendingExecution(deps.pool, {
           executionId,
@@ -661,6 +687,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
           repo: card.repo,
           sourceId: card.sourceId,
           taskId: card.taskId,
+          skillName,
         });
         await deps.queue.enqueue({
           id: executionId,
@@ -675,7 +702,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
               description,
               night_id: nightId,
               executionId,
-              skill: "card-to-pr",
+              skill: skillName,
               tier,
               // F4 #185 (D9): consumed by card-to-pr's implementation dynamic
               // routing — independent of `tier` above (that one is the
