@@ -26,9 +26,9 @@ describe("renderTemplate", () => {
     expect(JSON.parse(out)).toEqual(gaps);
   });
 
-  it("leaves unknown placeholders untouched (round-1: refutation not yet produced)", () => {
-    const out = renderTemplate("{{outputs.refutation}}", { inputs: {}, outputs: {} });
-    expect(out).toBe("{{outputs.refutation}}");
+  it("renders an absent output path as empty string, not a literal token (round-1: refutation not yet produced)", () => {
+    const out = renderTemplate("a{{outputs.refutation}}b", { inputs: {}, outputs: {} });
+    expect(out).toBe("ab");
   });
 
   it("output_path falls back to the default", () => {

@@ -509,6 +509,44 @@ describe("F4 — fanout lens extensions (#153)", () => {
     expect(kimiReq.allowedTools).toBeUndefined();
   });
 
+  it("forwards a type:agent state's allowed_tools to request.allowedTools; absent → unset", async () => {
+    const agentSkill = (allowed_tools?: string[]): SkillStateMachine =>
+      ({
+        id: "t",
+        initial_state: "impl",
+        states: {
+          impl: {
+            provider: "claude-cli",
+            model: "claude-sonnet-5",
+            agent_prompt: "p",
+            ...(allowed_tools ? { allowed_tools } : {}),
+            transitions: [{ to: "done" }],
+          },
+          done: { terminal: true },
+        },
+      }) as unknown as SkillStateMachine;
+
+    const withTools = makeTrackingRegistry();
+    const r1 = await run(agentSkill(["Read", "Grep", "Bash(git log:*)"]), {
+      provider: { complete: () => Effect.succeed(resp()) },
+      providerRegistry: withTools.registry,
+      repository: makeRepo().repo,
+    });
+    expect(r1.success).toBe(true);
+    const withReq = withTools.requests.find((q) => q.key === "claude-cli:claude-sonnet-5")!.request;
+    expect(withReq.allowedTools).toEqual(["Read", "Grep", "Bash(git log:*)"]);
+
+    const without = makeTrackingRegistry();
+    const r2 = await run(agentSkill(), {
+      provider: { complete: () => Effect.succeed(resp()) },
+      providerRegistry: without.registry,
+      repository: makeRepo().repo,
+    });
+    expect(r2.success).toBe(true);
+    const withoutReq = without.requests.find((q) => q.key === "claude-cli:claude-sonnet-5")!.request;
+    expect(withoutReq.allowedTools).toBeUndefined();
+  });
+
   it("merges a registered custom aggregator's fields over the default envelope", async () => {
     const { registry } = makeTrackingRegistry({ "kimi-cli:kimi-k2.6": JSON.stringify({ approved: true, gaps: [] }) });
     const repo = makeRepo();

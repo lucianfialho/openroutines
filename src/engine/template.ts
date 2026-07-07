@@ -21,7 +21,11 @@ export const renderTemplate = (template: string, context: TemplateContext): stri
     }
     if ((key === "output" || key === "outputs") && subKey) {
       const value = getNestedValue(context.outputs, subKey);
-      return value !== undefined ? formatValue(value) : `{{${key}.${subKey}}}`;
+      // Absent path → empty string, not a literal `{{outputs.x}}`. A prompt may
+      // reference an output not yet produced (e.g. {{outputs.verify}} on the
+      // first implementation pass); leaking the raw token as prompt text is
+      // noise the agent shouldn't parse.
+      return value !== undefined ? formatValue(value) : "";
     }
     if (key === "output_path") {
       return context.output_path ?? ".gates/outputs/output.yaml";

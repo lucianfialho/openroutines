@@ -1051,6 +1051,10 @@ export const executeLLMStep = (
           ...(hasTools
             ? { tools: state.tools!.map((name) => toolRegistry!.getDefinition(name)).filter((t): t is ToolDefinition => t !== undefined) }
             : {}),
+          // CLI tool least-privilege (mirrors the fanout lens `tools` path):
+          // forward the agent state's allowed_tools to the provider's native
+          // allowlist. Absent → provider-level default applies (current behavior).
+          ...(state.allowed_tools && state.allowed_tools.length > 0 ? { allowedTools: state.allowed_tools } : {}),
         })
         .pipe(
           Effect.tapError((err) => Effect.logError(`[StateMachine] LLM error: ${err}`)),

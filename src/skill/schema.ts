@@ -54,6 +54,13 @@ export const SkillStateSchema = z.object({
   output_schema: z.string().optional(),
   output_path: z.string().optional(),
   tools: z.array(z.string()).optional(),
+  /**
+   * Least-privilege Claude Code CLI tool allowlist for a `type: agent` state,
+   * forwarded to request.allowedTools (same vocabulary the fanout lenses use in
+   * `tools`, e.g. [Read, Grep, "Bash(git log:*)"]). Distinct from the legacy
+   * `tools` above, which are API-path ToolDefinitions — the two coexist.
+   */
+  allowed_tools: z.array(z.string()).optional(),
   gate: z.enum(["manual_approval", "security_review", "test_pass"]).optional(),
   transitions: z.array(SkillTransitionSchema).optional(),
   terminal: z.boolean().optional(),
