@@ -493,14 +493,13 @@ describe("connector.yaml", () => {
     expect(manifest.baseUrl).toBe("https://api.trello.com/1");
     expect(manifest.auth).toEqual({ scheme: "query", params: { key: "key", token: "token" } });
     expect(manifest.container).toEqual({ kind: "list", flag: { kind: "label", name: "OpenRoutines" } });
-    expect(manifest.state).toEqual({
-      backlog: "Backlog",
-      queued: "OpenRoutines — Fila",
-      working: "OpenRoutines — Working",
-      blocked: "Blocked",
-      review: "Review",
-      done: "Done",
-    });
+    // Os 4 estados reaproveitados (backlog/blocked/review/done) usam nomes de
+    // coluna específicos do board da instalação — o case varia (o wizard de remap
+    // grava o nome real do board, ex. "BACKLOG"). Validamos só as chaves; os 2
+    // estados dedicados do produto têm nome fixo.
+    expect(Object.keys(manifest.state).sort()).toEqual(["backlog", "blocked", "done", "queued", "review", "working"]);
+    expect(manifest.state.queued).toBe("OpenRoutines — Fila");
+    expect(manifest.state.working).toBe("OpenRoutines — Working");
     expect(manifest.classification?.type).toEqual({
       research: "OpenRoutines: Pesquisa",
       mapping: "OpenRoutines: Mapeamento",
