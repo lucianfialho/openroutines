@@ -168,6 +168,9 @@ describe("card-to-pr visual E2E (#160)", () => {
           return {
             complete: (req: { messages?: Array<{ content: string }>; prompt?: string }) => {
               const prompt = req.messages?.[req.messages.length - 1]?.content ?? req.prompt ?? "";
+              // Correctness lens (fanout `review`) now resolves via claude-cli
+              // too (skill.yaml) — clean lens response.
+              if (prompt.includes("Correção vs contrato")) return Effect.succeed(resp(JSON.stringify({ approved: true, gaps: [] })));
               return Effect.succeed(resp(prompt.includes("Implemente o plan") ? implementacaoJson : planoJson));
             },
           } as unknown as ReturnType<ProviderRegistry["resolve"]>;

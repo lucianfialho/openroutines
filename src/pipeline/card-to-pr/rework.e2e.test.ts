@@ -194,17 +194,20 @@ const makeHarness = async (opts: HarnessOpts = {}) => {
       const key = `${String(name)}:${model ?? ""}`;
       providerCalls.push(key);
       if (String(name) === "kimi-cli") {
-        // Serves BOTH the routed rework agent (kimi-k2.6) and the correctness lens.
-        return mkProvider(key, (prompt) =>
-          prompt.includes("Retrabalho") ? reworkOutput : (correctnessQueue.shift() ?? JSON.stringify({ approved: true, gaps: [] }))
-        );
+        // Routed rework agent only (kimi-k2.6) — the correctness lens moved to claude-cli (skill.yaml).
+        return mkProvider(key, () => reworkOutput);
       }
       if (String(name) === "security-judge") {
         return mkProvider(key, () => JSON.stringify({ approved: true, findings: [], criticalArea: false }));
       }
       if (String(name) === "claude-cli") {
-        // Serves refutation (static sonnet) and an ESCALATED rework attempt (H8).
-        return mkProvider(key, (prompt) => (prompt.includes("Refutação") ? refutacaoOutput : reworkOutput));
+        // Serves the correctness lens (fanout `review`, now claude-cli too),
+        // refutation (static sonnet), and an ESCALATED rework attempt (H8).
+        return mkProvider(key, (prompt) => {
+          if (prompt.includes("Correção vs contrato")) return correctnessQueue.shift() ?? JSON.stringify({ approved: true, gaps: [] });
+          if (prompt.includes("Refutação")) return refutacaoOutput;
+          return reworkOutput;
+        });
       }
       throw new Error(`rework e2e fixture: unexpected provider '${String(name)}'`);
     },
@@ -338,8 +341,10 @@ describe("card-to-pr rework E2E (#157, D24)", () => {
 
     const reworkPrompts = h.prompts.filter((p) => p.prompt.includes("Retrabalho")).map((p) => p.prompt);
     expect(reworkPrompts).toHaveLength(3);
-    // 1st pass: retry-context placeholders are literal (accepted wart, same as implementation's).
-    expect(reworkPrompts[0]).toContain("{{outputs.verify}}");
+    // 1st pass: no prior verify to interpolate yet — the engine now renders an
+    // ABSENT {{outputs.X}} as an empty string (template.ts) instead of the
+    // literal placeholder, so this is no longer a wart to special-case.
+    expect(reworkPrompts[0]).not.toContain("{{outputs.");
     // 2nd entry (refutation 'corrigir') and 3rd (verify retry): NO dangling
     // placeholder — the agent is never blind. Format-agnostic asserts only
     // (template.ts rendering of objects/arrays may change).

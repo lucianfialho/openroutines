@@ -26,6 +26,7 @@ import { makePr } from "./pr.js";
 import { makeBlocked } from "./blocked.js";
 import { makeReworkPreparation, makeReworkQuestion } from "./rework.js";
 import { makeVisual, type VisualDeps } from "./visual.js";
+import { makeRiskCheck } from "./risk-check.js";
 
 /**
  * Named `type: fanout` aggregators for card-to-pr (F4 #153) — resolved by the
@@ -90,6 +91,7 @@ export const defaultRunGit =
 
 export const registerCardToPrHandlers = (reg: ScriptRegistry, deps: CardToPrDeps): void => {
   reg.register("card-to-pr-preparation", makePreparation(deps));
+  reg.register("card-to-pr-risk-check", makeRiskCheck());
   reg.register("card-to-pr-verify", makeVerify(deps));
   reg.register("card-to-pr-visual", makeVisual(deps));
   reg.register("card-to-pr-pr", makePr(deps));

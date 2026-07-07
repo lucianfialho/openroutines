@@ -93,19 +93,6 @@ const finding = (over: Record<string, unknown> = {}): Record<string, unknown> =>
 const round1 = (findings: Array<Record<string, unknown>>): string => JSON.stringify({ findings });
 const genuine = JSON.stringify({ verdict: "genuine", reasoning: "exploit path confirmed" });
 
-// --- prompt-hygiene helper (H5) --------------------------------------------------
-// The template leaves an UNRESOLVED {{outputs.X}} as literal text (template.ts).
-// Two are documented, intended first-pass warts (same ones rework.e2e.test.ts
-// accepts): implementation's {{outputs.verify}} before any verify ran, and the
-// correctness lens' {{outputs.refutation}} before any refutation ran. Everything
-// else being resolved is the real anti-regression signal for the OUTER prompts;
-// the security judge's INNER prompts must have ZERO {{outputs. (it strips the
-// <contestacao_refutacao> block in normal mode and builds its own adjudication
-// prompt), which is the gate's teeth.
-const KNOWN_FIRST_PASS_WARTS = ["{{outputs.verify}}", "{{outputs.refutation}}"];
-const stripKnownWarts = (s: string): string =>
-  KNOWN_FIRST_PASS_WARTS.reduce((acc, w) => acc.split(w).join(""), s);
-
 // --- shared harness --------------------------------------------------------------
 
 const registry: RepoRegistry = {
@@ -249,11 +236,15 @@ const makeHarness = (opts: HarnessOpts) => {
       const key = `${String(name)}:${model ?? ""}`;
       if (String(name) === "security-judge") return judge;
       if (String(name) === "kimi-cli")
-        return mkOuter(key, () => JSON.stringify({ approved: true, gaps: [] })); // correctness lens: clean
+        // Dead in this flow since the correctness lens moved to claude-cli
+        // (skill.yaml) — nothing resolves kimi-cli here anymore; kept as a
+        // defensive stub instead of an unreachable throw.
+        return mkOuter(key, () => JSON.stringify({ approved: true, gaps: [] }));
       if (String(name) === "claude-cli")
         return mkOuter(key, (prompt) => {
           if (prompt.includes("Explore o repositório")) return planoJson;
           if (prompt.includes("Implemente o plan")) return implementacaoJson;
+          if (prompt.includes("Correção vs contrato")) return JSON.stringify({ approved: true, gaps: [] }); // correctness lens: clean
           return refutacaoReply(prompt); // refutation.md
         });
       throw new Error(`security e2e fixture: unexpected provider '${key}'`);
@@ -289,12 +280,14 @@ const makeHarness = (opts: HarnessOpts) => {
   return { run, innerCalls, outerPrompts, moveToCalls, sendAlert, prLinks, budgetCalls };
 };
 
-/** Asserts H5 across a finished run: judge saw only resolved content; outer
- * prompts carry only the two documented first-pass warts. */
+/** Asserts H5 across a finished run: judge saw only resolved content, and so
+ * does every outer prompt — the engine renders an ABSENT {{outputs.X}} as an
+ * empty string now (template.ts), so there's no first-pass placeholder wart
+ * left to special-case here anymore. */
 const assertNoUnresolvedPlaceholders = (h: { innerCalls: RecordedCall[]; outerPrompts: Array<{ prompt: string }> }) => {
   expect(h.innerCalls.length).toBeGreaterThan(0); // the REAL judge actually ran (hollow gate: 0)
   for (const c of h.innerCalls) expect(c.text).not.toContain("{{outputs."); // gate always parses resolved content
-  for (const p of h.outerPrompts) expect(stripKnownWarts(p.prompt)).not.toContain("{{outputs.");
+  for (const p of h.outerPrompts) expect(p.prompt).not.toContain("{{outputs.");
 };
 
 // --- H1: critical-area routing off the REAL render ------------------------------
@@ -411,11 +404,13 @@ describe("security-gate E2E — per-lens budget reservation (H6)", () => {
     const r = await h.run();
 
     expect(r.success).toBe(true);
-    // tier = lens.model ?? lens.provider (state-machine.ts runFanout).
+    // tier = lens.model ?? lens.provider (state-machine.ts runFanout). Correctness
+    // is claude-cli/claude-sonnet-5 now (skill.yaml) — same tier the (skipped)
+    // data lens would use, so "exactly one" is the real assertion, not "zero".
     const revisaoReservations = h.budgetCalls.filter((c) => c.phase === "review");
-    expect(revisaoReservations).toContainEqual({ phase: "review", tier: "kimi-k2.6", executionId: "exec1" }); // correctness
+    expect(revisaoReservations).toContainEqual({ phase: "review", tier: "claude-sonnet-5", executionId: "exec1" }); // correctness
     expect(revisaoReservations).toContainEqual({ phase: "review", tier: "claude-opus-4-8", executionId: "exec1" }); // security
-    // data lens (claude-sonnet-5) is skipped by its when: -> no review reservation for it.
-    expect(revisaoReservations.filter((c) => c.tier === "claude-sonnet-5")).toHaveLength(0);
+    // data lens is skipped by its when: -> still only ONE claude-sonnet-5 reservation (correctness alone).
+    expect(revisaoReservations.filter((c) => c.tier === "claude-sonnet-5")).toHaveLength(1);
   });
 });

@@ -46,16 +46,27 @@ states:
 
   plan:
     description: >
-      Explore the repo and produce a plan; decides whether the architecture
-      gate (gate_plano) must approve it before implementation starts.
+      Explore the repo and produce a plan, self-assessing (needsArchGate)
+      whether the architecture gate looks warranted; risk_check (next state)
+      makes the actual routing call from that plus a deterministic check.
     provider: claude-cli
     model: claude-sonnet-5
     output_schema: .gates/skills/card-to-pr/schemas/plan.schema.json
+    # Read-only except the PLAN.md this phase writes (risk_check, right after,
+    # is what actually decides needsArchGate — see below).
+    allowed_tools: [Read, Glob, Grep, "Bash(git log:*)", "Bash(git show:*)", "Bash(raizes-docs:*)", "Bash(ctx7:*)", "Write(PLAN.md)"]
     agent_prompt: |
       Card: {{inputs.title}}
       Descrição: {{inputs.description}}
       Complexidade triada: {{inputs.complexity}}
       Worktree: {{outputs.preparation.worktree.path}}
+
+      Leia docs/REPO-PROFILE.md no worktree acima, se existir: conhecimento
+      prévio do repo (stack, dados, convenções, rotas douradas). Se o
+      repositório fizer parte do ecossistema TREE.IA (Bash "raizes-docs"
+      disponível), consulte raizes-docs para contratos e boas práticas antes
+      de propor o plano; para libs de terceiros, use ctx7. Derive os
+      critérios de aceite da descrição do card e liste-os no PLAN.md.
 
       Explore o repositório no worktree acima, produza um PLAN.md e emita um JSON com:
       {summary, files[], estimatedLoc, dataChanges[], testStrategy, needsArchGate, risks[], visualAssertions[]}.
@@ -66,7 +77,14 @@ states:
       "brand-fidelity" para asserções de identidade de marca (F5 #160). Não
       altere código nesta fase — só planeje.
     transitions:
-      - { to: gate_plan, when: "output.plan.needsArchGate == true" }
+      - { to: risk_check }
+
+  risk_check:
+    description: "Deterministic arch-gate check: ORs the plan's self-assessment with isSensitivePath over plan.files"
+    type: script
+    script: card-to-pr-risk-check
+    transitions:
+      - { to: gate_plan, when: "output.risk_check.needsArchGate == true" }
       - { to: implementation }
 
   gate_plan:
@@ -107,6 +125,8 @@ states:
     agent_prompt: |
       Plano aprovado: {{outputs.plan}}
       Resultado do verify anterior (se for retry): {{outputs.verify}}
+      Gaps apontados pela revisão (corrija todos; vazio se primeira passada): {{outputs.review.gaps}}
+      Decisão da refutação (se houver): {{outputs.refutation}}
 
       Implemente o plano no worktree {{outputs.preparation.worktree.path}}. Ao terminar,
       use git_commit (NUNCA dê push — o orquestrador cuida do push/PR).
@@ -143,7 +163,7 @@ states:
   review:
     description: >
       Adversarial multi-lens review (F4 #153), fresh context per lens: 3 lenses
-      in this order — correctness+conventions/raizes-docs (Kimi, always, 1
+      in this order — correctness+conventions/raizes-docs (Sonnet, always, 1
       call/2 rubrics), data/Prisma (Sonnet, read-only tools, only when the
       diff touches data files), security (security-judge provider, Opus,
       always — the composite round-1 findings + round-2 per-finding /
@@ -153,8 +173,10 @@ states:
     type: fanout
     lenses:
       - name: correctness
-        provider: kimi-cli
-        model: kimi-k2.6
+        # kimi-cli back when it has an agentic mode (ACP) + quota again.
+        provider: claude-cli
+        model: claude-sonnet-5
+        tools: [Read, Grep, Glob, "Bash(git diff:*)", "Bash(git log:*)"]
         agent_prompt_file: .gates/skills/card-to-pr/prompts/review-correctness.md
         output_schema: .gates/skills/card-to-pr/schemas/lens-correctness.json
       - name: data
@@ -227,6 +249,8 @@ states:
     provider: claude-cli
     model: claude-sonnet-5
     output_schema: .gates/skills/card-to-pr/schemas/refutation.schema.json
+    # Decision-only, no edits: contest or flag for correction, never patch code here.
+    allowed_tools: [Read, Grep, Glob]
     agent_prompt_file: .gates/skills/card-to-pr/prompts/refutation.md
     tools:
       - read_file

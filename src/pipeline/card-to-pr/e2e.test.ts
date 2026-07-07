@@ -169,7 +169,14 @@ describe("card-to-pr E2E (#146, #153)", () => {
         const key = String(name);
         if (key === "claude-cli") {
           return {
-            complete: () => {
+            complete: (req: { messages: Array<{ content: string }> }) => {
+              const prompt = req.messages[req.messages.length - 1]?.content ?? "";
+              // Correctness lens (fanout `review`) now resolves via claude-cli
+              // too (skill.yaml) — clean lens response, doesn't consume the
+              // plan/implementation queue below.
+              if (prompt.includes("Correção vs contrato")) {
+                return Effect.succeed(resp(JSON.stringify({ approved: true, gaps: [] })));
+              }
               const r = claudeCliResponses[Math.min(claudeCliCalls, claudeCliResponses.length - 1)];
               claudeCliCalls++;
               return Effect.succeed(r);
@@ -369,9 +376,10 @@ describe("card-to-pr E2E (#146, #153)", () => {
     // the escalated sonnet tier — and never through rework's own template.
     const implPrompts = prompts.filter((p) => p.prompt.includes("Implemente o plan"));
     expect(implPrompts.map((p) => p.key)).toEqual(["kimi-cli:kimi-k2.6", "kimi-cli:kimi-k2.6", "claude-cli:claude-sonnet-5"]);
-    // 1st pass: the retry-context placeholder is literal (no prior verify to
-    // interpolate yet — accepted wart, same one rework.e2e.test.ts's H5 documents).
-    expect(implPrompts[0].prompt).toContain("{{outputs.verify}}");
+    // 1st pass: no prior verify to interpolate yet — the engine now renders an
+    // ABSENT {{outputs.X}} as an empty string (template.ts) instead of the
+    // literal placeholder, so this is no longer a wart to special-case.
+    expect(implPrompts[0].prompt).not.toContain("{{outputs.");
     // 2nd (unescalated retry) and 3rd (escalated retry): NO dangling
     // placeholder — the agent is never blind, and never sees rework's markers.
     expect(implPrompts[1].prompt).not.toContain("{{outputs.");

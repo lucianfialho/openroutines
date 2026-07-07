@@ -133,6 +133,8 @@ describe("card-to-pr gate_plan E2E (#185)", () => {
     const implCall = queueResponder([implementacaoOutput]);
     let claudeCliCalls = 0;
     let archJudgeCalls = 0;
+    const scriptRegistry = makeScriptRegistry();
+    registerCardToPrHandlers(scriptRegistry, makeDeps());
     const providerRegistry: ProviderRegistry = {
       resolve: (name) => {
         const key = String(name);
@@ -156,6 +158,7 @@ describe("card-to-pr gate_plan E2E (#185)", () => {
       runStateMachine({
         provider: { complete: () => Effect.succeed(resp("{}")) },
         providerRegistry,
+        scriptRegistry,
         repository: makeRepo().repo,
       })(skill, routine, event, "exec1", startContext())
     );
@@ -174,6 +177,8 @@ describe("card-to-pr gate_plan E2E (#185)", () => {
     let claudeCliCalls = 0;
     let archJudgeCalls = 0;
     const repo = makeRepo();
+    const scriptRegistry = makeScriptRegistry();
+    registerCardToPrHandlers(scriptRegistry, makeDeps());
     const providerRegistry: ProviderRegistry = {
       resolve: (name) => {
         const key = String(name);
@@ -197,6 +202,7 @@ describe("card-to-pr gate_plan E2E (#185)", () => {
       runStateMachine({
         provider: { complete: () => Effect.succeed(resp("{}")) },
         providerRegistry,
+        scriptRegistry,
         repository: repo.repo,
       })(skill, routine, event, "exec1", startContext())
     );
@@ -213,6 +219,8 @@ describe("card-to-pr gate_plan E2E (#185)", () => {
     const implCall = queueResponder([implementacaoOutput]);
     let claudeCliCalls = 0;
     let archJudgeCalls = 0;
+    const scriptRegistry = makeScriptRegistry();
+    registerCardToPrHandlers(scriptRegistry, makeDeps());
     const providerRegistry: ProviderRegistry = {
       resolve: (name) => {
         const key = String(name);
@@ -236,6 +244,7 @@ describe("card-to-pr gate_plan E2E (#185)", () => {
       runStateMachine({
         provider: { complete: () => Effect.succeed(resp("{}")) },
         providerRegistry,
+        scriptRegistry,
         repository: makeRepo().repo,
       })(skill, routine, event, "exec1", startContext())
     );
