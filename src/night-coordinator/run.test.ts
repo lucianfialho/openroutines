@@ -831,8 +831,10 @@ describe("runNightCycle — F-block: feedback + Blocked para card com repo não 
     expect(comment.mock.calls[0][0]).toBe("a-unresolvable");
     expect(comment.mock.calls[0][1]).toContain("Não consegui identificar o repositório");
     expect(comment.mock.calls[0][1]).toContain("Repositórios conhecidos:");
-    expect(moveTo).toHaveBeenCalledTimes(1);
+    // the claimed card also gets a best-effort moveTo("working") — count only the blocked moves
+    expect(moveTo.mock.calls.filter((c) => c[1] === "blocked")).toHaveLength(1);
     expect(moveTo).toHaveBeenCalledWith("a-unresolvable", "blocked");
+    expect(moveTo).toHaveBeenCalledWith("b-widgets", "working");
     expect(summary.cardsBlockedUnresolvable).toBe(1);
     expect(summary.cardsEnqueued).toBe(1); // o card resolvível seguiu normalmente
   });

@@ -62,7 +62,7 @@ ela só distingue os cards do sistema nas colunas compartilhadas com o time
 
 ## O que acontece depois de mover o card
 
-1. **Triagem** (cron a cada 30min, 8h–23h): um LLM (Sonnet, via CLI logado)
+1. **Triagem** (em até ~5min depois de mover o card — poller de 5min, com o cron de 30min como backstop, 8h–23h): um LLM (Sonnet, via CLI logado)
    lê o card e comenta `🤖 [Triagem]` com repositório, tipo, complexidade,
    interpretação, critérios de aceite e perguntas em aberto — preenchendo os
    custom fields `Complexidade`/`Prioridade` que estiverem em branco (valor

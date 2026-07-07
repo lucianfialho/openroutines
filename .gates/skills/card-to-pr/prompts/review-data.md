@@ -51,7 +51,7 @@ remova o gap (não o repita); se não convencer, mantenha-o.
 <contestacao_refutacao baixa_confianca="true">
 {{outputs.refutation}}
 </contestacao_refutacao>
-(placeholder acima sem substituição = ainda não passou por refutação nesta execução; avalie normalmente)
+(bloco acima vazio = ainda não passou por refutação nesta execução; avalie normalmente)
 
 ## Saída
 Emita APENAS um JSON válido, sem texto fora dele:

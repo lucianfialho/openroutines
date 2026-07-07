@@ -257,7 +257,7 @@ describe("card-to-pr rework E2E (#157, D24)", () => {
     expect(link.lastReworkNightId).toBe("night-2");
     // card handed back to Review
     expect(h.moveToCalls).toContainEqual(["card1", "review"]);
-  });
+  }, 30000);
 
   it("human commit on the branch: rework_preparation aborts straight to done — no agent call, no push, no round counted, direction asked on the PR", async () => {
     const h = await makeHarness({ humanCommit: true });

@@ -194,7 +194,7 @@ const makeHarness = (opts: HarnessOpts) => {
   const prLinks = makeInMemoryPrLinkRepository();
 
   const deps: CardToPrDeps = {
-    pool: {} as unknown as Pool,
+    pool: { query: async () => ({ rows: [] }) } as unknown as Pool, // baseline stubbed; blocked releases the claim here
     registry,
     githubToken: "gh_test",
     worktreeBase: `/tmp/or-sec-e2e-wt-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

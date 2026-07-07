@@ -145,6 +145,27 @@ export const resolveRepoForClaim =
     return { ok: false, reason: "unresolved" };
   };
 
+/**
+ * Best-effort board mirror of a claim: the card moves to the dedicated Working
+ * list so a claimed card is distinguishable from one still waiting. Cosmetic —
+ * a failure never aborts the night (the claim itself lives in `tasks`).
+ */
+const markCardWorking = async (deps: RunNightCycleDeps, sourceId: string, taskId: string): Promise<void> => {
+  try {
+    const ts = deps.taskSourceFor?.(sourceId);
+    if (ts) await Effect.runPromise(ts.moveTo(taskId, "working"));
+    await deps.pool.query(`UPDATE tasks SET state = 'working' WHERE source_id = $1 AND task_id = $2`, [
+      sourceId,
+      taskId,
+    ]);
+  } catch (err) {
+    console.error(
+      `[NightCoordinator] move-to-working failed for ${sourceId}/${taskId}:`,
+      err instanceof Error ? err.message : err
+    );
+  }
+};
+
 const getBusyRepos = async (pool: Pool, nightId: string): Promise<Set<string>> => {
   // Any NON-TERMINAL execution occupies its repo (same-repo-in-series). A card
   // just claimed+enqueued this cycle is 'pending' until a worker starts it, so
@@ -507,6 +528,7 @@ const admitSteeredBlockedCards = async (
       },
     });
     if (steering.id) await deps.cardSteering.markApplied(steering.id, RESUME_BLOCKED_EFFECT);
+    await markCardWorking(deps, steering.sourceId, steering.taskId);
     resumed++;
   }
   return resumed;
@@ -713,6 +735,7 @@ export const runNightCycle = async (deps: RunNightCycleDeps): Promise<NightSumma
           },
         });
         cardsEnqueued++;
+        await markCardWorking(deps, card.sourceId, card.taskId);
       }
     }
 

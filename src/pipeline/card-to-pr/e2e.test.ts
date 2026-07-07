@@ -113,7 +113,7 @@ describe("card-to-pr E2E (#146, #153)", () => {
     const prLinks = makeInMemoryPrLinkRepository();
 
     const deps: CardToPrDeps = {
-      pool: {} as unknown as Pool, // never touched: getBaseline is stubbed below
+      pool: { query: async () => ({ rows: [] }) } as unknown as Pool, // baseline stubbed; blocked releases the claim here
       registry,
       githubToken: "gh_test",
       worktreeBase: "/tmp/or-e2e-worktrees",
@@ -278,7 +278,7 @@ describe("card-to-pr E2E (#146, #153)", () => {
     } as unknown as TaskSource;
 
     const deps: CardToPrDeps = {
-      pool: {} as unknown as Pool, // never touched: getBaseline is stubbed below
+      pool: { query: async () => ({ rows: [] }) } as unknown as Pool, // baseline stubbed; blocked releases the claim here
       registry,
       githubToken: "gh_test",
       worktreeBase: `/tmp/or-e2e-esc-wt-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

@@ -87,6 +87,16 @@ export const makeBlocked = (deps: CardToPrDeps): ScriptHandler => async (ctx) =>
         await Effect.runPromise(ts.moveTo(taskId, "blocked"));
         await Effect.runPromise(ts.comment(taskId, blockedBody(blockReason)));
       }
+      // Release the night claim and mirror Blocked in `tasks`: claimReadyCards
+      // only picks rows with claimed_by_night_id IS NULL, and taskRepo.save
+      // never touches that column — without this, a card the human drags back
+      // to the queue would never be claimed by any future night.
+      if (deps.pool) {
+        await deps.pool.query(
+          `UPDATE tasks SET state = 'blocked', claimed_by_night_id = NULL WHERE source_id = $1 AND task_id = $2`,
+          [sourceId, taskId]
+        );
+      }
       return {};
     }
   );
