@@ -18,7 +18,7 @@ import { renderTemplate, type TemplateContext } from "./template.js";
 import { extractOutput } from "./output.js";
 import { evaluateCondition } from "./condition.js";
 import { validate, type JsonSchema } from "./schema-validate.js";
-import { readFileSync } from "fs";
+import { readFileSync, mkdirSync } from "fs";
 
 export interface StateMachineConfig {
   provider: {
@@ -193,7 +193,7 @@ export const runStateMachine = (
         if (worktreePath && !state.output_path) {
           const outputDir = `${worktreePath}/.gates/outputs/${executionId}`;
           try {
-            require("fs").mkdirSync(outputDir, { recursive: true });
+            mkdirSync(outputDir, { recursive: true });
           } catch {
             // ignore
           }

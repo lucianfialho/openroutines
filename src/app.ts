@@ -6,7 +6,7 @@
  * (PostgreSQL + BullMQ) configurations via environment variables.
  */
 
-import { readdirSync, readFileSync, existsSync, writeFileSync } from "fs";
+import { readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import express from "express";
 import { Effect } from "effect";
@@ -562,7 +562,6 @@ export const goodbye = () => "bye";;
         writeFileSync(flatYml, content, "utf-8");
       } else {
         // Create new skill in nested directory
-        const { mkdirSync } = require("fs");
         if (!existsSync(dirPath)) mkdirSync(dirPath, { recursive: true });
         writeFileSync(yamlInDir, content, "utf-8");
       }
